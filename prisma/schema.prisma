@@ -1,0 +1,403 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum BusinessRole {
+  BUSINESS_OWNER
+  MANAGER
+  STAFF
+}
+
+enum PlatformRole {
+  PLATFORM_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+  REMOVED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum LeadSource {
+  MANUAL
+  WHATSAPP
+  WEBSITE
+  REFERRAL
+  INSTAGRAM
+  FACEBOOK
+  OTHER
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  INTERESTED
+  QUALIFIED
+  APPOINTMENT_SCHEDULED
+  WON
+  LOST
+}
+
+enum LeadActivityAction {
+  LEAD_CREATED
+  LEAD_UPDATED
+  LEAD_ASSIGNED
+  LEAD_STATUS_CHANGED
+  LEAD_NOTE_UPDATED
+  LEAD_DELETED
+}
+
+enum BusinessStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_SETUP
+}
+
+enum PlanCode {
+  BASIC
+  PLUS
+  PREMIUM
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum AuthTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum AuditAction {
+  USER_REGISTERED
+  BUSINESS_CREATED
+  EMAIL_VERIFICATION_SENT
+  EMAIL_VERIFIED
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  SUBSCRIPTION_CREATED
+  PLAN_ASSIGNED
+  USER_LOGOUT
+  PLAN_LIMIT_REACHED
+  PLAN_UPGRADE_REQUIRED
+  PLAN_CHANGED_PLACEHOLDER
+  USAGE_RECORD_UPDATED
+  STAFF_INVITED
+  STAFF_INVITATION_ACCEPTED
+  LEAD_CREATED
+  LEAD_UPDATED
+  LEAD_ASSIGNED
+  LEAD_STATUS_CHANGED
+  LEAD_DELETED
+}
+
+model User {
+  id            String    @id @default(cuid())
+  firstName     String
+  lastName      String
+  email         String    @unique
+  passwordHash  String
+  emailVerified Boolean   @default(false)
+  status        UserStatus @default(ACTIVE)
+  platformRole  PlatformRole?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  ownedBusinesses Business[] @relation("BusinessOwner")
+  ownedBusinessAccounts BusinessAccount[] @relation("BusinessAccountOwner")
+  memberships     BusinessMember[] @relation("MemberUser")
+  invitedMembers  BusinessMember[] @relation("MemberInviter")
+  sentInvitations BusinessInvitation[] @relation("InvitationInviter")
+  authTokens    AuthToken[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+  createdLeads  Lead[]         @relation("LeadCreator")
+  leadActivities LeadActivity[] @relation("LeadActivityActor")
+
+}
+
+model BusinessAccount {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner         User                 @relation("BusinessAccountOwner", fields: [ownerId], references: [id])
+  businesses    Business[]
+  subscriptions Subscription[]
+  usageRecords  AccountUsageRecord[]
+
+  @@index([ownerId])
+}
+
+model Business {
+  id        String         @id @default(cuid())
+  businessAccountId String
+  name      String
+  industry  String
+  slug      String         @unique
+  ownerId   String
+  email     String
+  phone     String?
+  status    BusinessStatus @default(PENDING_SETUP)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  deletedAt DateTime?
+
+  owner         User             @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members       BusinessMember[]
+  invitations   BusinessInvitation[]
+  usageRecords  BusinessUsageRecord[]
+  auditLogs     AuditLog[]
+  leads         Lead[]
+  leadActivities LeadActivity[]
+
+  @@index([ownerId])
+  @@index([businessAccountId])
+}
+
+model BusinessMember {
+  id          String           @id @default(cuid())
+  businessId  String
+  userId      String
+  role        BusinessRole
+  status      MembershipStatus @default(ACTIVE)
+  joinedAt    DateTime?
+  invitedById String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user      User      @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy User?     @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads Lead[] @relation("LeadAssignee")
+
+  @@unique([businessId, userId])
+  @@index([userId])
+  @@index([businessId, status])
+  @@index([invitedById])
+}
+
+model BusinessInvitation {
+  id          String           @id @default(cuid())
+  businessId  String
+  email       String
+  role        BusinessRole
+  status      InvitationStatus @default(PENDING)
+  tokenHash   String           @unique
+  expiresAt   DateTime
+  invitedById String
+  acceptedAt  DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  invitedBy User     @relation("InvitationInviter", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([businessId, status])
+  @@index([email, status])
+}
+
+model Plan {
+  id                         String   @id @default(cuid())
+  name                       String
+  code                       PlanCode @unique
+  priceMonthly               Decimal  @db.Decimal(10, 2)
+  currency                   String   @default("GHS")
+  maxStaff                   Int?
+  maxServices                Int?
+  maxAppointmentsPerMonth    Int?
+  maxConversationsPerMonth   Int?
+  maxAiRepliesPerMonth       Int?
+  maxKnowledgeItems          Int?
+  maxBusinesses              Int?
+  allowAnalytics             Boolean  @default(false)
+  allowRemoveBranding        Boolean  @default(false)
+  allowPrioritySupport       Boolean  @default(false)
+  isActive                   Boolean  @default(true)
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  businessAccountId  String
+  planId             String
+  status             SubscriptionStatus @default(TRIALING)
+  startsAt           DateTime           @default(now())
+  trialEndsAt        DateTime?
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  cancelledAt        DateTime?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  plan         Plan          @relation(fields: [planId], references: [id])
+  usageRecords AccountUsageRecord[]
+
+  @@index([businessAccountId, status])
+}
+
+model AccountUsageRecord {
+  id                  String   @id @default(cuid())
+  businessAccountId   String
+  subscriptionId      String
+  businessesCount     Int      @default(1)
+  conversationsUsed   Int      @default(0)
+  aiRepliesUsed       Int      @default(0)
+  staffCount          Int      @default(1)
+  servicesCount       Int      @default(0)
+  appointmentsUsed    Int      @default(0)
+  knowledgeItemsCount Int      @default(0)
+  periodStart         DateTime
+  periodEnd           DateTime
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, periodStart])
+  @@index([businessAccountId, periodStart])
+}
+
+model BusinessUsageRecord {
+  id                String   @id @default(cuid())
+  businessId        String
+  conversationsUsed Int      @default(0)
+  aiRepliesUsed     Int      @default(0)
+  appointmentsUsed  Int      @default(0)
+  leadsCreated      Int      @default(0)
+  periodStart       DateTime
+  periodEnd         DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, periodStart])
+  @@index([businessId, periodStart])
+}
+
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  type      AuthTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  businessId String?
+  userId     String?
+  action     AuditAction
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  business Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model Lead {
+  id              String     @id @default(cuid())
+  businessId      String
+  fullName        String
+  phone           String
+  email           String?
+  source          LeadSource
+  status          LeadStatus @default(NEW)
+  assignedStaffId String?
+  notes           String?
+  tags            String[]   @default([])
+  customFields    Json?
+  lastContactedAt DateTime?
+  createdById     String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  deletedAt       DateTime?
+
+  business      Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  assignedStaff BusinessMember? @relation("LeadAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  createdBy     User?           @relation("LeadCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  activities    LeadActivity[]
+
+  @@index([businessId])
+  @@index([businessId, phone])
+  @@index([businessId, status])
+  @@index([businessId, source])
+  @@index([businessId, assignedStaffId])
+  @@index([businessId, createdAt])
+  @@index([businessId, deletedAt])
+}
+
+model LeadActivity {
+  id          String             @id @default(cuid())
+  businessId  String
+  leadId      String
+  actorUserId String?
+  action      LeadActivityAction
+  metadata    Json?
+  createdAt   DateTime           @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  actor    User?    @relation("LeadActivityActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, leadId, createdAt])
+  @@index([actorUserId, createdAt])
+}
