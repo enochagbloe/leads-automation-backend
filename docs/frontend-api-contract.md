@@ -545,6 +545,11 @@ Important codes:
 | 409 | `DUPLICATE_LEAD` | Show existing-phone lead error |
 | 422 | `INVALID_LEAD_ASSIGNEE` | Refresh staff options and show assignment error |
 | 404 | `LEAD_NOT_FOUND` | Show lead not found |
+| 404 | `CONVERSATION_NOT_FOUND` | Show conversation not found |
+| 409 | `CONVERSATION_ALREADY_EXISTS` | Open the existing active conversation |
+| 422 | `INVALID_CONVERSATION_ASSIGNEE` | Refresh staff options and show assignment error |
+| 422 | `INVALID_CONVERSATION_STATUS` | Refresh conversation and show status error |
+| 500 | `MESSAGE_CREATE_FAILED` | Keep draft and allow retry |
 | 422 | `VALIDATION_ERROR` | Map `error.details` to form fields |
 | 429 | `RATE_LIMITED` | Disable retry temporarily |
 | 501 | `NOT_IMPLEMENTED` | Hide or disable unfinished action |
@@ -598,12 +603,31 @@ Build:
 - Public plan comparison
 - Role/permission-aware navigation
 
+## Conversation endpoints
+
+All conversation endpoints are business-scoped and role-filtered.
+
+```text
+POST   /conversations
+GET    /conversations
+GET    /conversations/stats
+GET    /conversations/:id?messageLimit=50&beforeMessageId=
+POST   /conversations/:id/messages
+PATCH  /conversations/:id
+PATCH  /conversations/:id/assign
+PATCH  /conversations/:id/status
+PATCH  /conversations/:id/read
+DELETE /conversations/:id
+```
+
+See `docs/frontend-sprint3-module2.md` for the complete inbox contract.
+
 Do not build yet:
 
 - WhatsApp integration
 - AI configuration
 - Leads
 - Appointments
-- Conversations
+- Real-time conversation sockets
 - Staff invitation flow
 - Functional plan checkout/change-plan

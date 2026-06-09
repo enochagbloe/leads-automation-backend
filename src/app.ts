@@ -9,6 +9,7 @@ import { subscriptionController } from "./controllers/subscription.controller";
 import { businessRouter } from "./routes/business.routes";
 import { leadRouter } from "./routes/lead.routes";
 import { prisma } from "./config/prisma";
+import { conversationRouter } from "./routes/conversation.routes";
 
 export const app = express();
 
@@ -26,6 +27,7 @@ app.get("/api", (_req, res) => res.json({
     auth: "/api/auth",
     businesses: "/api/businesses",
     leads: "/api/leads",
+    conversations: "/api/conversations",
     plans: "/api/plans",
     subscription: "/api/subscription",
   },
@@ -44,6 +46,7 @@ app.get("/api/plans", subscriptionController.plans);
 app.use("/api/auth", authRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/leads", leadRouter);
+app.use("/api/conversations", conversationRouter);
 app.use("/api/subscription", subscriptionRouter);
 
 app.use(notFound);

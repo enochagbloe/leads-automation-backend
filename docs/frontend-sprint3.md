@@ -165,3 +165,7 @@ The backend is the final authorization source. Do not assume hiding a button pro
 - Conversations and messages
 - Lead merging/import
 - Payment integration
+
+## Module 2
+
+Conversation and stored-message frontend contracts are documented in `docs/frontend-sprint3-module2.md`.

@@ -63,6 +63,68 @@ enum LeadActivityAction {
   LEAD_STATUS_CHANGED
   LEAD_NOTE_UPDATED
   LEAD_DELETED
+  CONVERSATION_CREATED
+  CONVERSATION_ASSIGNED
+  CONVERSATION_STATUS_CHANGED
+  CONVERSATION_DELETED
+  MESSAGE_CREATED
+  CONVERSATION_MARKED_READ
+}
+
+enum ConversationChannel {
+  MANUAL
+  WHATSAPP
+  OTHER
+  INSTAGRAM
+  FACEBOOK
+  WEBSITE_CHAT
+  EMAIL
+}
+
+enum ConversationStatus {
+  OPEN
+  AI_HANDLING
+  HUMAN_HANDLING
+  CLOSED
+}
+
+enum ConversationPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum MessageSenderType {
+  CUSTOMER
+  STAFF
+  AI
+  SYSTEM
+}
+
+enum MessageType {
+  TEXT
+  SYSTEM
+  IMAGE
+  DOCUMENT
+  AUDIO
+  VIDEO
+  LOCATION
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL
+}
+
+enum MessageDeliveryStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  INTERNAL
 }
 
 enum BusinessStatus {
@@ -113,6 +175,14 @@ enum AuditAction {
   LEAD_ASSIGNED
   LEAD_STATUS_CHANGED
   LEAD_DELETED
+  CONVERSATION_CREATED
+  CONVERSATION_ASSIGNED
+  CONVERSATION_STATUS_CHANGED
+  CONVERSATION_DELETED
+  MESSAGE_CREATED
+  CONVERSATION_MARKED_READ
+  CONVERSATION_READ_FAILED
+  MESSAGE_CREATE_FAILED
 }
 
 model User {
@@ -138,6 +208,7 @@ model User {
   auditLogs     AuditLog[]
   createdLeads  Lead[]         @relation("LeadCreator")
   leadActivities LeadActivity[] @relation("LeadActivityActor")
+  sentMessages Message[] @relation("MessageSender")
 
 }
 
@@ -178,6 +249,8 @@ model Business {
   auditLogs     AuditLog[]
   leads         Lead[]
   leadActivities LeadActivity[]
+  conversations Conversation[]
+  messages Message[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -198,6 +271,7 @@ model BusinessMember {
   user      User      @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
   invitedBy User?     @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
   assignedLeads Lead[] @relation("LeadAssignee")
+  assignedConversations Conversation[] @relation("ConversationAssignee")
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -375,6 +449,8 @@ model Lead {
   assignedStaff BusinessMember? @relation("LeadAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
   createdBy     User?           @relation("LeadCreator", fields: [createdById], references: [id], onDelete: SetNull)
   activities    LeadActivity[]
+  conversations Conversation[]
+  messages      Message[]
 
   @@index([businessId])
   @@index([businessId, phone])
@@ -400,4 +476,72 @@ model LeadActivity {
 
   @@index([businessId, leadId, createdAt])
   @@index([actorUserId, createdAt])
+}
+
+model Conversation {
+  id                 String             @id @default(cuid())
+  displayId          String             @unique @default(dbgenerated())
+  businessId         String
+  leadId             String
+  assignedStaffId    String?
+  channel            ConversationChannel
+  status             ConversationStatus @default(OPEN)
+  subject            String?
+  priority           ConversationPriority @default(NORMAL)
+  pinned             Boolean            @default(false)
+  lastMessagePreview String?
+  lastMessageAt      DateTime?
+  unreadCount        Int                @default(0)
+  aiEnabled          Boolean            @default(false)
+  humanTakeover      Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  closedAt           DateTime?
+  deletedAt          DateTime?
+
+  business      Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead          Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignedStaff BusinessMember? @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  messages      Message[]
+
+  @@index([businessId])
+  @@index([businessId, leadId])
+  @@index([businessId, assignedStaffId])
+  @@index([businessId, status])
+  @@index([businessId, priority])
+  @@index([businessId, pinned])
+  @@index([businessId, channel])
+  @@index([businessId, lastMessageAt])
+  @@index([businessId, deletedAt])
+}
+
+model Message {
+  id             String                @id @default(cuid())
+  businessId     String
+  conversationId String
+  leadId         String
+  senderType     MessageSenderType
+  senderUserId   String?
+  content        String
+  messageType    MessageType
+  direction      MessageDirection
+  deliveryStatus MessageDeliveryStatus
+  metadata       Json?
+  readAt         DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  deletedAt      DateTime?
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  senderUser   User?        @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  @@index([businessId])
+  @@index([conversationId])
+  @@index([businessId, conversationId])
+  @@index([businessId, leadId])
+  @@index([createdAt])
+  @@index([senderType])
+  @@index([deliveryStatus])
 }
