@@ -97,6 +97,16 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | PATCH | `/api/leads/:id/assign` | Owner/manager |
 | PATCH | `/api/leads/:id/status` | Role-scoped |
 | DELETE | `/api/leads/:id` | Owner/manager, soft delete |
+| POST | `/api/conversations` | Business member, role-scoped |
+| GET | `/api/conversations` | Business member, role-scoped |
+| GET | `/api/conversations/stats` | Business member, role-scoped |
+| GET | `/api/conversations/:id` | Business member, role-scoped |
+| POST | `/api/conversations/:id/messages` | Business member, role-scoped |
+| PATCH | `/api/conversations/:id` | Business member, role-scoped workspace update |
+| PATCH | `/api/conversations/:id/assign` | Owner/manager |
+| PATCH | `/api/conversations/:id/status` | Business member, role-scoped |
+| PATCH | `/api/conversations/:id/read` | Business member, role-scoped |
+| DELETE | `/api/conversations/:id` | Owner/manager, soft delete |
 | GET | `/api/health` | Public |
 
 Frontend handoffs use `docs/frontend-sprint[number].md` for every sprint:

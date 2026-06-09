@@ -188,7 +188,7 @@ export const subscriptionService = {
     const current = usage[usageKey];
     const updated = await prisma.accountUsageRecord.update({
       where: { id: usage.id },
-      data: { [usageKey]: Math.max(0, current + delta) },
+      data: { [usageKey]: delta > 0 ? { increment: delta } : Math.max(0, current + delta) },
     });
     await auditService.log({
       action: AuditAction.USAGE_RECORD_UPDATED,
@@ -204,7 +204,7 @@ export const subscriptionService = {
     if (!usage) throw new AppError(500, "Current business usage record is unavailable");
     return prisma.businessUsageRecord.update({
       where: { id: usage.id },
-      data: { [usageKey]: Math.max(0, usage[usageKey] + delta) },
+      data: { [usageKey]: delta > 0 ? { increment: delta } : Math.max(0, usage[usageKey] + delta) },
     });
   },
 };

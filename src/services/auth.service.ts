@@ -32,9 +32,9 @@ async function getUserBusinessContext(userId: string) {
 
 function permissionList(role?: BusinessRole | PlatformRole) {
   if (role === PlatformRole.PLATFORM_ADMIN) return ["platform:admin"];
-  if (role === BusinessRole.BUSINESS_OWNER) return ["business:manage", "subscription:manage", "members:manage", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete"];
-  if (role === BusinessRole.MANAGER) return ["business:manage", "members:view", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete"];
-  if (role === BusinessRole.STAFF) return ["business:view", "leads:view_assigned", "leads:create", "leads:update_assigned"];
+  if (role === BusinessRole.BUSINESS_OWNER) return ["business:manage", "subscription:manage", "members:manage", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
+  if (role === BusinessRole.MANAGER) return ["business:manage", "members:view", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
+  if (role === BusinessRole.STAFF) return ["business:view", "leads:view_assigned", "leads:create", "leads:update_assigned", "conversations:view_assigned", "conversations:create_assigned", "conversations:send_assigned", "conversations:update_status_assigned"];
   return [];
 }
 
