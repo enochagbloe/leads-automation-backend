@@ -123,6 +123,16 @@ interface LeadListResponse {
 
 The backend is the final authorization source. Do not assume hiding a button provides security.
 
+## Manual lead assignment
+
+When `POST /leads` creates a `MANUAL` lead without `assignedStaffId`, the backend assigns it to the creator's active `BusinessMember.id`. Explicit valid assignments override this default. Leads from WhatsApp, website, referral, Instagram, Facebook, or other automated sources may remain unassigned.
+
+Assignee selectors must submit `BusinessMember.id`, not `User.id`. Active owners, managers, and staff are valid assignees.
+
+`PATCH /leads/:id/assign` is available to owners and managers and accepts an active `BusinessMember.id` or `null` to clear assignment. Staff assignment attempts return `FORBIDDEN` with `You do not have permission to assign or reassign leads.` Assignment timeline metadata includes the previous/new membership IDs, assigning user and membership IDs, and `reason: "manual_reassignment"`.
+
+Assignment must be changed through `/leads/:id/assign`; generic lead updates reject `assignedStaffId` with `INVALID_ASSIGNMENT_UPDATE`.
+
 ## Screens to build
 
 - Lead list with search, pagination, filters, and sorting.
