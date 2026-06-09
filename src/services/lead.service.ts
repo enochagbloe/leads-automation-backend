@@ -63,10 +63,10 @@ async function validateAssignee(businessId: string, assignedStaffId: string | nu
       id: assignedStaffId,
       businessId,
       status: MembershipStatus.ACTIVE,
-      role: { in: [BusinessRole.MANAGER, BusinessRole.STAFF] },
+      role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER, BusinessRole.STAFF] },
     },
   });
-  if (!member) throw new AppError(422, "Assigned staff member must be active and belong to this business", "INVALID_LEAD_ASSIGNEE");
+  if (!member) throw new AppError(422, "Selected assignee is not an active member of this business.", "INVALID_LEAD_ASSIGNEE");
 }
 
 async function invalidateLeadCache(businessId: string, leadId?: string) {
@@ -99,8 +99,9 @@ async function logAudit(
 
 export const leadService = {
   async create(actor: LeadActor, input: CreateLeadInput, context: Omit<AuditInput, "action">) {
-    const assignedStaffId = actor.role === BusinessRole.STAFF ? actor.membershipId : input.assignedStaffId;
-    await validateAssignee(actor.businessId, assignedStaffId);
+    const resolvedAssignedStaffId = input.assignedStaffId
+      ?? (input.source === "MANUAL" ? actor.membershipId : null);
+    await validateAssignee(actor.businessId, resolvedAssignedStaffId);
     if (await prisma.lead.findFirst({ where: { businessId: actor.businessId, phone: input.phone, deletedAt: null } })) {
       throw new AppError(409, "A lead with this phone number already exists for this business.", "DUPLICATE_LEAD");
     }
@@ -115,7 +116,7 @@ export const leadService = {
           email: input.email,
           source: input.source,
           status: input.status,
-          assignedStaffId,
+          assignedStaffId: resolvedAssignedStaffId,
           notes: input.notes,
           tags: input.tags ?? [],
           customFields: input.customFields === null ? Prisma.DbNull : input.customFields as Prisma.InputJsonValue | undefined,
@@ -128,7 +129,11 @@ export const leadService = {
           leadId: created.id,
           actorUserId: actor.userId,
           action: LeadActivityAction.LEAD_CREATED,
-          metadata: asJson({ source: created.source, status: created.status, assignedStaffId: created.assignedStaffId }),
+          metadata: asJson({
+            assignedStaffId: resolvedAssignedStaffId,
+            source: created.source,
+            createdById: actor.userId,
+          }),
         },
       });
       return created;
@@ -140,7 +145,11 @@ export const leadService = {
     });
     await Promise.all([
       invalidateLeadCache(actor.businessId, lead.id),
-      logAudit(actor, AuditAction.LEAD_CREATED, lead.id, context),
+      logAudit(actor, AuditAction.LEAD_CREATED, lead.id, context, {
+        assignedStaffId: resolvedAssignedStaffId,
+        source: lead.source,
+        createdById: actor.userId,
+      }),
       subscriptionService.updateBusinessUsage(actor.businessId, "leadsCreated", 1),
     ]);
     return lead;
@@ -203,6 +212,9 @@ export const leadService = {
   async update(actor: LeadActor, leadId: string, input: UpdateLeadInput, context: Omit<AuditInput, "action">) {
     const existing = await prisma.lead.findFirst({ where: { id: leadId, ...leadAccessWhere(actor) } });
     if (!existing) throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
+    if (input.assignedStaffId !== undefined) {
+      throw new AppError(422, "Use the lead assignment endpoint to change assignment.", "INVALID_ASSIGNMENT_UPDATE");
+    }
     if (actor.role === BusinessRole.STAFF) {
       const disallowed = Object.keys(input).filter((key) => !["status", "notes"].includes(key));
       if (disallowed.length) throw new AppError(403, "Staff can only update status and notes for assigned leads", "FORBIDDEN");
@@ -252,8 +264,45 @@ export const leadService = {
   },
 
   async assign(actor: LeadActor, leadId: string, assignedStaffId: string | null, context: Omit<AuditInput, "action">) {
-    if (actor.role === BusinessRole.STAFF) throw new AppError(403, "Staff cannot assign leads", "FORBIDDEN");
-    return this.update(actor, leadId, { assignedStaffId }, context);
+    if (actor.role === BusinessRole.STAFF) {
+      throw new AppError(403, "You do not have permission to assign or reassign leads.", "FORBIDDEN");
+    }
+    const existing = await prisma.lead.findFirst({ where: { id: leadId, businessId: actor.businessId, deletedAt: null } });
+    if (!existing) throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
+    await validateAssignee(actor.businessId, assignedStaffId);
+    if (existing.assignedStaffId === assignedStaffId) {
+      return prisma.lead.findUniqueOrThrow({ where: { id: leadId }, include: leadInclude });
+    }
+    const assignmentMetadata = {
+      previousAssignedStaffId: existing.assignedStaffId,
+      newAssignedStaffId: assignedStaffId,
+      assignedByUserId: actor.userId,
+      assignedByMembershipId: actor.membershipId,
+      reason: "manual_reassignment",
+    };
+    const updated = await prisma.$transaction(async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id: leadId },
+        data: { assignedStaffId },
+        include: leadInclude,
+      });
+      await tx.leadActivity.create({
+        data: {
+          businessId: actor.businessId,
+          leadId,
+          actorUserId: actor.userId,
+          action: LeadActivityAction.LEAD_ASSIGNED,
+          metadata: asJson(assignmentMetadata),
+        },
+      });
+      return lead;
+    });
+    await invalidateLeadCache(actor.businessId, leadId);
+    await logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, {
+      ...assignmentMetadata,
+      businessId: actor.businessId,
+    });
+    return updated;
   },
 
   async updateStatus(actor: LeadActor, leadId: string, status: LeadStatus, context: Omit<AuditInput, "action">) {

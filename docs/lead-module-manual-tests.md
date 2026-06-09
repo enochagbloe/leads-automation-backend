@@ -24,6 +24,19 @@ Send `Authorization` and `X-Business-Id` on every request.
 10. Read a cached list, create/update a lead, then confirm the next list reflects the change.
 11. Soft-delete a lead and confirm it no longer appears in list/detail/stats.
 12. Request a business A lead while scoped to business B and confirm `LEAD_NOT_FOUND`.
+13. Owner, manager, and staff manual leads without an assignee default to the creator's `BusinessMember.id`.
+14. An explicit active owner/manager/staff membership overrides the manual default.
+15. Non-manual leads without an assignee remain unassigned.
+16. Cross-business, disabled, removed, and missing memberships return `INVALID_LEAD_ASSIGNEE`.
+17. `LEAD_CREATED` activity and audit metadata contain `assignedStaffId`, `source`, and `createdById`.
+18. Owner assigns a lead to active staff, manager, and owner memberships.
+19. Manager assigns a lead to active staff, manager, and owner memberships.
+20. Staff assignment attempts return `FORBIDDEN` with the assignment-specific message.
+21. `LEAD_ASSIGNED` activity and audit metadata contain previous/new assignee plus assigning user and membership IDs.
+22. List and detail reflect the updated assignee after cache invalidation.
+23. Owner and manager assign an unassigned lead, reassign between staff, and clear assignment with `assignedStaffId: null`.
+24. Assignment history metadata contains `previousAssignedStaffId`, `newAssignedStaffId`, `assignedByUserId`, `assignedByMembershipId`, and `reason`.
+25. Generic `PATCH /leads/:id` cannot bypass assignment history using `assignedStaffId`.
 
 ## Cache behavior
 
