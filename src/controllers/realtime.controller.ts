@@ -2,6 +2,30 @@ import { BusinessRole } from "@prisma/client";
 import { RequestHandler } from "express";
 import { realtimeService } from "../services/realtime.service";
 
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function scheduleAt(timestamp: number, callback: () => void) {
+  let timer: NodeJS.Timeout | undefined;
+  let cancelled = false;
+
+  const scheduleNext = () => {
+    if (cancelled) return;
+    const remaining = timestamp - Date.now();
+    if (remaining <= 0) {
+      callback();
+      return;
+    }
+    timer = setTimeout(scheduleNext, Math.min(remaining, MAX_TIMEOUT_MS));
+    timer.unref();
+  };
+
+  scheduleNext();
+  return () => {
+    cancelled = true;
+    if (timer) clearTimeout(timer);
+  };
+}
+
 export const realtimeController = {
   events: ((req, res) => {
     res.status(200);
@@ -21,14 +45,13 @@ export const realtimeController = {
       role: req.auth!.role as BusinessRole,
       response: res,
     });
-    const expiryTimer = setTimeout(() => {
+    const cancelExpiryTimer = scheduleAt(req.auth!.accessTokenExpiresAt, () => {
       realtimeService.unsubscribe(client.id);
       res.end();
-    }, Math.max(0, req.auth!.accessTokenExpiresAt - Date.now()));
-    expiryTimer.unref();
+    });
 
     req.on("close", () => {
-      clearTimeout(expiryTimer);
+      cancelExpiryTimer();
       realtimeService.unsubscribe(client.id);
     });
   }) satisfies RequestHandler,
