@@ -20,6 +20,7 @@ const schema = z.object({
   RESEND_API_KEY: optionalString,
   EMAIL_FROM: z.string().min(1),
   WHATSAPP_PROVIDER_MODE: z.enum(["mock", "live"]).default("mock"),
+  MOCK_WHATSAPP_FORCE_FAILURE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   ENABLE_DEV_TOOLS: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   META_WHATSAPP_ACCESS_TOKEN: optionalString,
   META_WHATSAPP_PHONE_NUMBER_ID: optionalString,

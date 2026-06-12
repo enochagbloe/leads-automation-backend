@@ -34,6 +34,8 @@ services:
         value: mock
       - key: ENABLE_DEV_TOOLS
         value: "false"
+      - key: MOCK_WHATSAPP_FORCE_FAILURE
+        value: "false"
       - key: META_WHATSAPP_ACCESS_TOKEN
         sync: false
       - key: META_WHATSAPP_PHONE_NUMBER_ID

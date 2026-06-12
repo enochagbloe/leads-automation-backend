@@ -20,12 +20,18 @@ function conversationId(req: Request) {
   return Array.isArray(value) ? value[0]! : value!;
 }
 
+function messageId(req: Request) {
+  const value = req.params.messageId;
+  return Array.isArray(value) ? value[0]! : value!;
+}
+
 export const conversationController = {
   create: async (req, res) => res.status(201).json(await conversationService.create(actor(req), req.body, requestMetadata(req))),
   list: async (req, res) => res.json(await conversationService.list(actor(req), res.locals.validatedQuery as ConversationListQuery)),
   stats: async (req, res) => res.json(await conversationService.stats(actor(req))),
   detail: async (req, res) => res.json(await conversationService.detail(actor(req), conversationId(req), res.locals.validatedQuery as ConversationDetailQuery)),
   message: async (req, res) => res.status(201).json(await messageService.createStaffMessage(actor(req), conversationId(req), req.body, requestMetadata(req))),
+  retryMessage: async (req, res) => res.json(await messageService.retryWhatsAppMessage(actor(req), conversationId(req), messageId(req), requestMetadata(req))),
   updateWorkspace: async (req, res) => res.json(await conversationService.updateWorkspace(actor(req), conversationId(req), req.body)),
   assign: async (req, res) => res.json(await conversationService.assign(actor(req), conversationId(req), req.body.assignedStaffId, requestMetadata(req))),
   updateStatus: async (req, res) => res.json(await conversationService.updateStatus(actor(req), conversationId(req), req.body.status, requestMetadata(req))),

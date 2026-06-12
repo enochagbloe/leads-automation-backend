@@ -106,6 +106,7 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | GET | `/api/conversations/stats` | Business member, role-scoped |
 | GET | `/api/conversations/:id` | Business member, role-scoped |
 | POST | `/api/conversations/:id/messages` | Business member, role-scoped |
+| POST | `/api/conversations/:id/messages/:messageId/retry` | Business member, role-scoped |
 | PATCH | `/api/conversations/:id` | Business member, role-scoped workspace update |
 | PATCH | `/api/conversations/:id/assign` | Owner/manager |
 | PATCH | `/api/conversations/:id/status` | Business member, role-scoped |
