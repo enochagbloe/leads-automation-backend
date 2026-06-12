@@ -12,6 +12,7 @@ import {
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
+import { encryptCredential } from "../utils/credential-encryption";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
@@ -51,6 +52,14 @@ function isConnected(integration?: WhatsAppIntegration | null) {
   return Boolean(integration && CONNECTED_STATUSES.includes(integration.status));
 }
 
+function canSendMessages(integration?: WhatsAppIntegration | null) {
+  if (!integration || !isConnected(integration)) return false;
+  if (integration.provider === WhatsAppProvider.MOCK_WHATSAPP || integration.status === WhatsAppIntegrationStatus.MOCK_CONNECTED) {
+    return env.WHATSAPP_PROVIDER_MODE === "mock";
+  }
+  return Boolean(integration.accessTokenEncrypted);
+}
+
 function safeStatus(integration?: WhatsAppIntegration | null) {
   if (!integration) return { status: WhatsAppIntegrationStatus.NOT_CONNECTED, automationEnabled: false, canSendMessages: false };
   const connected = isConnected(integration);
@@ -63,19 +72,11 @@ function safeStatus(integration?: WhatsAppIntegration | null) {
     connectedAt: integration.connectedAt,
     deactivatedAt: integration.deactivatedAt ?? integration.disconnectedAt,
     automationEnabled: connected && integration.automationEnabled,
-    canSendMessages: connected,
+    canSendMessages: canSendMessages(integration),
     lastHealthCheckAt: integration.lastHealthCheckAt,
     lastErrorCode: integration.lastErrorCode,
     lastErrorMessage: integration.lastErrorMessage,
   };
-}
-
-function encryptToken(token: string) {
-  const iv = crypto.randomBytes(12);
-  const key = crypto.createHash("sha256").update(env.JWT_REFRESH_SECRET).digest();
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
-  return `v1:${iv.toString("base64")}:${cipher.getAuthTag().toString("base64")}:${encrypted.toString("base64")}`;
 }
 
 async function currentIntegration(businessId: string) {
@@ -136,6 +137,58 @@ async function ensureCanConnect(actor: WhatsAppConnectionActor) {
   }
 }
 
+type MetaPhoneDetails = {
+  id?: string;
+  display_phone_number?: string;
+  verified_name?: string;
+  error?: { message?: string; code?: number };
+};
+
+type MetaPhoneList = {
+  data?: Array<{ id?: string }>;
+  error?: { message?: string; code?: number };
+};
+
+async function metaGet<T>(path: string, accessToken: string) {
+  try {
+    const response = await fetch(`https://graph.facebook.com/${env.META_API_VERSION}/${path}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => null) as T | null;
+    if (!response.ok || !body) {
+      const providerError = body as { error?: { message?: string; code?: number } } | null;
+      throw new AppError(422, "Meta could not verify ownership of this WhatsApp number.", "WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED", {
+        providerCode: providerError?.error?.code,
+      });
+    }
+    return body;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(503, "Meta ownership verification is temporarily unavailable.", "WHATSAPP_PROVIDER_UNAVAILABLE");
+  }
+}
+
+async function verifyMetaOwnership(input: { phoneNumberId: string; wabaId?: string; accessToken: string }) {
+  const phone = await metaGet<MetaPhoneDetails>(
+    `${encodeURIComponent(input.phoneNumberId)}?fields=id,display_phone_number,verified_name`,
+    input.accessToken,
+  );
+  if (phone.id !== input.phoneNumberId) {
+    throw new AppError(422, "Meta could not verify ownership of this WhatsApp number.", "WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED");
+  }
+  if (input.wabaId) {
+    const phoneNumbers = await metaGet<MetaPhoneList>(
+      `${encodeURIComponent(input.wabaId)}/phone_numbers?fields=id&limit=100`,
+      input.accessToken,
+    );
+    if (!phoneNumbers.data?.some((number) => number.id === input.phoneNumberId)) {
+      throw new AppError(422, "The WhatsApp number does not belong to the supplied WhatsApp Business Account.", "WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED");
+    }
+  }
+  return phone;
+}
+
 export const whatsappConnectionService = {
   async status(actor: WhatsAppConnectionActor) {
     const key = `business:${actor.businessId}:whatsapp:status`;
@@ -153,6 +206,9 @@ export const whatsappConnectionService = {
   ) {
     await ensureCanConnect(actor);
     const mock = input.provider === "MOCK_WHATSAPP";
+    if (mock && env.WHATSAPP_PROVIDER_MODE === "live") {
+      throw new AppError(409, "Mock WhatsApp connections are disabled in live provider mode.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+    }
     if (!mock && env.WHATSAPP_PROVIDER_MODE !== "live") {
       throw new AppError(409, "Live Meta WhatsApp provider configuration is missing.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
     }
@@ -189,44 +245,56 @@ export const whatsappConnectionService = {
   async complete(
     actor: WhatsAppConnectionActor,
     input: {
-      provider: "META_WHATSAPP" | "MOCK_WHATSAPP";
+      provider: "META_WHATSAPP";
       phoneNumberId: string;
       displayPhoneNumber?: string;
       wabaId?: string;
       businessAccountId?: string;
-      accessToken?: string;
+      accessToken: string;
       metadata?: Prisma.InputJsonValue;
     },
     context: Omit<AuditInput, "action">,
   ) {
     await subscriptionService.getCurrentRecord(actor.businessAccountId);
+    if (env.WHATSAPP_PROVIDER_MODE !== "live") {
+      throw new AppError(409, "Live Meta WhatsApp provider configuration is missing.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+    }
     const active = await activeIntegration(actor.businessId);
     if (active && isConnected(active)) throw new AppError(409, "WhatsApp is already connected for this business.", "WHATSAPP_ALREADY_CONNECTED");
+    if (!active || active.status !== WhatsAppIntegrationStatus.CONNECTING) {
+      throw new AppError(409, "Start the WhatsApp connection before completing it.", "WHATSAPP_CONNECTION_NOT_STARTED");
+    }
+    const accessToken = input.accessToken;
+    const verifiedPhone = await verifyMetaOwnership({
+      phoneNumberId: input.phoneNumberId,
+      wabaId: input.wabaId,
+      accessToken,
+    });
     const integration = await prisma.$transaction(async (tx) => {
-      if (active) {
-        await tx.whatsAppIntegration.update({
-          where: { id: active.id },
-          data: { status: WhatsAppIntegrationStatus.DEACTIVATED, automationEnabled: false, deactivatedAt: new Date() },
-        });
-      }
-      return tx.whatsAppIntegration.create({
+      return tx.whatsAppIntegration.update({
+        where: { id: active.id },
         data: {
-          businessId: actor.businessId,
-          provider: input.provider === "MOCK_WHATSAPP" ? WhatsAppProvider.MOCK_WHATSAPP : WhatsAppProvider.META,
+          provider: WhatsAppProvider.META,
           phoneNumberId: input.phoneNumberId,
-          displayPhoneNumber: input.displayPhoneNumber,
+          displayPhoneNumber: verifiedPhone.display_phone_number ?? input.displayPhoneNumber,
           wabaId: input.wabaId,
           businessAccountId: input.businessAccountId,
-          accessTokenEncrypted: input.accessToken ? encryptToken(input.accessToken) : null,
-          metadata: input.metadata,
-          status: input.provider === "MOCK_WHATSAPP" ? WhatsAppIntegrationStatus.MOCK_CONNECTED : WhatsAppIntegrationStatus.CONNECTED,
+          accessTokenEncrypted: encryptCredential(accessToken),
+          metadata: {
+            ...(input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? input.metadata : {}),
+            ownershipVerifiedAt: new Date().toISOString(),
+            verifiedName: verifiedPhone.verified_name ?? null,
+          },
+          status: WhatsAppIntegrationStatus.CONNECTED,
           automationEnabled: true,
           connectedAt: new Date(),
+          lastErrorCode: null,
+          lastErrorMessage: null,
         },
       });
     }).catch((error) => {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        throw new AppError(409, "Your current plan allows one WhatsApp number per business.", "WHATSAPP_NUMBER_LIMIT_REACHED");
+        throw new AppError(409, "This WhatsApp number is already connected.", "WHATSAPP_ALREADY_CONNECTED");
       }
       throw error;
     });
@@ -325,7 +393,7 @@ export const whatsappConnectionService = {
     const result = {
       status: publicStatus(updated.status),
       canReceiveMessages: connected,
-      canSendMessages: connected,
+      canSendMessages: canSendMessages(updated),
       automationEnabled: connected && updated.automationEnabled,
       lastInboundMessageAt: lastInbound?.createdAt ?? null,
       lastOutboundMessageAt: lastOutbound?.createdAt ?? null,

@@ -14,6 +14,15 @@ Use an owner, manager, and staff access token with the same `X-Business-Id`.
 8. Confirm old leads, conversations, and messages remain available.
 9. Simulate inbound delivery for the historical number. Confirm the message metadata includes `integrationStatus: "DEACTIVATED"` and `automationSkipped: true`.
 
+## Live connection security
+
+1. Confirm `MOCK_WHATSAPP` connect/start is rejected while `WHATSAPP_PROVIDER_MODE=live`.
+2. Call `/connect/complete` without first calling `/connect/start`. Confirm `WHATSAPP_CONNECTION_NOT_STARTED`.
+3. Call `/connect/complete` without an access token. Confirm validation fails.
+4. Complete with a token that cannot access the requested Meta phone number. Confirm `WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED`.
+5. Complete with a valid token and WABA ID. Confirm Meta verifies the phone belongs to that WABA.
+6. Send an outbound message and confirm the integration-specific encrypted credential is used rather than the global environment token.
+
 ## Change number and history
 
 1. Connect a mock number.

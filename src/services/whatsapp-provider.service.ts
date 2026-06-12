@@ -1,6 +1,7 @@
-import { WhatsAppIntegrationStatus } from "@prisma/client";
+import { WhatsAppIntegration, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
+import { decryptCredential } from "../utils/credential-encryption";
 import { AppError } from "../utils/errors";
 
 export type SendWhatsAppTextParams = {
@@ -41,6 +42,16 @@ export async function getWhatsAppIntegration(businessId: string) {
   if (env.WHATSAPP_PROVIDER_MODE === "live" && existing.status !== WhatsAppIntegrationStatus.CONNECTED) {
     throw new AppError(409, "WhatsApp is not connected for this business.", "WHATSAPP_NOT_CONNECTED");
   }
+  if (existing.provider === WhatsAppProvider.MOCK_WHATSAPP && env.WHATSAPP_PROVIDER_MODE === "live") {
+    throw new AppError(409, "WhatsApp is not connected for this business.", "WHATSAPP_NOT_CONNECTED");
+  }
+  if (
+    existing.provider === WhatsAppProvider.META
+    && existing.status === WhatsAppIntegrationStatus.CONNECTED
+    && !existing.accessTokenEncrypted
+  ) {
+    throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+  }
   return existing;
 }
 
@@ -59,15 +70,14 @@ export class MockWhatsAppProvider implements WhatsAppProviderClient {
 }
 
 export class MetaWhatsAppProvider implements WhatsAppProviderClient {
+  constructor(private readonly accessToken: string) {}
+
   async sendTextMessage(params: SendWhatsAppTextParams): Promise<WhatsAppSendResult> {
-    if (!env.META_WHATSAPP_ACCESS_TOKEN) {
-      return { success: false, provider: "META_WHATSAPP", error: "Meta WhatsApp provider is not configured" };
-    }
     try {
       const response = await fetch(`https://graph.facebook.com/${env.META_API_VERSION}/${params.phoneNumberId}/messages`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${env.META_WHATSAPP_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${this.accessToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -92,6 +102,20 @@ export class MetaWhatsAppProvider implements WhatsAppProviderClient {
   }
 }
 
-export const whatsappProvider: WhatsAppProviderClient = env.WHATSAPP_PROVIDER_MODE === "live"
-  ? new MetaWhatsAppProvider()
-  : new MockWhatsAppProvider();
+export async function sendWhatsAppText(integration: WhatsAppIntegration, params: SendWhatsAppTextParams): Promise<WhatsAppSendResult> {
+  if (integration.provider === WhatsAppProvider.MOCK_WHATSAPP || integration.status === WhatsAppIntegrationStatus.MOCK_CONNECTED) {
+    if (env.WHATSAPP_PROVIDER_MODE === "live") {
+      throw new AppError(409, "Mock WhatsApp connections are disabled in live provider mode.", "WHATSAPP_NOT_CONNECTED");
+    }
+    return new MockWhatsAppProvider().sendTextMessage(params);
+  }
+  if (!integration.accessTokenEncrypted) {
+    throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+  }
+  try {
+    return new MetaWhatsAppProvider(decryptCredential(integration.accessTokenEncrypted)).sendTextMessage(params);
+  } catch (error) {
+    console.error("Stored Meta WhatsApp credential could not be used", { businessId: integration.businessId, integrationId: integration.id, error });
+    return { success: false, provider: "META_WHATSAPP", error: "Meta WhatsApp provider credential is unavailable" };
+  }
+}

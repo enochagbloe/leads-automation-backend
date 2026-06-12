@@ -33,6 +33,10 @@ Start a mock connection:
 
 Mock mode connects immediately. Live Meta mode returns `CONNECTING` and requires `/connect/complete` after the provider flow succeeds.
 
+Live connection completion is accepted only after `/connect/start`. The backend verifies that the supplied Meta access token can access the requested phone number, and if a WABA ID is supplied, confirms the number belongs to that WABA before marking it connected. Mock connections are rejected when the backend runs in live provider mode.
+
+Each connected business uses its own encrypted Meta credential for outbound sends. The credential is never returned by status, health, or connection responses.
+
 Connection status values:
 
 ```text
@@ -86,6 +90,9 @@ WHATSAPP_DEACTIVATED
 WHATSAPP_CONNECTION_NOT_FOUND
 WHATSAPP_NUMBER_LIMIT_REACHED
 WHATSAPP_PROVIDER_CONFIG_MISSING
+WHATSAPP_PROVIDER_CREDENTIAL_REQUIRED
+WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED
+WHATSAPP_CONNECTION_NOT_STARTED
 FORBIDDEN
 ```
 
