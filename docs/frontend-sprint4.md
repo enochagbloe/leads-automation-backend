@@ -118,6 +118,55 @@ When a customer replies to a closed WhatsApp conversation, the backend reopens t
 
 The frontend only needs to refetch the existing conversation/list. No separate reopen endpoint is required.
 
+## Real-time inbox events
+
+Connect to:
+
+```http
+GET /api/realtime/events
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Accept: text/event-stream
+```
+
+The stream is business-scoped and emits:
+
+```text
+message.created
+message.status.updated
+conversation.created
+conversation.updated
+conversation.closed
+conversation.reopened
+conversation.assigned
+conversation.read
+conversation.unread_count.updated
+lead.created
+lead.updated
+ping
+```
+
+Event envelope:
+
+```ts
+type RealtimeEvent = {
+  id: string;
+  type: string;
+  businessId: string;
+  conversationId?: string;
+  leadId?: string;
+  messageId?: string;
+  createdAt: string;
+  payload: Record<string, unknown>;
+};
+```
+
+On connection and reconnection, refetch the conversation list/detail to establish current state. Then apply events or trigger targeted refetches. Keep polling as fallback because V1 uses an in-memory single-server event bus.
+
+Browser `EventSource` cannot set custom authorization headers directly. Use an SSE client/fetch-stream implementation that supports headers, or a same-origin authenticated proxy. Do not place access tokens in query parameters.
+
+Staff streams receive only events for assigned leads/conversations. Owners and managers receive all events for the selected business.
+
 ## Development simulator
 
 Use this endpoint only during local/development testing:
@@ -170,5 +219,5 @@ The provider webhook records a `LIMIT_BLOCKED` event internally. No upgrade flow
 - Meta connection/settings UI
 - AI replies
 - Media messages
-- Real-time sockets
+- WebSockets, typing indicators, and presence
 - WhatsApp 24-hour session enforcement

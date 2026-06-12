@@ -15,6 +15,7 @@ import { AppError } from "../utils/errors";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { getWhatsAppIntegration, whatsappProvider, WhatsAppSendResult } from "./whatsapp-provider.service";
+import { realtimeService } from "./realtime.service";
 
 export type ConversationActor = {
   userId: string;
@@ -105,6 +106,7 @@ async function settleWhatsAppMessage(
   message: { id: string; businessId: string; conversationId: string; leadId: string; content: string; metadata: Prisma.JsonValue | null },
   phoneNumberId: string,
   customerPhone: string,
+  assignedStaffId: string | null,
   context: Omit<AuditInput, "action">,
 ) {
   const result = await whatsappProvider.sendTextMessage({
@@ -168,6 +170,24 @@ async function settleWhatsAppMessage(
     }),
     invalidateOutboundCaches(actor.businessId, message.conversationId, message.leadId),
   ]);
+  realtimeService.publish({
+    type: "message.status.updated",
+    businessId: actor.businessId,
+    conversationId: message.conversationId,
+    leadId: message.leadId,
+    messageId: message.id,
+    assignedStaffId,
+    payload: {
+      messageId: message.id,
+      conversationId: message.conversationId,
+      previousStatus: message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
+        ? message.metadata.deliveryStatus ?? MessageDeliveryStatus.PENDING
+        : MessageDeliveryStatus.PENDING,
+      newStatus: updated.deliveryStatus,
+      readAt: updated.readAt,
+      updatedAt: updated.updatedAt,
+    },
+  });
   return updated;
 }
 
@@ -286,7 +306,33 @@ export const messageService = {
           deliveryStatus: message.deliveryStatus,
         },
       });
-      if (integration) return settleWhatsAppMessage(actor, message, integration.phoneNumberId, conversation.lead.phone, context);
+      realtimeService.publish({
+        type: "message.created",
+        businessId: actor.businessId,
+        conversationId,
+        leadId: conversation.leadId,
+        messageId: message.id,
+        assignedStaffId: conversation.assignedStaffId,
+        payload: {
+          message,
+          conversation: {
+            id: conversation.id,
+            lastMessagePreview: message.content.slice(0, 240),
+            lastMessageAt: message.createdAt,
+            unreadCount: conversation.unreadCount,
+            status: conversation.status,
+          },
+        },
+      });
+      realtimeService.publish({
+        type: "conversation.updated",
+        businessId: actor.businessId,
+        conversationId,
+        leadId: conversation.leadId,
+        assignedStaffId: conversation.assignedStaffId,
+        payload: { conversationId, changes: { lastMessagePreview: message.content.slice(0, 240), lastMessageAt: message.createdAt } },
+      });
+      if (integration) return settleWhatsAppMessage(actor, message, integration.phoneNumberId, conversation.lead.phone, conversation.assignedStaffId, context);
       await invalidateOutboundCaches(actor.businessId, conversationId, conversation.leadId);
       return message;
     } catch (error) {
@@ -364,6 +410,15 @@ export const messageService = {
       },
     });
     await invalidateOutboundCaches(actor.businessId, conversationId, conversation.leadId);
-    return settleWhatsAppMessage(actor, pending, integration.phoneNumberId, conversation.lead.phone, context);
+    realtimeService.publish({
+      type: "message.status.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      messageId,
+      assignedStaffId: conversation.assignedStaffId,
+      payload: { messageId, conversationId, previousStatus: MessageDeliveryStatus.FAILED, newStatus: MessageDeliveryStatus.PENDING, readAt: pending.readAt, updatedAt: pending.updatedAt },
+    });
+    return settleWhatsAppMessage(actor, pending, integration.phoneNumberId, conversation.lead.phone, conversation.assignedStaffId, context);
   },
 };

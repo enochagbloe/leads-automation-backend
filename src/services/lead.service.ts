@@ -12,6 +12,7 @@ import { AppError } from "../utils/errors";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { subscriptionService } from "./subscription.service";
+import { realtimeService } from "./realtime.service";
 import { CreateLeadInput, LeadListQuery, UpdateLeadInput } from "../validation/lead.schemas";
 
 type LeadActor = {
@@ -152,6 +153,13 @@ export const leadService = {
       }),
       subscriptionService.updateBusinessUsage(actor.businessId, "leadsCreated", 1),
     ]);
+    realtimeService.publish({
+      type: "lead.created",
+      businessId: actor.businessId,
+      leadId: lead.id,
+      assignedStaffId: lead.assignedStaffId,
+      payload: { lead },
+    });
     return lead;
   },
 
@@ -260,6 +268,13 @@ export const leadService = {
       ...(statusChanged ? [logAudit(actor, AuditAction.LEAD_STATUS_CHANGED, leadId, context, { from: existing.status, to: input.status })] : []),
       ...(assignmentChanged ? [logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, { from: existing.assignedStaffId, to: input.assignedStaffId })] : []),
     ]);
+    realtimeService.publish({
+      type: "lead.updated",
+      businessId: actor.businessId,
+      leadId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { lead: updated, changes: input },
+    });
     return updated;
   },
 
@@ -301,6 +316,14 @@ export const leadService = {
     await logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, {
       ...assignmentMetadata,
       businessId: actor.businessId,
+    });
+    realtimeService.publish({
+      type: "lead.updated",
+      businessId: actor.businessId,
+      leadId,
+      assignedStaffId: updated.assignedStaffId,
+      staffMembershipIds: [existing.assignedStaffId, updated.assignedStaffId],
+      payload: { lead: updated, changes: assignmentMetadata },
     });
     return updated;
   },
