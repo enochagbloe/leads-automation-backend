@@ -13,7 +13,10 @@ export type RealtimeEventType =
   | "conversation.read"
   | "conversation.unread_count.updated"
   | "lead.created"
-  | "lead.updated";
+  | "lead.updated"
+  | "whatsapp.connection.updated"
+  | "whatsapp.connection.deactivated"
+  | "whatsapp.connection.error";
 
 export type RealtimeEvent = {
   id: string;

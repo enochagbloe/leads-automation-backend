@@ -2,7 +2,92 @@
 
 ## Sprint goal
 
-Sprint 4 Modules 1-3 add WhatsApp inbound processing, staff outbound text replies, delivery statuses, End Chat, and automatic reopen. There is no Meta connection UI, AI reply, media, or real-time socket support yet.
+Sprint 4 Modules 1-5 add WhatsApp inbound processing, staff outbound text replies, delivery statuses, End Chat, automatic reopen, realtime inbox events, and per-business WhatsApp connection management. There is no Meta Embedded Signup UI, AI reply, media, or billing flow yet.
+
+## WhatsApp connection management
+
+All endpoints require:
+
+```http
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+| Method | Endpoint | Access |
+|---|---|---|
+| GET | `/api/business/whatsapp/status` | Owner, manager, staff |
+| GET | `/api/business/whatsapp/health` | Owner, manager, staff |
+| POST | `/api/business/whatsapp/connect/start` | Owner only |
+| POST | `/api/business/whatsapp/connect/complete` | Owner only |
+| POST | `/api/business/whatsapp/deactivate` | Owner only |
+| POST | `/api/business/whatsapp/change/start` | Owner only |
+
+Start a mock connection:
+
+```json
+{
+  "provider": "MOCK_WHATSAPP",
+  "displayPhoneNumber": "+233241234567"
+}
+```
+
+Mock mode connects immediately. Live Meta mode returns `CONNECTING` and requires `/connect/complete` after the provider flow succeeds.
+
+Connection status values:
+
+```text
+NOT_CONNECTED
+CONNECTING
+CONNECTED
+DEACTIVATED
+ERROR
+```
+
+Safe status response:
+
+```json
+{
+  "status": "CONNECTED",
+  "provider": "MOCK_WHATSAPP",
+  "displayPhoneNumber": "+233241234567",
+  "connectedAt": "2026-06-12T10:00:00.000Z",
+  "deactivatedAt": null,
+  "automationEnabled": true,
+  "canSendMessages": true,
+  "lastHealthCheckAt": null,
+  "lastErrorCode": null,
+  "lastErrorMessage": null
+}
+```
+
+Raw access tokens and provider secrets are never returned. V1 allows one active WhatsApp number per business on every plan.
+
+After deactivation:
+
+- Outbound WhatsApp replies return `WHATSAPP_DEACTIVATED`.
+- WhatsApp conversation AI flags are disabled.
+- Existing leads, conversations, and messages remain visible.
+- Inbound webhooks for the historical number are stored with `automationSkipped: true`.
+
+Listen for:
+
+```text
+whatsapp.connection.updated
+whatsapp.connection.deactivated
+whatsapp.connection.error
+```
+
+Management errors:
+
+```text
+WHATSAPP_NOT_CONNECTED
+WHATSAPP_ALREADY_CONNECTED
+WHATSAPP_DEACTIVATED
+WHATSAPP_CONNECTION_NOT_FOUND
+WHATSAPP_NUMBER_LIMIT_REACHED
+WHATSAPP_PROVIDER_CONFIG_MISSING
+FORBIDDEN
+```
 
 ## What changes in the inbox
 
@@ -216,7 +301,7 @@ The provider webhook records a `LIMIT_BLOCKED` event internally. No upgrade flow
 
 ## Out of scope
 
-- Meta connection/settings UI
+- Full Meta Embedded Signup UI
 - AI replies
 - Media messages
 - WebSockets, typing indicators, and presence

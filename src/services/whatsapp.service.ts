@@ -106,20 +106,26 @@ async function resolveBusiness(input: WhatsAppInboundText) {
       select: { id: true, businessAccountId: true, name: true },
     });
     if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
-    return business;
+    const integration = await prisma.whatsAppIntegration.findFirst({
+      where: { businessId: business.id },
+      orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
+      select: { status: true },
+    });
+    return { ...business, integrationStatus: integration?.status ?? WhatsAppIntegrationStatus.NOT_CONNECTED };
   }
   if (!input.phoneNumberId) throw new AppError(422, "WhatsApp phone number ID is required", "WHATSAPP_BUSINESS_MAPPING_FAILED");
-  const integration = await prisma.whatsAppIntegration.findUnique({
-    where: { provider_phoneNumberId: { provider: WhatsAppProvider.META, phoneNumberId: input.phoneNumberId } },
+  const integration = await prisma.whatsAppIntegration.findFirst({
+    where: { phoneNumberId: input.phoneNumberId },
+    orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
     include: { business: { select: { id: true, businessAccountId: true, name: true, deletedAt: true } } },
   });
   const acceptedStatuses: WhatsAppIntegrationStatus[] = env.WHATSAPP_PROVIDER_MODE === "live"
-    ? [WhatsAppIntegrationStatus.CONNECTED]
-    : [WhatsAppIntegrationStatus.CONNECTED, WhatsAppIntegrationStatus.MOCK_CONNECTED];
+    ? [WhatsAppIntegrationStatus.CONNECTED, WhatsAppIntegrationStatus.DEACTIVATED, WhatsAppIntegrationStatus.DISCONNECTED]
+    : [WhatsAppIntegrationStatus.CONNECTED, WhatsAppIntegrationStatus.MOCK_CONNECTED, WhatsAppIntegrationStatus.DEACTIVATED, WhatsAppIntegrationStatus.DISCONNECTED];
   if (!integration || integration.business.deletedAt || !acceptedStatuses.includes(integration.status)) {
-    throw new AppError(404, "No active WhatsApp integration matches this phone number", "WHATSAPP_BUSINESS_MAPPING_FAILED");
+    throw new AppError(404, "No WhatsApp integration matches this phone number", "WHATSAPP_BUSINESS_MAPPING_FAILED");
   }
-  return integration.business;
+  return { ...integration.business, integrationStatus: integration.status };
 }
 
 async function getConversationCapacity(businessAccountId: string, businessId: string): Promise<ConversationCapacity> {
@@ -131,7 +137,7 @@ async function getConversationCapacity(businessAccountId: string, businessId: st
 }
 
 async function persistInbound(
-  business: { id: string; businessAccountId: string },
+  business: { id: string; businessAccountId: string; integrationStatus: WhatsAppIntegrationStatus },
   input: WhatsAppInboundText,
   attempt = 0,
 ): Promise<PersistedInbound> {
@@ -275,6 +281,9 @@ async function persistInbound(
             customerName: input.customerName ?? null,
             rawWebhookEventId: input.rawWebhookEventId ?? null,
             reopenedConversation: didReopen,
+            integrationStatus: business.integrationStatus,
+            automationSkipped: business.integrationStatus === WhatsAppIntegrationStatus.DEACTIVATED
+              || business.integrationStatus === WhatsAppIntegrationStatus.DISCONNECTED,
           },
           createdAt: input.timestamp,
         },
@@ -469,16 +478,21 @@ export const whatsappService = {
   async ensureMockIntegration(businessId: string) {
     const business = await prisma.business.findFirst({ where: { id: businessId, deletedAt: null }, select: { id: true } });
     if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
-    return prisma.whatsAppIntegration.upsert({
-      where: { businessId_provider: { businessId, provider: WhatsAppProvider.META } },
-      create: {
+    const current = await prisma.whatsAppIntegration.findFirst({
+      where: { businessId },
+      orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
+    });
+    if (current) return current;
+    return prisma.whatsAppIntegration.create({
+      data: {
         businessId,
-        provider: WhatsAppProvider.META,
-        phoneNumberId: `mock-${businessId}`,
+        provider: WhatsAppProvider.MOCK_WHATSAPP,
+        phoneNumberId: `mock-${businessId}-${crypto.randomUUID()}`,
         status: WhatsAppIntegrationStatus.MOCK_CONNECTED,
+        automationEnabled: true,
         connectedAt: new Date(),
+        metadata: { createdBy: "DEV_MOCK_INBOUND" },
       },
-      update: {},
     });
   },
 
