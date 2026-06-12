@@ -26,6 +26,7 @@ const schema = z.object({
   META_WHATSAPP_PHONE_NUMBER_ID: optionalString,
   META_WHATSAPP_BUSINESS_ACCOUNT_ID: optionalString,
   META_WHATSAPP_VERIFY_TOKEN: optionalString,
+  META_APP_ID: optionalString,
   META_APP_SECRET: optionalString,
   META_API_VERSION: z.string().min(1).default("v20.0"),
 }).superRefine((value, context) => {
@@ -38,10 +39,8 @@ const schema = z.object({
   }
   if (value.WHATSAPP_PROVIDER_MODE === "live") {
     const required = [
-      "META_WHATSAPP_ACCESS_TOKEN",
-      "META_WHATSAPP_PHONE_NUMBER_ID",
-      "META_WHATSAPP_BUSINESS_ACCOUNT_ID",
       "META_WHATSAPP_VERIFY_TOKEN",
+      "META_APP_ID",
       "META_APP_SECRET",
     ] as const;
     for (const key of required) {

@@ -33,7 +33,7 @@ Start a mock connection:
 
 Mock mode connects immediately. Live Meta mode returns `CONNECTING` and requires `/connect/complete` after the provider flow succeeds.
 
-Live connection completion is accepted only after `/connect/start`. The backend verifies that the supplied Meta access token can access the requested phone number, and if a WABA ID is supplied, confirms the number belongs to that WABA before marking it connected. Mock connections are rejected when the backend runs in live provider mode.
+Live connection completion is accepted only after `/connect/start`. Send the short-lived `authorizationCode` returned by Meta Embedded Signup together with the required phone-number and WABA IDs. The backend exchanges the code using the configured Meta app credentials, verifies that the resulting token can access the requested phone number, and confirms the number belongs to that WABA before marking it connected. Raw access tokens from clients are not accepted. Mock connections are rejected when the backend runs in live provider mode.
 
 Each connected business uses its own encrypted Meta credential for outbound sends. The credential is never returned by status, health, or connection responses.
 

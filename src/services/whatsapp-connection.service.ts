@@ -137,6 +137,13 @@ async function ensureCanConnect(actor: WhatsAppConnectionActor) {
   }
 }
 
+type MetaTokenExchange = {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  error?: { message?: string; code?: number };
+};
+
 type MetaPhoneDetails = {
   id?: string;
   display_phone_number?: string;
@@ -169,7 +176,35 @@ async function metaGet<T>(path: string, accessToken: string) {
   }
 }
 
-async function verifyMetaOwnership(input: { phoneNumberId: string; wabaId?: string; accessToken: string }) {
+async function exchangeMetaAuthorizationCode(authorizationCode: string) {
+  if (!env.META_APP_ID || !env.META_APP_SECRET) {
+    throw new AppError(409, "Meta provider exchange is not configured.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+  }
+  try {
+    const response = await fetch(`https://graph.facebook.com/${env.META_API_VERSION}/oauth/access_token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: env.META_APP_ID,
+        client_secret: env.META_APP_SECRET,
+        code: authorizationCode,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => null) as MetaTokenExchange | null;
+    if (!response.ok || !body?.access_token) {
+      throw new AppError(422, "Meta could not complete the WhatsApp authorization.", "WHATSAPP_PROVIDER_AUTHORIZATION_FAILED", {
+        providerCode: body?.error?.code,
+      });
+    }
+    return { accessToken: body.access_token, expiresIn: body.expires_in };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(503, "Meta authorization is temporarily unavailable.", "WHATSAPP_PROVIDER_UNAVAILABLE");
+  }
+}
+
+async function verifyMetaOwnership(input: { phoneNumberId: string; wabaId: string; accessToken: string }) {
   const phone = await metaGet<MetaPhoneDetails>(
     `${encodeURIComponent(input.phoneNumberId)}?fields=id,display_phone_number,verified_name`,
     input.accessToken,
@@ -248,9 +283,9 @@ export const whatsappConnectionService = {
       provider: "META_WHATSAPP";
       phoneNumberId: string;
       displayPhoneNumber?: string;
-      wabaId?: string;
+      wabaId: string;
       businessAccountId?: string;
-      accessToken: string;
+      authorizationCode: string;
       metadata?: Prisma.InputJsonValue;
     },
     context: Omit<AuditInput, "action">,
@@ -264,7 +299,7 @@ export const whatsappConnectionService = {
     if (!active || active.status !== WhatsAppIntegrationStatus.CONNECTING) {
       throw new AppError(409, "Start the WhatsApp connection before completing it.", "WHATSAPP_CONNECTION_NOT_STARTED");
     }
-    const accessToken = input.accessToken;
+    const { accessToken, expiresIn } = await exchangeMetaAuthorizationCode(input.authorizationCode);
     const verifiedPhone = await verifyMetaOwnership({
       phoneNumberId: input.phoneNumberId,
       wabaId: input.wabaId,
@@ -283,6 +318,7 @@ export const whatsappConnectionService = {
           metadata: {
             ...(input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? input.metadata : {}),
             ownershipVerifiedAt: new Date().toISOString(),
+            credentialExpiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
             verifiedName: verifiedPhone.verified_name ?? null,
           },
           status: WhatsAppIntegrationStatus.CONNECTED,
