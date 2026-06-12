@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 
-const DATABASE_UNAVAILABLE_CODES = new Set(["P1001", "P1002", "P1008", "P1017"]);
+const DATABASE_UNAVAILABLE_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024"]);
 
 type ErrorWithCode = {
   code?: unknown;

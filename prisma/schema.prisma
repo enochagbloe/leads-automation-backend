@@ -127,6 +127,35 @@ enum MessageDeliveryStatus {
   INTERNAL
 }
 
+enum WhatsAppProvider {
+  META
+}
+
+enum WhatsAppIntegrationStatus {
+  NOT_CONNECTED
+  MOCK_CONNECTED
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum WebhookProvider {
+  META_WHATSAPP
+}
+
+enum WebhookEventType {
+  INBOUND_TEXT
+  UNKNOWN
+}
+
+enum WebhookProcessingStatus {
+  RECEIVED
+  PROCESSED
+  DUPLICATE
+  FAILED
+  LIMIT_BLOCKED
+}
+
 enum BusinessStatus {
   ACTIVE
   SUSPENDED
@@ -186,30 +215,29 @@ enum AuditAction {
 }
 
 model User {
-  id            String    @id @default(cuid())
+  id            String        @id @default(cuid())
   firstName     String
   lastName      String
-  email         String    @unique
+  email         String        @unique
   passwordHash  String
-  emailVerified Boolean   @default(false)
-  status        UserStatus @default(ACTIVE)
+  emailVerified Boolean       @default(false)
+  status        UserStatus    @default(ACTIVE)
   platformRole  PlatformRole?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
   deletedAt     DateTime?
 
-  ownedBusinesses Business[] @relation("BusinessOwner")
-  ownedBusinessAccounts BusinessAccount[] @relation("BusinessAccountOwner")
-  memberships     BusinessMember[] @relation("MemberUser")
-  invitedMembers  BusinessMember[] @relation("MemberInviter")
-  sentInvitations BusinessInvitation[] @relation("InvitationInviter")
-  authTokens    AuthToken[]
-  refreshTokens RefreshToken[]
-  auditLogs     AuditLog[]
-  createdLeads  Lead[]         @relation("LeadCreator")
-  leadActivities LeadActivity[] @relation("LeadActivityActor")
-  sentMessages Message[] @relation("MessageSender")
-
+  ownedBusinesses       Business[]           @relation("BusinessOwner")
+  ownedBusinessAccounts BusinessAccount[]    @relation("BusinessAccountOwner")
+  memberships           BusinessMember[]     @relation("MemberUser")
+  invitedMembers        BusinessMember[]     @relation("MemberInviter")
+  sentInvitations       BusinessInvitation[] @relation("InvitationInviter")
+  authTokens            AuthToken[]
+  refreshTokens         RefreshToken[]
+  auditLogs             AuditLog[]
+  createdLeads          Lead[]               @relation("LeadCreator")
+  leadActivities        LeadActivity[]       @relation("LeadActivityActor")
+  sentMessages          Message[]            @relation("MessageSender")
 }
 
 model BusinessAccount {
@@ -228,29 +256,31 @@ model BusinessAccount {
 }
 
 model Business {
-  id        String         @id @default(cuid())
+  id                String         @id @default(cuid())
   businessAccountId String
-  name      String
-  industry  String
-  slug      String         @unique
-  ownerId   String
-  email     String
-  phone     String?
-  status    BusinessStatus @default(PENDING_SETUP)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  deletedAt DateTime?
+  name              String
+  industry          String
+  slug              String         @unique
+  ownerId           String
+  email             String
+  phone             String?
+  status            BusinessStatus @default(PENDING_SETUP)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+  deletedAt         DateTime?
 
-  owner         User             @relation("BusinessOwner", fields: [ownerId], references: [id])
-  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  members       BusinessMember[]
-  invitations   BusinessInvitation[]
-  usageRecords  BusinessUsageRecord[]
-  auditLogs     AuditLog[]
-  leads         Lead[]
-  leadActivities LeadActivity[]
-  conversations Conversation[]
-  messages Message[]
+  owner                User                  @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount      BusinessAccount       @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members              BusinessMember[]
+  invitations          BusinessInvitation[]
+  usageRecords         BusinessUsageRecord[]
+  auditLogs            AuditLog[]
+  leads                Lead[]
+  leadActivities       LeadActivity[]
+  conversations        Conversation[]
+  messages             Message[]
+  whatsAppIntegrations WhatsAppIntegration[]
+  webhookEventLogs     WebhookEventLog[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -267,10 +297,10 @@ model BusinessMember {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
-  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user      User      @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy User?     @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
-  assignedLeads Lead[] @relation("LeadAssignee")
+  business              Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user                  User           @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy             User?          @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads         Lead[]         @relation("LeadAssignee")
   assignedConversations Conversation[] @relation("ConversationAssignee")
 
   @@unique([businessId, userId])
@@ -300,24 +330,24 @@ model BusinessInvitation {
 }
 
 model Plan {
-  id                         String   @id @default(cuid())
-  name                       String
-  code                       PlanCode @unique
-  priceMonthly               Decimal  @db.Decimal(10, 2)
-  currency                   String   @default("GHS")
-  maxStaff                   Int?
-  maxServices                Int?
-  maxAppointmentsPerMonth    Int?
-  maxConversationsPerMonth   Int?
-  maxAiRepliesPerMonth       Int?
-  maxKnowledgeItems          Int?
-  maxBusinesses              Int?
-  allowAnalytics             Boolean  @default(false)
-  allowRemoveBranding        Boolean  @default(false)
-  allowPrioritySupport       Boolean  @default(false)
-  isActive                   Boolean  @default(true)
-  createdAt                  DateTime @default(now())
-  updatedAt                  DateTime @updatedAt
+  id                       String   @id @default(cuid())
+  name                     String
+  code                     PlanCode @unique
+  priceMonthly             Decimal  @db.Decimal(10, 2)
+  currency                 String   @default("GHS")
+  maxStaff                 Int?
+  maxServices              Int?
+  maxAppointmentsPerMonth  Int?
+  maxConversationsPerMonth Int?
+  maxAiRepliesPerMonth     Int?
+  maxKnowledgeItems        Int?
+  maxBusinesses            Int?
+  allowAnalytics           Boolean  @default(false)
+  allowRemoveBranding      Boolean  @default(false)
+  allowPrioritySupport     Boolean  @default(false)
+  isActive                 Boolean  @default(true)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 
   subscriptions Subscription[]
 }
@@ -335,9 +365,9 @@ model Subscription {
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
 
-  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  plan         Plan          @relation(fields: [planId], references: [id])
-  usageRecords AccountUsageRecord[]
+  businessAccount BusinessAccount      @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  plan            Plan                 @relation(fields: [planId], references: [id])
+  usageRecords    AccountUsageRecord[]
 
   @@index([businessAccountId, status])
 }
@@ -359,7 +389,7 @@ model AccountUsageRecord {
   updatedAt           DateTime @updatedAt
 
   businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscription    Subscription    @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
 
   @@unique([subscriptionId, periodStart])
   @@index([businessAccountId, periodStart])
@@ -479,23 +509,23 @@ model LeadActivity {
 }
 
 model Conversation {
-  id                 String             @id @default(cuid())
-  displayId          String             @unique @default(dbgenerated())
+  id                 String               @id @default(cuid())
+  displayId          String               @unique @default(dbgenerated())
   businessId         String
   leadId             String
   assignedStaffId    String?
   channel            ConversationChannel
-  status             ConversationStatus @default(OPEN)
+  status             ConversationStatus   @default(OPEN)
   subject            String?
   priority           ConversationPriority @default(NORMAL)
-  pinned             Boolean            @default(false)
+  pinned             Boolean              @default(false)
   lastMessagePreview String?
   lastMessageAt      DateTime?
-  unreadCount        Int                @default(0)
-  aiEnabled          Boolean            @default(false)
-  humanTakeover      Boolean            @default(false)
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
+  unreadCount        Int                  @default(0)
+  aiEnabled          Boolean              @default(false)
+  humanTakeover      Boolean              @default(false)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
   closedAt           DateTime?
   deletedAt          DateTime?
 
@@ -516,21 +546,23 @@ model Conversation {
 }
 
 model Message {
-  id             String                @id @default(cuid())
-  businessId     String
-  conversationId String
-  leadId         String
-  senderType     MessageSenderType
-  senderUserId   String?
-  content        String
-  messageType    MessageType
-  direction      MessageDirection
-  deliveryStatus MessageDeliveryStatus
-  metadata       Json?
-  readAt         DateTime?
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
-  deletedAt      DateTime?
+  id                String                @id @default(cuid())
+  businessId        String
+  conversationId    String
+  leadId            String
+  senderType        MessageSenderType
+  senderUserId      String?
+  content           String
+  messageType       MessageType
+  direction         MessageDirection
+  deliveryStatus    MessageDeliveryStatus
+  provider          String?
+  providerMessageId String?
+  metadata          Json?
+  readAt            DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  deletedAt         DateTime?
 
   business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -544,4 +576,47 @@ model Message {
   @@index([createdAt])
   @@index([senderType])
   @@index([deliveryStatus])
+  @@index([businessId, provider, providerMessageId])
+}
+
+model WhatsAppIntegration {
+  id                   String                    @id @default(cuid())
+  businessId           String
+  provider             WhatsAppProvider          @default(META)
+  phoneNumberId        String
+  displayPhoneNumber   String?
+  wabaId               String?
+  accessTokenEncrypted String?
+  verifyTokenHash      String?
+  appSecretHash        String?
+  status               WhatsAppIntegrationStatus @default(NOT_CONNECTED)
+  connectedAt          DateTime?
+  disconnectedAt       DateTime?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, phoneNumberId])
+  @@unique([businessId, provider])
+  @@index([businessId, status])
+}
+
+model WebhookEventLog {
+  id                String                  @id @default(cuid())
+  provider          WebhookProvider
+  eventType         WebhookEventType
+  businessId        String?
+  providerMessageId String?
+  payload           Json
+  processingStatus  WebhookProcessingStatus @default(RECEIVED)
+  errorMessage      String?
+  receivedAt        DateTime                @default(now())
+  processedAt       DateTime?
+
+  business Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+
+  @@index([provider, providerMessageId])
+  @@index([businessId, receivedAt])
+  @@index([processingStatus, receivedAt])
 }
