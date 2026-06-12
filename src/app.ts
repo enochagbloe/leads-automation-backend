@@ -10,13 +10,20 @@ import { businessRouter } from "./routes/business.routes";
 import { leadRouter } from "./routes/lead.routes";
 import { prisma } from "./config/prisma";
 import { conversationRouter } from "./routes/conversation.routes";
+import { env } from "./config/env";
+import { mockWhatsAppRouter, whatsappWebhookRouter } from "./routes/whatsapp.routes";
 
 export const app = express();
 
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: corsOrigins, credentials: true }));
-app.use(express.json({ limit: "100kb" }));
+app.use(express.json({
+  limit: "100kb",
+  verify: (req, _res, buffer) => {
+    (req as express.Request).rawBody = buffer;
+  },
+}));
 
 app.get("/api", (_req, res) => res.json({
   name: "BizReply AI API",
@@ -28,6 +35,8 @@ app.get("/api", (_req, res) => res.json({
     businesses: "/api/businesses",
     leads: "/api/leads",
     conversations: "/api/conversations",
+    whatsAppWebhook: "/api/webhooks/whatsapp",
+    mockWhatsApp: env.NODE_ENV === "production" ? undefined : "/api/dev/mock-whatsapp/inbound-message",
     plans: "/api/plans",
     subscription: "/api/subscription",
   },
@@ -37,12 +46,14 @@ app.get("/api/health", async (_req, res) => {
 
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: "ok", database: "connected", timestamp });
+    res.json({ status: "ok", database: "connected", whatsapp: { mode: env.WHATSAPP_PROVIDER_MODE, configured: env.WHATSAPP_PROVIDER_MODE === "mock" || Boolean(env.META_WHATSAPP_ACCESS_TOKEN) }, timestamp });
   } catch {
     res.status(503).json({ status: "degraded", database: "unavailable", timestamp });
   }
 });
 app.get("/api/plans", subscriptionController.plans);
+app.use("/api/webhooks/whatsapp", whatsappWebhookRouter);
+app.use("/api/dev/mock-whatsapp", mockWhatsAppRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/leads", leadRouter);

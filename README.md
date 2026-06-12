@@ -28,6 +28,10 @@ Set `RESEND_API_KEY` and `EMAIL_FROM` to a verified Resend sender/domain to deli
 
 The centralized `EmailService` provides verification, password-reset, and welcome-email templates with HTML and plain-text versions. The welcome email is a Sprint 1 placeholder and is not automatically sent yet. Provider failures are logged internally and never returned directly by API endpoints.
 
+The application adds conservative Prisma pool defaults to `DATABASE_URL` at runtime: `DB_CONNECTION_LIMIT=3`, `DB_POOL_TIMEOUT_SECONDS=30`, and `DB_CONNECT_TIMEOUT_SECONDS=15`. These reduce connection pressure on pooled Neon databases and can be overridden per environment.
+
+WhatsApp inbound processing defaults to `WHATSAPP_PROVIDER_MODE=mock`. Mock mode does not require Meta credentials and exposes the development simulator outside production. Live mode requires every `META_*` credential at startup and verifies incoming `x-hub-signature-256` signatures. The fallback verification token in mock mode is `bizreplyai-mock-verify-token` when `META_WHATSAPP_VERIFY_TOKEN` is empty.
+
 ## Production
 
 ```bash
@@ -107,6 +111,9 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | PATCH | `/api/conversations/:id/status` | Business member, role-scoped |
 | PATCH | `/api/conversations/:id/read` | Business member, role-scoped |
 | DELETE | `/api/conversations/:id` | Owner/manager, soft delete |
+| GET | `/api/webhooks/whatsapp` | Public provider verification |
+| POST | `/api/webhooks/whatsapp` | Public provider webhook, signature checked in live mode |
+| POST | `/api/dev/mock-whatsapp/inbound-message` | Development only |
 | GET | `/api/health` | Public |
 
 Frontend handoffs use `docs/frontend-sprint[number].md` for every sprint:
@@ -114,6 +121,7 @@ Frontend handoffs use `docs/frontend-sprint[number].md` for every sprint:
 - `docs/frontend-sprint1.md`
 - `docs/frontend-sprint2.md`
 - `docs/frontend-sprint3.md`
+- `docs/frontend-sprint4.md`
 - `docs/frontend-sprint-template.md`
 
 See `docs/ownership-architecture.md` for the canonical customer/membership model, `docs/api-examples.md` for curl examples, `docs/frontend-api-contract.md` for the shared frontend contract, and `docs/sprint-2-subscription-guards.md` for backend integration of future staff, service, and appointment modules.

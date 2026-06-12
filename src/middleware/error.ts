@@ -9,8 +9,12 @@ export const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
   if (isDatabaseUnavailableError(error)) {
     console.error("Database unavailable", {
       method: req.method,
-      path: req.originalUrl,
-      code: error.code,
+      path: req.path,
+      name: error?.name,
+      message: error?.message,
+      code: error?.code,
+      cause: error?.cause,
+      stack: error?.stack,
     });
 
     res.status(503).json({
