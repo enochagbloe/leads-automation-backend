@@ -48,6 +48,12 @@ services:
         sync: false
       - key: META_API_VERSION
         value: v20.0
+      - key: WHATSAPP_CREDENTIAL_KEY_ID
+        value: primary
+      - key: WHATSAPP_CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
+      - key: WHATSAPP_CREDENTIAL_DECRYPTION_KEYS
+        sync: false
 
 databases:
   - name: bizreplyai-db
