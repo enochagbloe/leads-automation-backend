@@ -9,6 +9,7 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     const [scheme, token] = req.get("authorization")?.split(" ") ?? [];
     if (scheme !== "Bearer" || !token) throw new AppError(401, "Authentication required", "UNAUTHENTICATED");
     const payload = tokenService.verifyAccessToken(token);
+    if (typeof payload.exp !== "number") throw new AppError(401, "Invalid or expired access token", "INVALID_ACCESS_TOKEN");
     const requestedBusinessId = req.get("x-business-id");
     const user = await prisma.user.findUnique({
       where: { id: payload.sub },
@@ -35,6 +36,7 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
       businessId: membership?.businessId ?? null,
       membershipId: membership?.id ?? null,
       role,
+      accessTokenExpiresAt: payload.exp * 1000,
     };
     next();
   } catch (error) {

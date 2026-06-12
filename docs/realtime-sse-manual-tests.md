@@ -37,5 +37,6 @@ While the stream remains open:
 3. Business A stream receives no Business B events.
 4. Staff stream receives only events where `assignedStaffId` matches its membership.
 5. Disconnecting curl removes the SSE client.
+6. A stream closes when its access token expires; reconnecting with an expired token returns `401 INVALID_ACCESS_TOKEN`.
 
 SSE is UI-only. Confirm all REST and webhook actions still succeed if no stream is connected.
