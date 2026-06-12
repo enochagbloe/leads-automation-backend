@@ -13,6 +13,7 @@ import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { encryptCredential } from "../utils/credential-encryption";
+import { isMetaCredentialExpired, metaCredentialExpiresAt } from "../utils/whatsapp-credential";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
@@ -38,6 +39,16 @@ const CONNECTED_STATUSES: WhatsAppIntegrationStatus[] = [
 const STATUS_TTL = 60;
 const HEALTH_TTL = 30;
 
+type CredentialAwareCache<T> = { value: T; credentialExpiresAt: number | null };
+
+function credentialAwareCache<T>(value: T, integration?: WhatsAppIntegration | null): CredentialAwareCache<T> {
+  return { value, credentialExpiresAt: integration ? metaCredentialExpiresAt(integration) : null };
+}
+
+function usableCachedValue<T>(cached: CredentialAwareCache<T> | null) {
+  return cached && (cached.credentialExpiresAt === null || cached.credentialExpiresAt > Date.now()) ? cached.value : null;
+}
+
 function providerLabel(provider: WhatsAppProvider) {
   return provider === WhatsAppProvider.MOCK_WHATSAPP ? "MOCK_WHATSAPP" : "META_WHATSAPP";
 }
@@ -48,8 +59,12 @@ function publicStatus(status: WhatsAppIntegrationStatus) {
   return status;
 }
 
+function effectiveStatus(integration: WhatsAppIntegration) {
+  return isMetaCredentialExpired(integration) ? WhatsAppIntegrationStatus.ERROR : publicStatus(integration.status);
+}
+
 function isConnected(integration?: WhatsAppIntegration | null) {
-  return Boolean(integration && CONNECTED_STATUSES.includes(integration.status));
+  return Boolean(integration && CONNECTED_STATUSES.includes(integration.status) && !isMetaCredentialExpired(integration));
 }
 
 function canSendMessages(integration?: WhatsAppIntegration | null) {
@@ -64,7 +79,7 @@ function safeStatus(integration?: WhatsAppIntegration | null) {
   if (!integration) return { status: WhatsAppIntegrationStatus.NOT_CONNECTED, automationEnabled: false, canSendMessages: false };
   const connected = isConnected(integration);
   return {
-    status: publicStatus(integration.status),
+    status: effectiveStatus(integration),
     provider: providerLabel(integration.provider),
     displayPhoneNumber: integration.displayPhoneNumber,
     phoneNumberId: integration.phoneNumberId,
@@ -227,10 +242,11 @@ async function verifyMetaOwnership(input: { phoneNumberId: string; wabaId: strin
 export const whatsappConnectionService = {
   async status(actor: WhatsAppConnectionActor) {
     const key = `business:${actor.businessId}:whatsapp:status`;
-    const cached = await cacheService.get<ReturnType<typeof safeStatus>>(key);
+    const cached = usableCachedValue(await cacheService.get<CredentialAwareCache<ReturnType<typeof safeStatus>>>(key));
     if (cached) return cached;
-    const result = safeStatus(await currentIntegration(actor.businessId));
-    await cacheService.set(key, result, STATUS_TTL);
+    const integration = await currentIntegration(actor.businessId);
+    const result = safeStatus(integration);
+    await cacheService.set(key, credentialAwareCache(result, integration), STATUS_TTL);
     return result;
   },
 
@@ -404,12 +420,12 @@ export const whatsappConnectionService = {
 
   async health(actor: WhatsAppConnectionActor) {
     const key = `business:${actor.businessId}:whatsapp:health`;
-    const cached = await cacheService.get<Record<string, unknown>>(key);
+    const cached = usableCachedValue(await cacheService.get<CredentialAwareCache<Record<string, unknown>>>(key));
     if (cached) return cached;
     const integration = await currentIntegration(actor.businessId);
     if (!integration) {
       const result = { status: WhatsAppIntegrationStatus.NOT_CONNECTED, canReceiveMessages: false, canSendMessages: false, automationEnabled: false };
-      await cacheService.set(key, result, HEALTH_TTL);
+      await cacheService.set(key, credentialAwareCache(result), HEALTH_TTL);
       return result;
     }
     const [lastInbound, lastOutbound, updated] = await Promise.all([
@@ -427,7 +443,7 @@ export const whatsappConnectionService = {
     ]);
     const connected = isConnected(updated);
     const result = {
-      status: publicStatus(updated.status),
+      status: effectiveStatus(updated),
       canReceiveMessages: connected,
       canSendMessages: canSendMessages(updated),
       automationEnabled: connected && updated.automationEnabled,
@@ -437,7 +453,7 @@ export const whatsappConnectionService = {
       lastErrorCode: updated.lastErrorCode,
       lastErrorMessage: updated.lastErrorMessage,
     };
-    await cacheService.set(key, result, HEALTH_TTL);
+    await cacheService.set(key, credentialAwareCache(result, updated), HEALTH_TTL);
     return result;
   },
 };

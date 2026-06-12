@@ -3,6 +3,7 @@ import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { decryptCredential } from "../utils/credential-encryption";
 import { AppError } from "../utils/errors";
+import { isMetaCredentialExpired } from "../utils/whatsapp-credential";
 
 export type SendWhatsAppTextParams = {
   phoneNumberId: string;
@@ -51,6 +52,9 @@ export async function getWhatsAppIntegration(businessId: string) {
     && !existing.accessTokenEncrypted
   ) {
     throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+  }
+  if (isMetaCredentialExpired(existing)) {
+    throw new AppError(409, "WhatsApp provider credentials have expired. Reconnect WhatsApp to continue sending messages.", "WHATSAPP_PROVIDER_CREDENTIAL_EXPIRED");
   }
   return existing;
 }
@@ -111,6 +115,9 @@ export async function sendWhatsAppText(integration: WhatsAppIntegration, params:
   }
   if (!integration.accessTokenEncrypted) {
     throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+  }
+  if (isMetaCredentialExpired(integration)) {
+    return { success: false, provider: "META_WHATSAPP", error: "Meta WhatsApp provider credential has expired" };
   }
   try {
     return new MetaWhatsAppProvider(decryptCredential(integration.accessTokenEncrypted)).sendTextMessage(params);
