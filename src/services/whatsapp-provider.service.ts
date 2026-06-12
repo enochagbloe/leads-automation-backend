@@ -1,7 +1,7 @@
 import { WhatsAppIntegration, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
-import { decryptCredential } from "../utils/credential-encryption";
+import { decryptCredential, encryptCredential } from "../utils/credential-encryption";
 import { AppError } from "../utils/errors";
 import { isMetaCredentialExpired } from "../utils/whatsapp-credential";
 
@@ -27,7 +27,7 @@ export interface WhatsAppProviderClient {
 }
 
 export async function getWhatsAppIntegration(businessId: string) {
-  const existing = await prisma.whatsAppIntegration.findFirst({
+  let existing = await prisma.whatsAppIntegration.findFirst({
     where: { businessId },
     orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
   });
@@ -51,7 +51,18 @@ export async function getWhatsAppIntegration(businessId: string) {
     && existing.status === WhatsAppIntegrationStatus.CONNECTED
     && !existing.accessTokenEncrypted
   ) {
-    throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+    if (env.META_WHATSAPP_ACCESS_TOKEN && env.META_WHATSAPP_PHONE_NUMBER_ID === existing.phoneNumberId) {
+      existing = await prisma.whatsAppIntegration.update({
+        where: { id: existing.id },
+        data: { accessTokenEncrypted: encryptCredential(env.META_WHATSAPP_ACCESS_TOKEN) },
+      });
+    } else {
+      throw new AppError(
+        409,
+        "This legacy WhatsApp connection must be reconnected before sending messages.",
+        "WHATSAPP_RECONNECTION_REQUIRED",
+      );
+    }
   }
   if (isMetaCredentialExpired(existing)) {
     throw new AppError(409, "WhatsApp provider credentials have expired. Reconnect WhatsApp to continue sending messages.", "WHATSAPP_PROVIDER_CREDENTIAL_EXPIRED");
@@ -114,13 +125,20 @@ export async function sendWhatsAppText(integration: WhatsAppIntegration, params:
     return new MockWhatsAppProvider().sendTextMessage(params);
   }
   if (!integration.accessTokenEncrypted) {
-    throw new AppError(409, "WhatsApp provider credentials are missing for this business.", "WHATSAPP_PROVIDER_CONFIG_MISSING");
+    throw new AppError(409, "This legacy WhatsApp connection must be reconnected before sending messages.", "WHATSAPP_RECONNECTION_REQUIRED");
   }
   if (isMetaCredentialExpired(integration)) {
     return { success: false, provider: "META_WHATSAPP", error: "Meta WhatsApp provider credential has expired" };
   }
   try {
-    return new MetaWhatsAppProvider(decryptCredential(integration.accessTokenEncrypted)).sendTextMessage(params);
+    const credential = decryptCredential(integration.accessTokenEncrypted);
+    if (credential.needsReEncryption) {
+      await prisma.whatsAppIntegration.update({
+        where: { id: integration.id },
+        data: { accessTokenEncrypted: encryptCredential(credential.plaintext) },
+      });
+    }
+    return new MetaWhatsAppProvider(credential.plaintext).sendTextMessage(params);
   } catch (error) {
     console.error("Stored Meta WhatsApp credential could not be used", { businessId: integration.businessId, integrationId: integration.id, error });
     return { success: false, provider: "META_WHATSAPP", error: "Meta WhatsApp provider credential is unavailable" };

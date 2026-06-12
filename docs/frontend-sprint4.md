@@ -93,8 +93,11 @@ WHATSAPP_PROVIDER_CONFIG_MISSING
 WHATSAPP_PROVIDER_CREDENTIAL_REQUIRED
 WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED
 WHATSAPP_CONNECTION_NOT_STARTED
+WHATSAPP_RECONNECTION_REQUIRED
 FORBIDDEN
 ```
+
+When `WHATSAPP_RECONNECTION_REQUIRED` is returned, show the owner a reconnect action. Do not repeatedly retry the outbound message until the connection is restored.
 
 ## What changes in the inbox
 

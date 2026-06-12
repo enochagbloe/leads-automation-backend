@@ -32,6 +32,24 @@ The application adds conservative Prisma pool defaults to `DATABASE_URL` at runt
 
 WhatsApp inbound processing defaults to `WHATSAPP_PROVIDER_MODE=mock`. Mock mode does not require Meta credentials and exposes the development simulator outside production. Live mode requires every `META_*` credential at startup and verifies incoming `x-hub-signature-256` signatures. The fallback verification token in mock mode is `bizreplyai-mock-verify-token` when `META_WHATSAPP_VERIFY_TOKEN` is empty.
 
+Live WhatsApp credentials use the dedicated `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`, not either JWT secret. Keep its key ID and key stable. To rotate it, assign a new `WHATSAPP_CREDENTIAL_KEY_ID` and key, then retain previous ID/key pairs in `WHATSAPP_CREDENTIAL_DECRYPTION_KEYS` until credentials have been read and transparently re-encrypted.
+
+```env
+WHATSAPP_CREDENTIAL_KEY_ID=2026-07
+WHATSAPP_CREDENTIAL_ENCRYPTION_KEY=<new-secret-at-least-32-characters>
+WHATSAPP_CREDENTIAL_DECRYPTION_KEYS={"primary":"<previous-secret-at-least-32-characters>"}
+```
+
+Legacy connected integrations without stored tenant credentials are migrated from `META_WHATSAPP_ACCESS_TOKEN` only when their phone number exactly matches `META_WHATSAPP_PHONE_NUMBER_ID`. Other legacy integrations return `WHATSAPP_RECONNECTION_REQUIRED`.
+
+Before rotating `JWT_REFRESH_SECRET` on an installation that previously encrypted WhatsApp credentials with it, configure the dedicated credential key and run:
+
+```bash
+pnpm whatsapp:credentials:migrate
+```
+
+The command re-encrypts legacy ciphertext and eligible global-token connections without printing credentials. It reports integrations that require owner reconnection.
+
 ## Production
 
 ```bash

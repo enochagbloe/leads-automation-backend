@@ -2,6 +2,7 @@ import "dotenv/config";
 import { z } from "zod";
 
 const optionalString = z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional());
+const credentialKeyId = z.string().regex(/^[A-Za-z0-9_-]+$/).default("primary");
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -29,6 +30,9 @@ const schema = z.object({
   META_APP_ID: optionalString,
   META_APP_SECRET: optionalString,
   META_API_VERSION: z.string().min(1).default("v20.0"),
+  WHATSAPP_CREDENTIAL_KEY_ID: credentialKeyId,
+  WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: optionalString,
+  WHATSAPP_CREDENTIAL_DECRYPTION_KEYS: optionalString,
 }).superRefine((value, context) => {
   if (value.NODE_ENV === "production" && !value.RESEND_API_KEY) {
     context.addIssue({
@@ -45,6 +49,27 @@ const schema = z.object({
     ] as const;
     for (const key of required) {
       if (!value[key]) context.addIssue({ code: z.ZodIssueCode.custom, path: [key], message: `${key} is required in live WhatsApp mode` });
+    }
+    if (!value.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY || value.WHATSAPP_CREDENTIAL_ENCRYPTION_KEY.length < 32) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"],
+        message: "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY must be at least 32 characters in live WhatsApp mode",
+      });
+    }
+  }
+  if (value.WHATSAPP_CREDENTIAL_DECRYPTION_KEYS) {
+    try {
+      const keys = JSON.parse(value.WHATSAPP_CREDENTIAL_DECRYPTION_KEYS) as unknown;
+      if (!keys || typeof keys !== "object" || Array.isArray(keys) || Object.values(keys).some((key) => typeof key !== "string" || key.length < 32)) {
+        throw new Error("Invalid keyring");
+      }
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["WHATSAPP_CREDENTIAL_DECRYPTION_KEYS"],
+        message: "WHATSAPP_CREDENTIAL_DECRYPTION_KEYS must be a JSON object of key IDs to keys of at least 32 characters",
+      });
     }
   }
 });

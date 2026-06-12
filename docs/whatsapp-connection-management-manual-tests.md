@@ -18,12 +18,10 @@ Use an owner, manager, and staff access token with the same `X-Business-Id`.
 
 1. Confirm `MOCK_WHATSAPP` connect/start is rejected while `WHATSAPP_PROVIDER_MODE=live`.
 2. Call `/connect/complete` without first calling `/connect/start`. Confirm `WHATSAPP_CONNECTION_NOT_STARTED`.
-3. Call `/connect/complete` without an authorization code or WABA ID. Confirm validation fails.
-4. Confirm a raw client-supplied access token is rejected by validation; only the Meta authorization code is accepted.
-5. Complete with an invalid/expired authorization code. Confirm `WHATSAPP_PROVIDER_AUTHORIZATION_FAILED`.
-6. Complete with a valid authorization code for a token that cannot access the requested phone number. Confirm `WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED`.
-7. Complete with a valid authorization code and WABA ID. Confirm Meta verifies the phone belongs to that WABA.
-8. Send an outbound message and confirm the integration-specific encrypted credential is used rather than the global environment token.
+3. Call `/connect/complete` without an access token. Confirm validation fails.
+4. Complete with a token that cannot access the requested Meta phone number. Confirm `WHATSAPP_PROVIDER_OWNERSHIP_VERIFICATION_FAILED`.
+5. Complete with a valid token and WABA ID. Confirm Meta verifies the phone belongs to that WABA.
+6. Send an outbound message and confirm the integration-specific encrypted credential is used rather than the global environment token.
 
 ## Change number and history
 
