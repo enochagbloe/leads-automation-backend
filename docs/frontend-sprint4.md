@@ -2,7 +2,7 @@
 
 ## Sprint goal
 
-Sprint 4 Module 1 adds backend-only WhatsApp inbound processing. There is no Meta connection UI, outbound reply, AI reply, or media UI yet.
+Sprint 4 Modules 1 and 2 add WhatsApp inbound processing and staff outbound text replies. There is no Meta connection UI, AI reply, media, or real-time socket support yet.
 
 ## What changes in the inbox
 
@@ -16,6 +16,49 @@ Mock or live inbound text messages now appear through the existing lead and conv
 - A closed WhatsApp conversation is not reused; the next inbound message creates a new one.
 
 No frontend changes are required to the existing conversations workspace contract.
+
+## Sending WhatsApp replies
+
+Use the existing message endpoint:
+
+```http
+POST /api/conversations/:conversationId/messages
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "content": "Hello Kwame, yes we can help you book a site inspection."
+}
+```
+
+- `MANUAL` conversation messages remain `INTERNAL`.
+- `WHATSAPP` conversation messages are created as `PENDING`, then returned as `SENT` or `FAILED`.
+- Mock mode returns a provider ID such as `mock_whatsapp_msg_<messageId>`.
+- Provider failures remain visible as failed messages and can be retried.
+- Closed conversations return `CONVERSATION_CLOSED`.
+
+## Retry failed reply
+
+```http
+POST /api/conversations/:conversationId/messages/:messageId/retry
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+Only failed outbound WhatsApp text messages can be retried. Other messages return `MESSAGE_NOT_RETRYABLE`.
+
+The frontend should display delivery status for staff replies:
+
+```text
+PENDING
+SENT
+FAILED
+```
+
+For `FAILED`, show a retry action. The API remains the final permission check.
 
 ## Development simulator
 
@@ -67,7 +110,6 @@ The provider webhook records a `LIMIT_BLOCKED` event internally. No upgrade flow
 ## Out of scope
 
 - Meta connection/settings UI
-- Sending WhatsApp replies
 - AI replies
 - Media messages
 - Real-time sockets
