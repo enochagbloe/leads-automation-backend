@@ -27,5 +27,6 @@ conversationRouter.post("/:id/messages/:messageId/retry", mutationLimiter, conve
 conversationRouter.patch("/:id", mutationLimiter, validate(updateConversationWorkspaceSchema), conversationController.updateWorkspace);
 conversationRouter.patch("/:id/assign", mutationLimiter, validate(assignConversationSchema), conversationController.assign);
 conversationRouter.patch("/:id/status", mutationLimiter, validate(updateConversationStatusSchema), conversationController.updateStatus);
+conversationRouter.post("/:id/end", mutationLimiter, conversationController.end);
 conversationRouter.patch("/:id/read", mutationLimiter, conversationController.markRead);
 conversationRouter.delete("/:id", mutationLimiter, conversationController.remove);

@@ -107,6 +107,7 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | GET | `/api/conversations/:id` | Business member, role-scoped |
 | POST | `/api/conversations/:id/messages` | Business member, role-scoped |
 | POST | `/api/conversations/:id/messages/:messageId/retry` | Business member, role-scoped |
+| POST | `/api/conversations/:id/end` | Business member, role-scoped |
 | PATCH | `/api/conversations/:id` | Business member, role-scoped workspace update |
 | PATCH | `/api/conversations/:id/assign` | Owner/manager |
 | PATCH | `/api/conversations/:id/status` | Business member, role-scoped |
@@ -115,6 +116,7 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | GET | `/api/webhooks/whatsapp` | Public provider verification |
 | POST | `/api/webhooks/whatsapp` | Public provider webhook, signature checked in live mode |
 | POST | `/api/dev/mock-whatsapp/inbound-message` | Development only |
+| POST | `/api/dev/mock-whatsapp/status-update` | Development only |
 | GET | `/api/health` | Public |
 
 Frontend handoffs use `docs/frontend-sprint[number].md` for every sprint:

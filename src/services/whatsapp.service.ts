@@ -22,6 +22,7 @@ import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
+import { createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
@@ -39,12 +40,20 @@ export type WhatsAppInboundText = {
   rawPayload: Prisma.InputJsonValue;
 };
 
+export type WhatsAppStatusUpdate = {
+  providerMessageId: string;
+  status: string;
+  timestamp?: Date;
+  rawPayload: Prisma.InputJsonValue;
+};
+
 type PersistedInbound = {
   lead: { id: string; businessId: string; fullName: string; phone: string; assignedStaffId: string | null };
   conversation: { id: string; displayId: string; businessId: string; leadId: string; unreadCount: number };
   message: { id: string; providerMessageId: string | null };
   leadCreated: boolean;
   conversationCreated: boolean;
+  conversationReopened: boolean;
   duplicate: boolean;
 };
 
@@ -121,11 +130,11 @@ async function persistInbound(
     include: { lead: true, conversation: true },
   });
   if (duplicate) {
-    return { lead: duplicate.lead, conversation: duplicate.conversation, message: duplicate, leadCreated: false, conversationCreated: false, duplicate: true };
+    return { lead: duplicate.lead, conversation: duplicate.conversation, message: duplicate, leadCreated: false, conversationCreated: false, conversationReopened: false, duplicate: true };
   }
 
   const existingLead = await prisma.lead.findFirst({ where: { businessId: business.id, phone: customerPhone, deletedAt: null } });
-  const existingConversation = existingLead ? await prisma.conversation.findFirst({
+  const activeConversation = existingLead ? await prisma.conversation.findFirst({
     where: {
       businessId: business.id,
       leadId: existingLead.id,
@@ -134,6 +143,18 @@ async function persistInbound(
       deletedAt: null,
     },
   }) : null;
+  const closedConversation = existingLead && !activeConversation ? await prisma.conversation.findFirst({
+    where: {
+      businessId: business.id,
+      leadId: existingLead.id,
+      channel: ConversationChannel.WHATSAPP,
+      status: ConversationStatus.CLOSED,
+      deletedAt: null,
+    },
+    orderBy: { updatedAt: "desc" },
+  }) : null;
+  const existingConversation = activeConversation ?? closedConversation;
+  const conversationReopened = Boolean(closedConversation);
   const capacity = existingConversation ? null : await getConversationCapacity(business.businessAccountId, business.id);
 
   try {
@@ -169,7 +190,7 @@ async function persistInbound(
         });
       }
 
-      const conversation = existingConversation ?? await tx.conversation.create({
+      let conversation = existingConversation ?? await tx.conversation.create({
         data: {
           businessId: business.id,
           leadId: lead.id,
@@ -180,6 +201,39 @@ async function persistInbound(
           humanTakeover: false,
         },
       });
+      let didReopen = false;
+      if (conversationReopened) {
+        const claimed = await tx.conversation.updateMany({
+          where: { id: conversation.id, status: ConversationStatus.CLOSED },
+          data: { status: ConversationStatus.OPEN, closedAt: null, humanTakeover: false },
+        });
+        conversation = await tx.conversation.findUniqueOrThrow({ where: { id: conversation.id } });
+        didReopen = claimed.count === 1;
+        if (didReopen) {
+          await createSystemMessage({
+            businessId: business.id,
+            leadId: lead.id,
+            conversationId: conversation.id,
+            content: "Conversation reopened because the customer replied.",
+            metadata: { reason: "CUSTOMER_REPLY", providerMessageId: input.providerMessageId },
+          }, tx);
+          await tx.leadActivity.create({
+            data: {
+              businessId: business.id,
+              leadId: lead.id,
+              action: LeadActivityAction.CONVERSATION_REOPENED,
+              metadata: {
+                reason: "CUSTOMER_REPLY",
+                previousStatus: ConversationStatus.CLOSED,
+                newStatus: ConversationStatus.OPEN,
+                leadId: lead.id,
+                conversationId: conversation.id,
+                providerMessageId: input.providerMessageId,
+              },
+            },
+          });
+        }
+      }
       if (!existingConversation) {
         await tx.leadActivity.create({
           data: {
@@ -209,6 +263,7 @@ async function persistInbound(
             customerPhone,
             customerName: input.customerName ?? null,
             rawWebhookEventId: input.rawWebhookEventId ?? null,
+            reopenedConversation: didReopen,
           },
           createdAt: input.timestamp,
         },
@@ -246,9 +301,10 @@ async function persistInbound(
         message,
         leadCreated: !existingLead,
         conversationCreated: !existingConversation,
+        conversationReopened: didReopen,
         duplicate: false,
       };
-    });
+    }, { maxWait: 15_000, timeout: 30_000 });
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       const duplicateMessage = await prisma.message.findFirst({
@@ -256,7 +312,7 @@ async function persistInbound(
         include: { lead: true, conversation: true },
       });
       if (duplicateMessage) {
-        return { lead: duplicateMessage.lead, conversation: duplicateMessage.conversation, message: duplicateMessage, leadCreated: false, conversationCreated: false, duplicate: true };
+        return { lead: duplicateMessage.lead, conversation: duplicateMessage.conversation, message: duplicateMessage, leadCreated: false, conversationCreated: false, conversationReopened: false, duplicate: true };
       }
       if (attempt === 0) return persistInbound(business, input, 1);
     }
@@ -296,6 +352,20 @@ async function logSystemActions(result: PersistedInbound, input: WhatsAppInbound
       metadata: { usageKey: "conversationsUsed", delta: 1, source: "WHATSAPP", conversationId: result.conversation.id },
     }));
   }
+  if (result.conversationReopened) {
+    logs.push(auditService.log({
+      action: AuditAction.CONVERSATION_REOPENED,
+      businessId: result.lead.businessId,
+      metadata: {
+        businessId: result.lead.businessId,
+        leadId: result.lead.id,
+        conversationId: result.conversation.id,
+        reason: "CUSTOMER_REPLY",
+        triggeredBy: "SYSTEM",
+        providerMessageId: input.providerMessageId,
+      },
+    }));
+  }
   await Promise.all(logs);
 }
 
@@ -329,6 +399,44 @@ export function parseMetaWebhook(payload: unknown): WhatsAppInboundText[] {
     }
   }
   return result;
+}
+
+export function parseMetaStatusWebhook(payload: unknown): WhatsAppStatusUpdate[] {
+  if (!payload || typeof payload !== "object") return [];
+  const result: WhatsAppStatusUpdate[] = [];
+  const entries = Array.isArray((payload as { entry?: unknown }).entry) ? (payload as { entry: unknown[] }).entry : [];
+  for (const entryValue of entries) {
+    const entry = entryValue as { changes?: unknown[] };
+    for (const changeValue of Array.isArray(entry.changes) ? entry.changes : []) {
+      const value = (changeValue as { value?: Record<string, unknown> }).value;
+      const statuses = value && Array.isArray(value.statuses) ? value.statuses as Array<Record<string, unknown>> : [];
+      for (const status of statuses) {
+        if (typeof status.id !== "string" || typeof status.status !== "string") continue;
+        result.push({
+          providerMessageId: status.id,
+          status: status.status,
+          timestamp: typeof status.timestamp === "string" ? new Date(Number(status.timestamp) * 1000) : undefined,
+          rawPayload: payload as Prisma.InputJsonValue,
+        });
+      }
+    }
+  }
+  return result;
+}
+
+function mapProviderStatus(status: string) {
+  const statuses: Record<string, MessageDeliveryStatus> = {
+    sent: MessageDeliveryStatus.SENT,
+    delivered: MessageDeliveryStatus.DELIVERED,
+    read: MessageDeliveryStatus.READ,
+    failed: MessageDeliveryStatus.FAILED,
+  };
+  return statuses[status.toLowerCase()];
+}
+
+function mergeMetadata(metadata: Prisma.JsonValue | null, values: Record<string, Prisma.JsonValue>): Prisma.InputJsonValue {
+  const current = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {};
+  return { ...current, ...values };
 }
 
 export const whatsappService = {
@@ -373,7 +481,7 @@ export const whatsappService = {
     const event = await prisma.webhookEventLog.create({
       data: {
         provider: WebhookProvider.META_WHATSAPP,
-        eventType: WebhookEventType.INBOUND_TEXT,
+        eventType: WebhookEventType.WHATSAPP_INBOUND_MESSAGE,
         providerMessageId: input.providerMessageId,
         payload: input.rawPayload,
         processingStatus: WebhookProcessingStatus.RECEIVED,
@@ -388,6 +496,9 @@ export const whatsappService = {
       await prisma.webhookEventLog.update({
         where: { id: event.id },
         data: {
+          businessId: business.id,
+          conversationId: result.conversation.id,
+          messageId: result.message.id,
           processingStatus: result.duplicate ? WebhookProcessingStatus.DUPLICATE : WebhookProcessingStatus.PROCESSED,
           processedAt: new Date(),
         },
@@ -416,6 +527,94 @@ export const whatsappService = {
         },
       }).catch((logError) => console.error("Webhook event failure could not be logged", logError));
       throw error;
+    }
+  },
+
+  async processStatusUpdate(input: WhatsAppStatusUpdate) {
+    const event = await prisma.webhookEventLog.create({
+      data: {
+        provider: WebhookProvider.META_WHATSAPP,
+        eventType: WebhookEventType.WHATSAPP_STATUS_UPDATE,
+        providerMessageId: input.providerMessageId,
+        payload: input.rawPayload,
+        processingStatus: WebhookProcessingStatus.RECEIVED,
+      },
+    });
+    try {
+      const message = await prisma.message.findFirst({
+        where: { providerMessageId: input.providerMessageId, direction: MessageDirection.OUTBOUND, deletedAt: null },
+      });
+      if (!message) {
+        await prisma.webhookEventLog.update({
+          where: { id: event.id },
+          data: { processingStatus: WebhookProcessingStatus.MESSAGE_NOT_FOUND, processedAt: new Date() },
+        });
+        return { messageFound: false, providerMessageId: input.providerMessageId };
+      }
+      const mapped = mapProviderStatus(input.status);
+      const updated = await prisma.$transaction(async (tx) => {
+        const record = await tx.message.update({
+          where: { id: message.id },
+          data: {
+            ...(mapped ? { deliveryStatus: mapped } : {}),
+            ...(mapped === MessageDeliveryStatus.READ ? { readAt: input.timestamp ?? new Date() } : {}),
+            metadata: mergeMetadata(message.metadata, {
+              providerStatus: input.status,
+              providerStatusAt: (input.timestamp ?? new Date()).toISOString(),
+              providerStatusPayload: input.rawPayload as Prisma.JsonValue,
+              deliveryStatus: mapped ?? message.deliveryStatus,
+            }),
+          },
+        });
+        await tx.leadActivity.create({
+          data: {
+            businessId: message.businessId,
+            leadId: message.leadId,
+            action: LeadActivityAction.MESSAGE_STATUS_UPDATED,
+            metadata: {
+              conversationId: message.conversationId,
+              messageId: message.id,
+              providerMessageId: input.providerMessageId,
+              providerStatus: input.status,
+              deliveryStatus: mapped ?? message.deliveryStatus,
+            },
+          },
+        });
+        await tx.webhookEventLog.update({
+          where: { id: event.id },
+          data: {
+            businessId: message.businessId,
+            conversationId: message.conversationId,
+            messageId: message.id,
+            processingStatus: WebhookProcessingStatus.PROCESSED,
+            processedAt: new Date(),
+          },
+        });
+        return record;
+      }, { maxWait: 15_000, timeout: 30_000 });
+      await Promise.all([
+        auditService.log({
+          action: AuditAction.WHATSAPP_MESSAGE_STATUS_UPDATED,
+          businessId: message.businessId,
+          metadata: {
+            conversationId: message.conversationId,
+            messageId: message.id,
+            providerMessageId: input.providerMessageId,
+            providerStatus: input.status,
+            deliveryStatus: mapped ?? message.deliveryStatus,
+          },
+        }),
+        cacheService.delByPattern(`business:${message.businessId}:conversations:list:*`),
+        cacheService.delByPattern(`business:${message.businessId}:conversations:detail:${message.conversationId}:*`),
+        cacheService.delByPattern(`business:${message.businessId}:conversations:stats:*`),
+      ]);
+      return { messageFound: true, message: updated, mappedStatus: mapped ?? null };
+    } catch (error) {
+      await prisma.webhookEventLog.update({
+        where: { id: event.id },
+        data: { processingStatus: WebhookProcessingStatus.FAILED, errorMessage: safeErrorMessage(error), processedAt: new Date() },
+      }).catch((logError) => console.error("Status webhook failure could not be logged", logError));
+      throw new AppError(500, "WhatsApp status update failed", "WHATSAPP_STATUS_UPDATE_FAILED");
     }
   },
 };

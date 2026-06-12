@@ -35,6 +35,7 @@ export const conversationController = {
   updateWorkspace: async (req, res) => res.json(await conversationService.updateWorkspace(actor(req), conversationId(req), req.body)),
   assign: async (req, res) => res.json(await conversationService.assign(actor(req), conversationId(req), req.body.assignedStaffId, requestMetadata(req))),
   updateStatus: async (req, res) => res.json(await conversationService.updateStatus(actor(req), conversationId(req), req.body.status, requestMetadata(req))),
+  end: async (req, res) => res.json(await conversationService.end(actor(req), conversationId(req), requestMetadata(req))),
   markRead: async (req, res) => res.json(await conversationService.markRead(actor(req), conversationId(req), requestMetadata(req))),
   remove: async (req, res) => res.json(await conversationService.remove(actor(req), conversationId(req), requestMetadata(req))),
 } satisfies Record<string, RequestHandler>;

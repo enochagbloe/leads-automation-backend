@@ -66,10 +66,13 @@ enum LeadActivityAction {
   CONVERSATION_CREATED
   CONVERSATION_ASSIGNED
   CONVERSATION_STATUS_CHANGED
+  CONVERSATION_ENDED
+  CONVERSATION_REOPENED
   CONVERSATION_DELETED
   MESSAGE_CREATED
   MESSAGE_SENT
   MESSAGE_SEND_FAILED
+  MESSAGE_STATUS_UPDATED
   MESSAGE_RETRY_ATTEMPTED
   CONVERSATION_MARKED_READ
 }
@@ -148,6 +151,8 @@ enum WebhookProvider {
 
 enum WebhookEventType {
   INBOUND_TEXT
+  WHATSAPP_INBOUND_MESSAGE
+  WHATSAPP_STATUS_UPDATE
   UNKNOWN
 }
 
@@ -157,6 +162,7 @@ enum WebhookProcessingStatus {
   DUPLICATE
   FAILED
   LIMIT_BLOCKED
+  MESSAGE_NOT_FOUND
 }
 
 enum BusinessStatus {
@@ -210,10 +216,13 @@ enum AuditAction {
   CONVERSATION_CREATED
   CONVERSATION_ASSIGNED
   CONVERSATION_STATUS_CHANGED
+  CONVERSATION_ENDED
+  CONVERSATION_REOPENED
   CONVERSATION_DELETED
   MESSAGE_CREATED
   WHATSAPP_MESSAGE_SENT
   WHATSAPP_MESSAGE_SEND_FAILED
+  WHATSAPP_MESSAGE_STATUS_UPDATED
   WHATSAPP_MESSAGE_RETRIED
   CONVERSATION_MARKED_READ
   CONVERSATION_READ_FAILED
@@ -613,6 +622,8 @@ model WebhookEventLog {
   provider          WebhookProvider
   eventType         WebhookEventType
   businessId        String?
+  conversationId    String?
+  messageId         String?
   providerMessageId String?
   payload           Json
   processingStatus  WebhookProcessingStatus @default(RECEIVED)
@@ -624,5 +635,7 @@ model WebhookEventLog {
 
   @@index([provider, providerMessageId])
   @@index([businessId, receivedAt])
+  @@index([conversationId, receivedAt])
+  @@index([messageId, receivedAt])
   @@index([processingStatus, receivedAt])
 }

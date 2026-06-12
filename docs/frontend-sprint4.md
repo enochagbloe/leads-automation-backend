@@ -2,7 +2,7 @@
 
 ## Sprint goal
 
-Sprint 4 Modules 1 and 2 add WhatsApp inbound processing and staff outbound text replies. There is no Meta connection UI, AI reply, media, or real-time socket support yet.
+Sprint 4 Modules 1-3 add WhatsApp inbound processing, staff outbound text replies, delivery statuses, End Chat, and automatic reopen. There is no Meta connection UI, AI reply, media, or real-time socket support yet.
 
 ## What changes in the inbox
 
@@ -60,6 +60,64 @@ FAILED
 
 For `FAILED`, show a retry action. The API remains the final permission check.
 
+## Delivery statuses
+
+Meta/mock status webhooks update existing outbound messages:
+
+```text
+PENDING -> SENT -> DELIVERED -> READ
+                  or FAILED
+```
+
+Continue rendering the delivery status returned with each message. Module 4 will add real-time updates; for now, refetch or poll conversation detail.
+
+Development-only status simulator:
+
+```http
+POST /api/dev/mock-whatsapp/status-update
+Content-Type: application/json
+```
+
+```json
+{
+  "providerMessageId": "mock_whatsapp_msg_abc123",
+  "status": "read"
+}
+```
+
+Supported mock statuses are `sent`, `delivered`, `read`, and `failed`.
+
+## End Chat
+
+```http
+POST /api/conversations/:conversationId/end
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+The endpoint returns the conversation with:
+
+```json
+{
+  "status": "CLOSED",
+  "closedAt": "..."
+}
+```
+
+The timeline receives a system message naming the team member who ended the conversation. Calling End Chat again returns `CONVERSATION_ALREADY_CLOSED`.
+
+## Automatic reopen
+
+When a customer replies to a closed WhatsApp conversation, the backend reopens that same conversation:
+
+- `status` becomes `OPEN`.
+- `closedAt` becomes `null`.
+- Existing assignment and message history remain.
+- A reopen system event appears before the new customer message.
+- No duplicate lead or conversation is created.
+
+The frontend only needs to refetch the existing conversation/list. No separate reopen endpoint is required.
+
 ## Development simulator
 
 Use this endpoint only during local/development testing:
@@ -113,4 +171,4 @@ The provider webhook records a `LIMIT_BLOCKED` event internally. No upgrade flow
 - AI replies
 - Media messages
 - Real-time sockets
-- WhatsApp session/end-chat behavior
+- WhatsApp 24-hour session enforcement

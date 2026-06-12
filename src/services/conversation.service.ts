@@ -253,7 +253,7 @@ export const conversationService = {
         data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_ASSIGNED, metadata: { conversationId, assignedStaffId } },
       });
       return record;
-    });
+    }, { maxWait: 15_000, timeout: 30_000 });
     await Promise.all([
       invalidateConversationCache(actor.businessId, conversationId),
       logAudit(actor, AuditAction.CONVERSATION_ASSIGNED, conversationId, conversation.leadId, context, { assignedStaffId }),
@@ -311,6 +311,57 @@ export const conversationService = {
     await Promise.all([
       invalidateConversationCache(actor.businessId, conversationId),
       logAudit(actor, AuditAction.CONVERSATION_STATUS_CHANGED, conversationId, conversation.leadId, context, { from: conversation.status, to: status }),
+    ]);
+    return updated;
+  },
+
+  async end(actor: ConversationActor, conversationId: string, context: Omit<AuditInput, "action">) {
+    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
+    if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    if (conversation.status === ConversationStatus.CLOSED) {
+      throw new AppError(409, "Conversation is already closed.", "CONVERSATION_ALREADY_CLOSED");
+    }
+    const user = await prisma.user.findUnique({
+      where: { id: actor.userId },
+      select: { firstName: true, lastName: true },
+    });
+    const staffName = user ? `${user.firstName} ${user.lastName}`.trim() : "a team member";
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.conversation.update({
+        where: { id: conversationId },
+        data: {
+          status: ConversationStatus.CLOSED,
+          closedAt: new Date(),
+          aiEnabled: false,
+          humanTakeover: false,
+        },
+        include: conversationInclude,
+      });
+      await createSystemMessage({
+        businessId: actor.businessId,
+        leadId: conversation.leadId,
+        conversationId,
+        content: `Conversation ended by ${staffName}.`,
+        metadata: { endedByUserId: actor.userId, endedByMembershipId: actor.membershipId },
+      }, tx);
+      await tx.leadActivity.create({
+        data: {
+          businessId: actor.businessId,
+          leadId: conversation.leadId,
+          actorUserId: actor.userId,
+          action: LeadActivityAction.CONVERSATION_ENDED,
+          metadata: { conversationId, previousStatus: conversation.status, newStatus: ConversationStatus.CLOSED },
+        },
+      });
+      return record;
+    }, { maxWait: 15_000, timeout: 30_000 });
+    await Promise.all([
+      invalidateConversationCache(actor.businessId, conversationId),
+      cacheService.delByPattern(`business:${actor.businessId}:leads:detail:${conversation.leadId}*`),
+      logAudit(actor, AuditAction.CONVERSATION_ENDED, conversationId, conversation.leadId, context, {
+        previousStatus: conversation.status,
+        newStatus: ConversationStatus.CLOSED,
+      }),
     ]);
     return updated;
   },

@@ -8,4 +8,10 @@ export const mockWhatsAppInboundSchema = z.object({
   providerMessageId: z.string().trim().min(1).max(255).optional(),
 });
 
+export const mockWhatsAppStatusSchema = z.object({
+  providerMessageId: z.string().trim().min(1).max(255),
+  status: z.string().trim().min(1).max(80),
+});
+
 export type MockWhatsAppInboundInput = z.infer<typeof mockWhatsAppInboundSchema>;
+export type MockWhatsAppStatusInput = z.infer<typeof mockWhatsAppStatusSchema>;

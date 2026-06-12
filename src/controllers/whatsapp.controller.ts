@@ -3,8 +3,8 @@ import { Prisma } from "@prisma/client";
 import { RequestHandler } from "express";
 import { env } from "../config/env";
 import { AppError } from "../utils/errors";
-import { MockWhatsAppInboundInput } from "../validation/whatsapp.schemas";
-import { parseMetaWebhook, whatsappService } from "../services/whatsapp.service";
+import { MockWhatsAppInboundInput, MockWhatsAppStatusInput } from "../validation/whatsapp.schemas";
+import { parseMetaStatusWebhook, parseMetaWebhook, whatsappService } from "../services/whatsapp.service";
 
 function queryValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
@@ -23,9 +23,13 @@ export const whatsappController = {
     if (!whatsappService.verifySignature(req.rawBody, req.get("x-hub-signature-256"))) {
       throw new AppError(403, "Invalid webhook signature", "INVALID_WEBHOOK_SIGNATURE");
     }
-    const events = parseMetaWebhook(req.body);
-    if (events.length === 0) await whatsappService.logIgnoredWebhook(req.body as Prisma.InputJsonValue);
-    const results = await Promise.allSettled(events.map((event) => whatsappService.processInbound(event)));
+    const inboundEvents = parseMetaWebhook(req.body);
+    const statusEvents = parseMetaStatusWebhook(req.body);
+    if (inboundEvents.length === 0 && statusEvents.length === 0) await whatsappService.logIgnoredWebhook(req.body as Prisma.InputJsonValue);
+    const results = await Promise.allSettled([
+      ...inboundEvents.map((event) => whatsappService.processInbound(event)),
+      ...statusEvents.map((event) => whatsappService.processStatusUpdate(event)),
+    ]);
     const failed = results.filter((result) => result.status === "rejected").length;
     res.json({ received: true, processed: results.length - failed, failed });
   }) satisfies RequestHandler,
@@ -47,5 +51,19 @@ export const whatsappController = {
       rawPayload: input as Prisma.InputJsonValue,
     });
     res.status(result.duplicate ? 200 : 201).json(result);
+  }) satisfies RequestHandler,
+
+  mockStatus: (async (req, res) => {
+    if (env.NODE_ENV === "production" || (!env.ENABLE_DEV_TOOLS && env.NODE_ENV !== "development" && env.NODE_ENV !== "test")) {
+      throw new AppError(404, "Route not found", "NOT_FOUND");
+    }
+    const input = req.body as MockWhatsAppStatusInput;
+    const result = await whatsappService.processStatusUpdate({
+      providerMessageId: input.providerMessageId,
+      status: input.status,
+      timestamp: new Date(),
+      rawPayload: input as Prisma.InputJsonValue,
+    });
+    res.json(result);
   }) satisfies RequestHandler,
 };
