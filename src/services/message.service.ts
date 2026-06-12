@@ -9,12 +9,13 @@ import {
   MessageSenderType,
   MessageType,
   Prisma,
+  WhatsAppIntegration,
 } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
-import { getWhatsAppIntegration, whatsappProvider, WhatsAppSendResult } from "./whatsapp-provider.service";
+import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./whatsapp-provider.service";
 import { realtimeService } from "./realtime.service";
 
 export type ConversationActor = {
@@ -104,13 +105,13 @@ async function accessibleConversation(actor: ConversationActor, conversationId: 
 async function settleWhatsAppMessage(
   actor: ConversationActor,
   message: { id: string; businessId: string; conversationId: string; leadId: string; content: string; metadata: Prisma.JsonValue | null },
-  phoneNumberId: string,
+  integration: WhatsAppIntegration,
   customerPhone: string,
   assignedStaffId: string | null,
   context: Omit<AuditInput, "action">,
 ) {
-  const result = await whatsappProvider.sendTextMessage({
-    phoneNumberId,
+  const result = await sendWhatsAppText(integration, {
+    phoneNumberId: integration.phoneNumberId,
     to: customerPhone,
     message: message.content,
     businessId: actor.businessId,
@@ -118,10 +119,6 @@ async function settleWhatsAppMessage(
     messageId: message.id,
   });
   const deliveryStatus = result.success ? MessageDeliveryStatus.SENT : MessageDeliveryStatus.FAILED;
-  const integration = await prisma.whatsAppIntegration.findFirst({
-    where: { businessId: actor.businessId, phoneNumberId },
-    orderBy: { createdAt: "desc" },
-  });
   const updated = await prisma.$transaction(async (tx) => {
     const record = await tx.message.update({
       where: { id: message.id },
@@ -154,18 +151,16 @@ async function settleWhatsAppMessage(
     });
     return record;
   });
-  if (integration) {
-    await prisma.whatsAppIntegration.update({
-      where: { id: integration.id },
-      data: result.success
-        ? { lastHealthCheckAt: new Date(), lastErrorCode: null, lastErrorMessage: null }
-        : { lastHealthCheckAt: new Date(), lastErrorCode: "WHATSAPP_PROVIDER_ERROR", lastErrorMessage: providerError(result) },
-    });
-    await Promise.all([
-      cacheService.del(`business:${actor.businessId}:whatsapp:status`),
-      cacheService.del(`business:${actor.businessId}:whatsapp:health`),
-    ]);
-  }
+  await prisma.whatsAppIntegration.update({
+    where: { id: integration.id },
+    data: result.success
+      ? { lastHealthCheckAt: new Date(), lastErrorCode: null, lastErrorMessage: null }
+      : { lastHealthCheckAt: new Date(), lastErrorCode: "WHATSAPP_PROVIDER_ERROR", lastErrorMessage: providerError(result) },
+  });
+  await Promise.all([
+    cacheService.del(`business:${actor.businessId}:whatsapp:status`),
+    cacheService.del(`business:${actor.businessId}:whatsapp:health`),
+  ]);
   await Promise.all([
     auditService.log({
       ...context,
@@ -192,7 +187,7 @@ async function settleWhatsAppMessage(
       userId: actor.userId,
       metadata: {
         businessId: actor.businessId,
-        integrationId: integration?.id ?? null,
+        integrationId: integration.id,
         conversationId: message.conversationId,
         messageId: message.id,
         errorCode: "WHATSAPP_PROVIDER_ERROR",
@@ -204,10 +199,10 @@ async function settleWhatsAppMessage(
       type: "whatsapp.connection.error",
       businessId: actor.businessId,
       payload: {
-        status: integration?.status ?? "ERROR",
+        status: integration.status,
         lastErrorCode: "WHATSAPP_PROVIDER_ERROR",
         lastErrorMessage: providerError(result),
-        canSendMessages: Boolean(integration),
+        canSendMessages: true,
       },
     });
   }
@@ -373,7 +368,7 @@ export const messageService = {
         assignedStaffId: conversation.assignedStaffId,
         payload: { conversationId, changes: { lastMessagePreview: message.content.slice(0, 240), lastMessageAt: message.createdAt } },
       });
-      if (integration) return settleWhatsAppMessage(actor, message, integration.phoneNumberId, conversation.lead.phone, conversation.assignedStaffId, context);
+      if (integration) return settleWhatsAppMessage(actor, message, integration, conversation.lead.phone, conversation.assignedStaffId, context);
       await invalidateOutboundCaches(actor.businessId, conversationId, conversation.leadId);
       return message;
     } catch (error) {
@@ -460,6 +455,6 @@ export const messageService = {
       assignedStaffId: conversation.assignedStaffId,
       payload: { messageId, conversationId, previousStatus: MessageDeliveryStatus.FAILED, newStatus: MessageDeliveryStatus.PENDING, readAt: pending.readAt, updatedAt: pending.updatedAt },
     });
-    return settleWhatsAppMessage(actor, pending, integration.phoneNumberId, conversation.lead.phone, conversation.assignedStaffId, context);
+    return settleWhatsAppMessage(actor, pending, integration, conversation.lead.phone, conversation.assignedStaffId, context);
   },
 };

@@ -19,12 +19,12 @@ export const startWhatsAppConnectionSchema = z.object({
 });
 
 export const completeWhatsAppConnectionSchema = z.object({
-  provider: z.enum(["META_WHATSAPP", "MOCK_WHATSAPP"]),
+  provider: z.literal("META_WHATSAPP"),
   phoneNumberId: z.string().trim().min(1).max(255),
   displayPhoneNumber: z.string().trim().min(5).max(40).optional(),
   wabaId: z.string().trim().min(1).max(255).optional(),
   businessAccountId: z.string().trim().min(1).max(255).optional(),
-  accessToken: z.string().min(1).max(10_000).optional(),
+  accessToken: z.string().min(1).max(10_000),
   metadata: z.record(z.unknown()).optional(),
 });
 
