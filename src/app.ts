@@ -50,7 +50,7 @@ app.get("/api/health", async (_req, res) => {
 
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: "ok", database: "connected", whatsapp: { mode: env.WHATSAPP_PROVIDER_MODE, configured: env.WHATSAPP_PROVIDER_MODE === "mock" || Boolean(env.META_WHATSAPP_ACCESS_TOKEN) }, timestamp });
+    res.json({ status: "ok", database: "connected", whatsapp: { mode: env.WHATSAPP_PROVIDER_MODE, configured: env.WHATSAPP_PROVIDER_MODE === "mock" || Boolean(env.META_APP_ID && env.META_APP_SECRET && env.META_WHATSAPP_VERIFY_TOKEN) }, timestamp });
   } catch {
     res.status(503).json({ status: "degraded", database: "unavailable", timestamp });
   }
