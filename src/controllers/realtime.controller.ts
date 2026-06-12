@@ -21,6 +21,15 @@ export const realtimeController = {
       role: req.auth!.role as BusinessRole,
       response: res,
     });
-    req.on("close", () => realtimeService.unsubscribe(client.id));
+    const expiryTimer = setTimeout(() => {
+      realtimeService.unsubscribe(client.id);
+      res.end();
+    }, Math.max(0, req.auth!.accessTokenExpiresAt - Date.now()));
+    expiryTimer.unref();
+
+    req.on("close", () => {
+      clearTimeout(expiryTimer);
+      realtimeService.unsubscribe(client.id);
+    });
   }) satisfies RequestHandler,
 };
