@@ -12,6 +12,7 @@ import { prisma } from "./config/prisma";
 import { conversationRouter } from "./routes/conversation.routes";
 import { env } from "./config/env";
 import { mockWhatsAppRouter, whatsappWebhookRouter } from "./routes/whatsapp.routes";
+import { realtimeRouter } from "./routes/realtime.routes";
 
 export const app = express();
 
@@ -35,6 +36,7 @@ app.get("/api", (_req, res) => res.json({
     businesses: "/api/businesses",
     leads: "/api/leads",
     conversations: "/api/conversations",
+    realtime: "/api/realtime/events",
     whatsAppWebhook: "/api/webhooks/whatsapp",
     mockWhatsApp: env.NODE_ENV === "production" ? undefined : "/api/dev/mock-whatsapp/inbound-message",
     plans: "/api/plans",
@@ -58,6 +60,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/leads", leadRouter);
 app.use("/api/conversations", conversationRouter);
+app.use("/api/realtime", realtimeRouter);
 app.use("/api/subscription", subscriptionRouter);
 
 app.use(notFound);

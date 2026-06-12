@@ -17,6 +17,7 @@ import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { ConversationActor, createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
+import { realtimeService } from "./realtime.service";
 
 const conversationInclude = {
   lead: { select: { id: true, fullName: true, phone: true, email: true, status: true } },
@@ -143,6 +144,14 @@ export const conversationService = {
       subscriptionService.updateAccountUsage(actor.businessAccountId, "conversationsUsed", 1, actor.businessId),
       subscriptionService.updateBusinessUsage(actor.businessId, "conversationsUsed", 1),
     ]);
+    realtimeService.publish({
+      type: "conversation.created",
+      businessId: actor.businessId,
+      conversationId: conversation.id,
+      leadId: conversation.leadId,
+      assignedStaffId: conversation.assignedStaffId,
+      payload: { conversation },
+    });
     return conversation;
   },
 
@@ -246,9 +255,11 @@ export const conversationService = {
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
     const assignee = await validateAssignee(actor.businessId, assignedStaffId);
     const label = assignee ? `${assignee.user.firstName} ${assignee.user.lastName}` : "Unassigned";
+    let systemMessageId: string | undefined;
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.conversation.update({ where: { id: conversationId }, data: { assignedStaffId }, include: conversationInclude });
-      await createSystemMessage({ businessId: actor.businessId, leadId: conversation.leadId, conversationId, content: `Conversation assigned to ${label}.`, metadata: { assignedStaffId } }, tx);
+      const systemMessage = await createSystemMessage({ businessId: actor.businessId, leadId: conversation.leadId, conversationId, content: `Conversation assigned to ${label}.`, metadata: { assignedStaffId } }, tx);
+      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_ASSIGNED, metadata: { conversationId, assignedStaffId } },
       });
@@ -258,6 +269,39 @@ export const conversationService = {
       invalidateConversationCache(actor.businessId, conversationId),
       logAudit(actor, AuditAction.CONVERSATION_ASSIGNED, conversationId, conversation.leadId, context, { assignedStaffId }),
     ]);
+    realtimeService.publish({
+      type: "conversation.assigned",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId,
+      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
+      payload: {
+        conversationId,
+        previousAssignedStaffId: conversation.assignedStaffId,
+        newAssignedStaffId: assignedStaffId,
+        assignedByUserId: actor.userId,
+      },
+    });
+    realtimeService.publish({
+      type: "conversation.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId,
+      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
+      payload: { conversationId, changes: { assignedStaffId } },
+    });
+    realtimeService.publish({
+      type: "message.created",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      messageId: systemMessageId,
+      assignedStaffId,
+      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
+      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+    });
     return updated;
   },
 
@@ -273,6 +317,14 @@ export const conversationService = {
     }
     const updated = await prisma.conversation.update({ where: { id: conversationId }, data: input, include: conversationInclude });
     await invalidateConversationCache(actor.businessId, conversationId);
+    realtimeService.publish({
+      type: "conversation.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { conversationId, changes: input },
+    });
     return updated;
   },
 
@@ -280,6 +332,7 @@ export const conversationService = {
     const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
     if (conversation.status === status) return conversation;
+    let systemMessageId: string | undefined;
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.conversation.update({
         where: { id: conversationId },
@@ -291,13 +344,14 @@ export const conversationService = {
         },
         include: conversationInclude,
       });
-      await createSystemMessage({
+      const systemMessage = await createSystemMessage({
         businessId: actor.businessId,
         leadId: conversation.leadId,
         conversationId,
         content: `Conversation status changed from ${conversation.status} to ${status}.`,
         metadata: { from: conversation.status, to: status },
       }, tx);
+      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_STATUS_CHANGED, metadata: { conversationId, from: conversation.status, to: status } },
       });
@@ -312,6 +366,23 @@ export const conversationService = {
       invalidateConversationCache(actor.businessId, conversationId),
       logAudit(actor, AuditAction.CONVERSATION_STATUS_CHANGED, conversationId, conversation.leadId, context, { from: conversation.status, to: status }),
     ]);
+    realtimeService.publish({
+      type: "conversation.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: updated.aiEnabled, humanTakeover: updated.humanTakeover } },
+    });
+    realtimeService.publish({
+      type: "message.created",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      messageId: systemMessageId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+    });
     return updated;
   },
 
@@ -326,6 +397,7 @@ export const conversationService = {
       select: { firstName: true, lastName: true },
     });
     const staffName = user ? `${user.firstName} ${user.lastName}`.trim() : "a team member";
+    let systemMessageId: string | undefined;
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.conversation.update({
         where: { id: conversationId },
@@ -337,13 +409,14 @@ export const conversationService = {
         },
         include: conversationInclude,
       });
-      await createSystemMessage({
+      const systemMessage = await createSystemMessage({
         businessId: actor.businessId,
         leadId: conversation.leadId,
         conversationId,
         content: `Conversation ended by ${staffName}.`,
         metadata: { endedByUserId: actor.userId, endedByMembershipId: actor.membershipId },
       }, tx);
+      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: {
           businessId: actor.businessId,
@@ -363,6 +436,31 @@ export const conversationService = {
         newStatus: ConversationStatus.CLOSED,
       }),
     ]);
+    realtimeService.publish({
+      type: "conversation.closed",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { conversationId, status: updated.status, closedAt: updated.closedAt, closedByUserId: actor.userId, systemMessageId },
+    });
+    realtimeService.publish({
+      type: "message.created",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      messageId: systemMessageId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+    });
+    realtimeService.publish({
+      type: "conversation.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: false, humanTakeover: false } },
+    });
     return updated;
   },
 
@@ -386,6 +484,22 @@ export const conversationService = {
         invalidateConversationCache(actor.businessId, conversationId),
         logAudit(actor, AuditAction.CONVERSATION_MARKED_READ, conversationId, conversation.leadId, context),
       ]);
+      realtimeService.publish({
+        type: "conversation.read",
+        businessId: actor.businessId,
+        conversationId,
+        leadId: conversation.leadId,
+        assignedStaffId: updated.assignedStaffId,
+        payload: { conversationId, readByUserId: actor.userId, unreadCount: 0, readAt: now.toISOString() },
+      });
+      realtimeService.publish({
+        type: "conversation.updated",
+        businessId: actor.businessId,
+        conversationId,
+        leadId: conversation.leadId,
+        assignedStaffId: updated.assignedStaffId,
+        payload: { conversationId, changes: { unreadCount: 0 } },
+      });
       return updated;
     } catch (error) {
       await auditService.log({ ...context, action: AuditAction.CONVERSATION_READ_FAILED, businessId: actor.businessId, userId: actor.userId, metadata: { conversationId } });

@@ -24,6 +24,7 @@ import { auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
+import { realtimeService } from "./realtime.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
 const MOCK_VERIFY_TOKEN = "bizreplyai-mock-verify-token";
@@ -49,7 +50,17 @@ export type WhatsAppStatusUpdate = {
 
 type PersistedInbound = {
   lead: { id: string; businessId: string; fullName: string; phone: string; assignedStaffId: string | null };
-  conversation: { id: string; displayId: string; businessId: string; leadId: string; unreadCount: number };
+  conversation: {
+    id: string;
+    displayId: string;
+    businessId: string;
+    leadId: string;
+    assignedStaffId: string | null;
+    status: ConversationStatus;
+    lastMessagePreview: string | null;
+    lastMessageAt: Date | null;
+    unreadCount: number;
+  };
   message: { id: string; providerMessageId: string | null };
   leadCreated: boolean;
   conversationCreated: boolean;
@@ -508,6 +519,73 @@ export const whatsappService = {
           logSystemActions(result, input),
           invalidateCaches(business.id, result.lead.id, result.conversation.id),
         ]);
+        if (result.leadCreated) {
+          realtimeService.publish({
+            type: "lead.created",
+            businessId: business.id,
+            leadId: result.lead.id,
+            assignedStaffId: result.lead.assignedStaffId,
+            payload: { lead: result.lead },
+          });
+        }
+        if (result.conversationCreated) {
+          realtimeService.publish({
+            type: "conversation.created",
+            businessId: business.id,
+            conversationId: result.conversation.id,
+            leadId: result.lead.id,
+            payload: { conversation: result.conversation },
+          });
+        }
+        if (result.conversationReopened) {
+          realtimeService.publish({
+            type: "conversation.reopened",
+            businessId: business.id,
+            conversationId: result.conversation.id,
+            leadId: result.lead.id,
+            assignedStaffId: result.conversation.assignedStaffId,
+            payload: {
+              conversationId: result.conversation.id,
+              status: ConversationStatus.OPEN,
+              closedAt: null,
+              reason: "CUSTOMER_REPLY",
+              messageId: result.message.id,
+            },
+          });
+        }
+        realtimeService.publish({
+          type: "message.created",
+          businessId: business.id,
+          conversationId: result.conversation.id,
+          leadId: result.lead.id,
+          messageId: result.message.id,
+          assignedStaffId: result.conversation.assignedStaffId,
+          payload: { message: result.message, conversation: result.conversation },
+        });
+        realtimeService.publish({
+          type: "conversation.updated",
+          businessId: business.id,
+          conversationId: result.conversation.id,
+          leadId: result.lead.id,
+          assignedStaffId: result.conversation.assignedStaffId,
+          payload: {
+            conversationId: result.conversation.id,
+            changes: {
+              lastMessagePreview: result.conversation.lastMessagePreview,
+              lastMessageAt: result.conversation.lastMessageAt,
+              unreadCount: result.conversation.unreadCount,
+              status: result.conversation.status,
+            },
+          },
+        });
+        realtimeService.publish({
+          type: "conversation.unread_count.updated",
+          businessId: business.id,
+          conversationId: result.conversation.id,
+          leadId: result.lead.id,
+          assignedStaffId: result.conversation.assignedStaffId,
+          payload: { conversationId: result.conversation.id, unreadCount: result.conversation.unreadCount },
+        });
       }
       return result;
     } catch (error) {
@@ -543,6 +621,7 @@ export const whatsappService = {
     try {
       const message = await prisma.message.findFirst({
         where: { providerMessageId: input.providerMessageId, direction: MessageDirection.OUTBOUND, deletedAt: null },
+        include: { conversation: { select: { assignedStaffId: true } } },
       });
       if (!message) {
         await prisma.webhookEventLog.update({
@@ -608,6 +687,22 @@ export const whatsappService = {
         cacheService.delByPattern(`business:${message.businessId}:conversations:detail:${message.conversationId}:*`),
         cacheService.delByPattern(`business:${message.businessId}:conversations:stats:*`),
       ]);
+      realtimeService.publish({
+        type: "message.status.updated",
+        businessId: message.businessId,
+        conversationId: message.conversationId,
+        leadId: message.leadId,
+        messageId: message.id,
+        assignedStaffId: message.conversation.assignedStaffId,
+        payload: {
+          messageId: message.id,
+          conversationId: message.conversationId,
+          previousStatus: message.deliveryStatus,
+          newStatus: updated.deliveryStatus,
+          readAt: updated.readAt,
+          updatedAt: updated.updatedAt,
+        },
+      });
       return { messageFound: true, message: updated, mappedStatus: mapped ?? null };
     } catch (error) {
       await prisma.webhookEventLog.update({

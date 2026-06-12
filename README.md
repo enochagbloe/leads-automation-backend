@@ -113,6 +113,7 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | PATCH | `/api/conversations/:id/status` | Business member, role-scoped |
 | PATCH | `/api/conversations/:id/read` | Business member, role-scoped |
 | DELETE | `/api/conversations/:id` | Owner/manager, soft delete |
+| GET | `/api/realtime/events` | Business member, SSE stream |
 | GET | `/api/webhooks/whatsapp` | Public provider verification |
 | POST | `/api/webhooks/whatsapp` | Public provider webhook, signature checked in live mode |
 | POST | `/api/dev/mock-whatsapp/inbound-message` | Development only |
