@@ -1,4 +1,4 @@
-import { WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
+import { WhatsAppIntegrationStatus } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
@@ -25,28 +25,20 @@ export interface WhatsAppProviderClient {
 }
 
 export async function getWhatsAppIntegration(businessId: string) {
-  const existing = await prisma.whatsAppIntegration.findUnique({
-    where: { businessId_provider: { businessId, provider: WhatsAppProvider.META } },
+  const existing = await prisma.whatsAppIntegration.findFirst({
+    where: { businessId },
+    orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
   });
-  if (env.WHATSAPP_PROVIDER_MODE === "mock") {
-    if (existing) {
-      if (existing.status === WhatsAppIntegrationStatus.MOCK_CONNECTED || existing.status === WhatsAppIntegrationStatus.CONNECTED) return existing;
-      return prisma.whatsAppIntegration.update({
-        where: { id: existing.id },
-        data: { status: WhatsAppIntegrationStatus.MOCK_CONNECTED, connectedAt: new Date(), disconnectedAt: null },
-      });
-    }
-    return prisma.whatsAppIntegration.create({
-      data: {
-        businessId,
-        provider: WhatsAppProvider.META,
-        phoneNumberId: `mock-${businessId}`,
-        status: WhatsAppIntegrationStatus.MOCK_CONNECTED,
-        connectedAt: new Date(),
-      },
-    });
+  if (existing?.status === WhatsAppIntegrationStatus.DEACTIVATED || existing?.status === WhatsAppIntegrationStatus.DISCONNECTED) {
+    throw new AppError(409, "WhatsApp has been deactivated for this business.", "WHATSAPP_DEACTIVATED");
   }
-  if (!existing || existing.status !== WhatsAppIntegrationStatus.CONNECTED) {
+  if (
+    !existing
+    || (existing.status !== WhatsAppIntegrationStatus.CONNECTED && existing.status !== WhatsAppIntegrationStatus.MOCK_CONNECTED)
+  ) {
+    throw new AppError(409, "WhatsApp is not connected for this business.", "WHATSAPP_NOT_CONNECTED");
+  }
+  if (env.WHATSAPP_PROVIDER_MODE === "live" && existing.status !== WhatsAppIntegrationStatus.CONNECTED) {
     throw new AppError(409, "WhatsApp is not connected for this business.", "WHATSAPP_NOT_CONNECTED");
   }
   return existing;

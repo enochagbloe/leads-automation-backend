@@ -118,6 +118,10 @@ async function settleWhatsAppMessage(
     messageId: message.id,
   });
   const deliveryStatus = result.success ? MessageDeliveryStatus.SENT : MessageDeliveryStatus.FAILED;
+  const integration = await prisma.whatsAppIntegration.findFirst({
+    where: { businessId: actor.businessId, phoneNumberId },
+    orderBy: { createdAt: "desc" },
+  });
   const updated = await prisma.$transaction(async (tx) => {
     const record = await tx.message.update({
       where: { id: message.id },
@@ -150,6 +154,18 @@ async function settleWhatsAppMessage(
     });
     return record;
   });
+  if (integration) {
+    await prisma.whatsAppIntegration.update({
+      where: { id: integration.id },
+      data: result.success
+        ? { lastHealthCheckAt: new Date(), lastErrorCode: null, lastErrorMessage: null }
+        : { lastHealthCheckAt: new Date(), lastErrorCode: "WHATSAPP_PROVIDER_ERROR", lastErrorMessage: providerError(result) },
+    });
+    await Promise.all([
+      cacheService.del(`business:${actor.businessId}:whatsapp:status`),
+      cacheService.del(`business:${actor.businessId}:whatsapp:health`),
+    ]);
+  }
   await Promise.all([
     auditService.log({
       ...context,
@@ -169,7 +185,32 @@ async function settleWhatsAppMessage(
       },
     }),
     invalidateOutboundCaches(actor.businessId, message.conversationId, message.leadId),
+    ...(!result.success ? [auditService.log({
+      ...context,
+      action: AuditAction.WHATSAPP_CONNECTION_ERROR,
+      businessId: actor.businessId,
+      userId: actor.userId,
+      metadata: {
+        businessId: actor.businessId,
+        integrationId: integration?.id ?? null,
+        conversationId: message.conversationId,
+        messageId: message.id,
+        errorCode: "WHATSAPP_PROVIDER_ERROR",
+      },
+    })] : []),
   ]);
+  if (!result.success) {
+    realtimeService.publish({
+      type: "whatsapp.connection.error",
+      businessId: actor.businessId,
+      payload: {
+        status: integration?.status ?? "ERROR",
+        lastErrorCode: "WHATSAPP_PROVIDER_ERROR",
+        lastErrorMessage: providerError(result),
+        canSendMessages: Boolean(integration),
+      },
+    });
+  }
   realtimeService.publish({
     type: "message.status.updated",
     businessId: actor.businessId,

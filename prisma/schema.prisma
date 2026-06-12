@@ -135,13 +135,16 @@ enum MessageDeliveryStatus {
 
 enum WhatsAppProvider {
   META
+  MOCK_WHATSAPP
 }
 
 enum WhatsAppIntegrationStatus {
   NOT_CONNECTED
+  CONNECTING
   MOCK_CONNECTED
   CONNECTED
   DISCONNECTED
+  DEACTIVATED
   ERROR
 }
 
@@ -227,6 +230,11 @@ enum AuditAction {
   CONVERSATION_MARKED_READ
   CONVERSATION_READ_FAILED
   MESSAGE_CREATE_FAILED
+  WHATSAPP_CONNECTION_STARTED
+  WHATSAPP_CONNECTED
+  WHATSAPP_DEACTIVATED
+  WHATSAPP_NUMBER_CHANGED
+  WHATSAPP_CONNECTION_ERROR
 }
 
 model User {
@@ -601,20 +609,28 @@ model WhatsAppIntegration {
   phoneNumberId        String
   displayPhoneNumber   String?
   wabaId               String?
+  businessAccountId    String?
   accessTokenEncrypted String?
   verifyTokenHash      String?
   appSecretHash        String?
   status               WhatsAppIntegrationStatus @default(NOT_CONNECTED)
+  automationEnabled    Boolean                   @default(false)
   connectedAt          DateTime?
   disconnectedAt       DateTime?
+  deactivatedAt        DateTime?
+  lastHealthCheckAt    DateTime?
+  lastErrorCode        String?
+  lastErrorMessage     String?
+  metadata             Json?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  @@unique([provider, phoneNumberId])
-  @@unique([businessId, provider])
+  @@index([provider, phoneNumberId])
+  @@index([phoneNumberId])
   @@index([businessId, status])
+  @@index([businessId, createdAt])
 }
 
 model WebhookEventLog {
