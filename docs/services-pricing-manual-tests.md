@@ -42,3 +42,9 @@ X-Business-Id: <activeBusinessId>
 3. Realtime service lifecycle and summary events are emitted.
 4. Setup status returns `serviceProgress`.
 5. AI-context helpers return only active non-archived services and identify gaps.
+
+## Migration Compatibility
+
+1. Migrating legacy services with case-insensitive duplicate names preserves the oldest service and archives later duplicates before creating the unique index.
+2. Legacy pricing-note-only services migrate to `QUOTE_ONLY` without gaining a missing-price gap.
+3. Legacy services inherit the owning business's `defaultCurrency`.
