@@ -4,6 +4,7 @@ const businessName = z.string().trim().min(2).max(120);
 const profileBusinessName = z.string().trim().min(2).max(100);
 const email = z.string().trim().email().transform((value) => value.toLowerCase());
 const nullableText = (max: number) => z.string().trim().max(max).nullable().optional();
+const nullableLocation = z.string().trim().min(2).max(100).nullable().optional();
 const website = z.string().trim().url().max(2048).refine((value) => {
   try {
     const parsed = new URL(value);
@@ -56,8 +57,8 @@ export const updateBusinessProfileSchema = z.object({
   name: profileBusinessName.optional(),
   industry: z.string().trim().min(1).max(120).optional(),
   description: nullableText(1000),
-  country: z.string().trim().min(2).max(100).optional(),
-  city: z.string().trim().min(2).max(100).optional(),
+  country: nullableLocation,
+  city: nullableLocation,
   address: nullableText(255),
   serviceArea: nullableText(500),
   phone: z.string().trim().regex(/^\+?[0-9][0-9\s().-]{5,28}[0-9]$/, "Invalid phone number").nullable().optional(),
