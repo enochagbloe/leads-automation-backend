@@ -91,3 +91,12 @@ curl http://localhost:3000/api/leads/stats \
   -H 'Authorization: Bearer ACCESS_TOKEN' \
   -H 'X-Business-Id: BUSINESS_ID'
 ```
+# Business setup status
+
+```http
+GET /api/business/setup-status
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+Returns weighted setup completion, manual inbox readiness, AI-safety readiness, missing items, completed items, and the next recommended setup step.

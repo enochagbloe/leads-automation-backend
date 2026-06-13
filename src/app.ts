@@ -14,6 +14,7 @@ import { env } from "./config/env";
 import { mockWhatsAppRouter, whatsappWebhookRouter } from "./routes/whatsapp.routes";
 import { realtimeRouter } from "./routes/realtime.routes";
 import { whatsappConnectionRouter } from "./routes/whatsapp-connection.routes";
+import { businessSetupRouter } from "./routes/business-setup.routes";
 
 export const app = express();
 
@@ -35,6 +36,7 @@ app.get("/api", (_req, res) => res.json({
     health: "/api/health",
     auth: "/api/auth",
     businesses: "/api/businesses",
+    businessSetupStatus: "/api/business/setup-status",
     leads: "/api/leads",
     conversations: "/api/conversations",
     realtime: "/api/realtime/events",
@@ -61,6 +63,7 @@ app.use("/api/dev/mock-whatsapp", mockWhatsAppRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/business/whatsapp", whatsappConnectionRouter);
+app.use("/api/business", businessSetupRouter);
 app.use("/api/leads", leadRouter);
 app.use("/api/conversations", conversationRouter);
 app.use("/api/realtime", realtimeRouter);
