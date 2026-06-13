@@ -235,6 +235,7 @@ enum AuditAction {
   WHATSAPP_DEACTIVATED
   WHATSAPP_NUMBER_CHANGED
   WHATSAPP_CONNECTION_ERROR
+  BUSINESS_PROFILE_UPDATED
 }
 
 model User {
@@ -279,25 +280,27 @@ model BusinessAccount {
 }
 
 model Business {
-  id                String         @id @default(cuid())
-  businessAccountId String
-  name              String
-  industry          String
-  description       String?
-  slug              String         @unique
-  ownerId           String
-  email             String
-  phone             String?
-  country           String?
-  city              String?
-  address           String?
-  serviceArea       String?
-  handoffEmail      String?
-  handoffPhone      String?
-  status            BusinessStatus @default(PENDING_SETUP)
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
-  deletedAt         DateTime?
+  id                       String         @id @default(cuid())
+  businessAccountId        String
+  name                     String
+  industry                 String
+  description              String?
+  slug                     String         @unique
+  ownerId                  String
+  email                    String?
+  phone                    String?
+  country                  String?
+  city                     String?
+  address                  String?
+  serviceArea              String?
+  website                  String?
+  timezone                 String         @default("Africa/Accra")
+  defaultCurrency          String         @default("GHS")
+  defaultNotificationEmail String?
+  status                   BusinessStatus @default(PENDING_SETUP)
+  createdAt                DateTime       @default(now())
+  updatedAt                DateTime       @updatedAt
+  deletedAt                DateTime?
 
   owner                User                   @relation("BusinessOwner", fields: [ownerId], references: [id])
   businessAccount      BusinessAccount        @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)

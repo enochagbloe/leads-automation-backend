@@ -111,8 +111,11 @@ export const businessSetupService = {
     if (!subscription) throw new AppError(403, "No subscription found", "SUBSCRIPTION_REQUIRED");
 
     const contactComplete = present(business.phone) || present(business.email);
-    const locationComplete = present(business.city) && (present(business.address) || present(business.serviceArea));
-    const basicInfoComplete = present(business.name) && contactComplete && (present(business.country) || present(business.city));
+    const locationComplete = present(business.country) && present(business.city);
+    const basicInfoComplete = present(business.name)
+      && contactComplete
+      && present(business.timezone)
+      && present(business.defaultCurrency);
     const industryDescriptionComplete = present(business.industry) && present(business.description);
     const whatsApp = business.whatsAppIntegrations[0];
     const liveCredentialAvailable = hasUsableLiveCredential(whatsApp);
@@ -135,13 +138,11 @@ export const businessSetupService = {
     const pricingComplete = business.services.some((service) => service.price !== null || present(service.pricingNote));
     const availabilityComplete = business.availability.some((entry) => present(entry.openTime) && present(entry.closeTime));
     const policiesComplete = business.policies.length > 0;
-    const handoffComplete = present(business.handoffEmail) || present(business.handoffPhone);
-
     const items: SetupItem[] = [
       {
         key: "businessBasicInfo",
         label: "Complete business contact information",
-        description: "Add a business contact and country or city.",
+        description: "Add a business contact, timezone, and default currency.",
         route: "/settings/business/profile",
         requiredFor: "MANUAL_INBOX",
         planRequired: PlanCode.BASIC,
@@ -160,8 +161,8 @@ export const businessSetupService = {
       },
       {
         key: "location",
-        label: "Add location or service area",
-        description: "Add a city and an address or service area.",
+        label: "Add business country and city",
+        description: "Add the country and city where the business operates.",
         route: "/settings/business/profile",
         requiredFor: "MANUAL_INBOX",
         planRequired: PlanCode.BASIC,
@@ -218,16 +219,6 @@ export const businessSetupService = {
         weight: 5,
         complete: policiesComplete,
       },
-      {
-        key: "humanHandoffContact",
-        label: "Add a human handoff contact",
-        description: "A handoff contact gives future automation a safe escalation path.",
-        route: "/settings/business/profile",
-        requiredFor: "AI_AUTOMATION",
-        planRequired: PlanCode.BASIC,
-        weight: 0,
-        complete: handoffComplete,
-      },
     ];
 
     const weightedCompletion = items.reduce((total, item) => total + (item.complete ? item.weight : 0), 0);
@@ -237,9 +228,8 @@ export const businessSetupService = {
       && servicesComplete
       && pricingComplete
       && availabilityComplete
-      && policiesComplete
-      && handoffComplete;
-    const completionPercentage = weightedCompletion === 100 && !isAiReady ? 99 : weightedCompletion;
+      && policiesComplete;
+    const completionPercentage = weightedCompletion;
     const readinessStatus = isAiReady
       ? "READY_FOR_AI_AUTOMATION"
       : isManualInboxReady

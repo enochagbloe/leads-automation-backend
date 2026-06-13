@@ -27,9 +27,9 @@ GET /api/business/setup-status
 2. Adding core profile fields increases completion.
 3. A usable WhatsApp connection adds 15%.
 4. Mock WhatsApp counts only in mock provider mode.
-5. Missing services, pricing, business hours, policies, and handoff contact appear in `missingItems`.
+5. Missing services, pricing, business hours, and policies appear in `missingItems`.
 6. Manual inbox readiness can be true while AI readiness remains false.
-7. AI readiness remains false if services, pricing, hours, policies, or handoff contact are missing.
+7. AI readiness remains false if services, pricing, hours, or policies are missing.
 8. A fully configured business returns `READY_FOR_AI_AUTOMATION`.
 9. Basic does not receive Premium-only completion requirements.
 10. `nextRecommendedStep` points to the first incomplete required item.
@@ -39,3 +39,8 @@ GET /api/business/setup-status
 1. Repeated reads return the cached response.
 2. WhatsApp connect, deactivate, and change-number actions invalidate setup status.
 3. Future business profile, service, availability, pricing, and policy mutations call `invalidateBusinessSetupStatus(businessId)`.
+
+## Human Handoff Correction
+
+1. Setup status does not return a static handoff-contact checklist item.
+2. AI readiness does not depend on business handoff email or phone fields.
