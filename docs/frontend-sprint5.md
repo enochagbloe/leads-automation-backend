@@ -1,10 +1,78 @@
 # Frontend Sprint 5 Handoff
 
+## Business Profile Settings
+
+All active business members can load the safe business profile:
+
+```http
+GET /api/business/profile
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+Owners and managers can update profile settings:
+
+```http
+PATCH /api/business/profile
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+PATCH is partial. Optional fields can be cleared with `null`. At least one of `phone` or `email` must remain.
+
+Owner can update every field. Manager can update only:
+
+```text
+description
+address
+serviceArea
+phone
+email
+website
+defaultNotificationEmail
+```
+
+Staff can view but cannot update. Handle:
+
+```text
+BUSINESS_NOT_FOUND
+BUSINESS_ACCESS_DENIED
+FORBIDDEN
+VALIDATION_ERROR
+INVALID_INDUSTRY
+INVALID_TIMEZONE
+INVALID_CURRENCY
+```
+
+Recommended industries:
+
+```text
+REAL_ESTATE
+CONSTRUCTION
+ARCHITECTURE
+CONSULTING
+SALON_BEAUTY
+CLINIC_HEALTHCARE
+HOTEL_HOSPITALITY
+ONLINE_STORE
+EDUCATION
+LEGAL
+FINANCE
+OTHER
+```
+
+Custom human-readable industry values are also accepted.
+
+After a successful update, refetch setup status. The SSE stream also emits `business.profile.updated`.
+
+Do not render or send static human-handoff email or phone fields. Human handoff will later use assigned business members.
+
 ## Sprint 5 Module 1 Goal
 
 Show business setup progress and explain whether the selected business is ready for manual inbox use or future AI automation.
 
-This module does not provide profile, service, availability, or policy editing endpoints yet. It only exposes readiness computed from the current business records.
+This sprint now provides business profile editing. Service, availability, and policy editing endpoints remain future modules.
 
 ## Endpoint
 
@@ -101,7 +169,7 @@ Example:
 ```text
 Business basic info: 20%
 Industry and description: 15%
-Location or service area: 10%
+Business country and city: 10%
 WhatsApp connection: 15%
 Services: 15%
 Service pricing: 10%
@@ -109,8 +177,7 @@ Business hours: 10%
 Policies: 5%
 ```
 
-Human handoff contact is a mandatory AI-safety requirement but does not add extra percentage beyond the requested 100% scoring.
-If every weighted section is complete but the required handoff contact is missing, the backend returns 99% so the UI never shows a contradictory 100% incomplete state.
+Human handoff is not an editable profile field and is not part of setup scoring. A future handoff workflow will route conversations to eligible business members.
 
 ## Readiness Rules
 
@@ -118,7 +185,7 @@ Manual inbox readiness requires:
 
 - Business basic information
 - Industry
-- Location or service area
+- Business country and city
 - Usable WhatsApp connection
 
 AI readiness additionally requires:
@@ -128,7 +195,6 @@ AI readiness additionally requires:
 - Service price or pricing note
 - Business hours
 - Active policy
-- Human handoff contact
 
 Mock WhatsApp counts only while the backend uses mock provider mode. A live connection counts only when it has a usable tenant credential or an eligible legacy credential migration path.
 
@@ -136,12 +202,12 @@ Mock WhatsApp counts only while the backend uses mock provider mode. A live conn
 
 The backend now has data foundations for:
 
-- Business description, country, city, address, service area, and handoff contact
+- Business description, country, city, address, service area, website, timezone, currency, and notification email
 - Services and basic pricing
 - Business availability
 - Business policies
 
-Their editing APIs are later modules. Until records exist, the setup-status endpoint correctly returns these sections as missing.
+Service, availability, and policy editing APIs are later modules. Until records exist, setup status correctly returns those sections as missing.
 
 ## Errors
 

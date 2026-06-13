@@ -112,6 +112,8 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | POST | `/api/businesses/invitations` | Business owner |
 | POST | `/api/businesses/invitations/accept` | Public |
 | GET | `/api/business/setup-status` | Active business member |
+| GET | `/api/business/profile` | Active business member |
+| PATCH | `/api/business/profile` | Business owner/manager, field-scoped |
 | POST | `/api/leads` | Business member |
 | GET | `/api/leads` | Business member |
 | GET | `/api/leads/stats` | Business member |

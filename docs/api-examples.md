@@ -100,3 +100,17 @@ X-Business-Id: <activeBusinessId>
 ```
 
 Returns weighted setup completion, manual inbox readiness, AI-safety readiness, missing items, completed items, and the next recommended setup step.
+
+## Business profile settings
+
+```bash
+curl http://localhost:3000/api/business/profile \
+  -H 'Authorization: Bearer ACCESS_TOKEN' \
+  -H 'X-Business-Id: BUSINESS_ID'
+
+curl -X PATCH http://localhost:3000/api/business/profile \
+  -H 'Authorization: Bearer ACCESS_TOKEN' \
+  -H 'X-Business-Id: BUSINESS_ID' \
+  -H 'Content-Type: application/json' \
+  -d '{"description":"We help clients find properties in Accra.","country":"Ghana","city":"Accra","timezone":"Africa/Accra","defaultCurrency":"GHS"}'
+```

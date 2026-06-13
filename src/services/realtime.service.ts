@@ -16,7 +16,8 @@ export type RealtimeEventType =
   | "lead.updated"
   | "whatsapp.connection.updated"
   | "whatsapp.connection.deactivated"
-  | "whatsapp.connection.error";
+  | "whatsapp.connection.error"
+  | "business.profile.updated";
 
 export type RealtimeEvent = {
   id: string;
@@ -32,6 +33,7 @@ export type RealtimeEvent = {
 type PublishInput = Omit<RealtimeEvent, "id" | "createdAt"> & {
   assignedStaffId?: string | null;
   staffMembershipIds?: Array<string | null | undefined>;
+  broadcastToStaff?: boolean;
 };
 
 type Client = {
@@ -55,7 +57,7 @@ function writeEvent(response: Response, event: RealtimeEvent) {
 export const realtimeService = {
   // TODO: Replace in-memory pub/sub with Redis Pub/Sub when running multiple backend instances.
   publish(input: PublishInput) {
-    const { assignedStaffId, staffMembershipIds = [], ...publicInput } = input;
+    const { assignedStaffId, staffMembershipIds = [], broadcastToStaff = false, ...publicInput } = input;
     const event: RealtimeEvent = {
       ...publicInput,
       id: crypto.randomUUID(),
@@ -65,6 +67,7 @@ export const realtimeService = {
       if (client.businessId !== event.businessId) continue;
       if (
         client.role === BusinessRole.STAFF
+        && !broadcastToStaff
         && assignedStaffId !== client.membershipId
         && !staffMembershipIds.includes(client.membershipId)
       ) continue;
