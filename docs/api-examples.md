@@ -114,3 +114,21 @@ curl -X PATCH http://localhost:3000/api/business/profile \
   -H 'Content-Type: application/json' \
   -d '{"description":"We help clients find properties in Accra.","country":"Ghana","city":"Accra","timezone":"Africa/Accra","defaultCurrency":"GHS"}'
 ```
+
+## Services and pricing
+
+```bash
+curl http://localhost:3000/api/business/services \
+  -H 'Authorization: Bearer ACCESS_TOKEN' \
+  -H 'X-Business-Id: BUSINESS_ID'
+
+curl -X POST http://localhost:3000/api/business/services \
+  -H 'Authorization: Bearer ACCESS_TOKEN' \
+  -H 'X-Business-Id: BUSINESS_ID' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Property Viewing","description":"A scheduled property viewing.","priceType":"FIXED","basePrice":"100.00","currency":"GHS","durationMinutes":45,"isBookable":true}'
+
+curl http://localhost:3000/api/business/services/summary \
+  -H 'Authorization: Bearer ACCESS_TOKEN' \
+  -H 'X-Business-Id: BUSINESS_ID'
+```

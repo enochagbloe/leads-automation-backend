@@ -17,7 +17,13 @@ export type RealtimeEventType =
   | "whatsapp.connection.updated"
   | "whatsapp.connection.deactivated"
   | "whatsapp.connection.error"
-  | "business.profile.updated";
+  | "business.profile.updated"
+  | "business.service.created"
+  | "business.service.updated"
+  | "business.service.archived"
+  | "business.service.restored"
+  | "business.service.reordered"
+  | "business.services.summary.updated";
 
 export type RealtimeEvent = {
   id: string;
