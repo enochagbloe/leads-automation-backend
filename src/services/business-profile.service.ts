@@ -125,13 +125,13 @@ export const businessProfileService = {
       throw new AppError(403, "You do not have permission to update business profile settings.", "FORBIDDEN");
     }
 
-    const changedFields = Object.keys(input);
-    const unsupportedFields = changedFields.filter((field) => !PROFILE_EDITABLE_FIELDS.has(field));
+    const requestedFields = Object.keys(input);
+    const unsupportedFields = requestedFields.filter((field) => !PROFILE_EDITABLE_FIELDS.has(field));
     if (unsupportedFields.length > 0) {
       throw new AppError(422, "Unsupported business profile fields.", "VALIDATION_ERROR", { unsupportedFields });
     }
     if (actor.role === BusinessRole.MANAGER) {
-      const protectedFields = changedFields.filter((field) => !MANAGER_EDITABLE_FIELDS.has(field));
+      const protectedFields = requestedFields.filter((field) => !MANAGER_EDITABLE_FIELDS.has(field));
       if (protectedFields.length > 0) {
         throw new AppError(403, "Only a business owner can update business identity settings.", "FORBIDDEN", { protectedFields });
       }
@@ -146,29 +146,40 @@ export const businessProfileService = {
       throw new AppError(422, "Invalid currency code.", "INVALID_CURRENCY");
     }
 
-    const existing = await prisma.business.findFirst({
-      where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
-      select: PROFILE_SELECT,
-    });
-    if (!existing) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
-
-    const nextEmail = input.email === undefined ? existing.email : input.email;
-    const nextPhone = input.phone === undefined ? existing.phone : input.phone;
-    if (!present(nextEmail) && !present(nextPhone)) {
-      throw new AppError(422, "At least one business phone number or email address is required.", "VALIDATION_ERROR");
-    }
-
-    const actualChangedFields = changedFields.filter((field) => {
-      const key = field as keyof typeof existing;
-      return existing[key] !== input[field as keyof UpdateBusinessProfileInput];
-    });
-    if (actualChangedFields.length === 0) return safeProfile(existing);
-
-    const data = Object.fromEntries(actualChangedFields.map((field) => [field, input[field as keyof UpdateBusinessProfileInput]]));
-    const previousValues = Object.fromEntries(actualChangedFields.map((field) => [field, existing[field as keyof typeof existing]]));
-    let updated: Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>;
+    let result: {
+      updated: Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>;
+      actualChangedFields: string[];
+    };
     try {
-      updated = await prisma.$transaction(async (tx) => {
+      result = await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw(Prisma.sql`
+          SELECT "id"
+          FROM "Business"
+          WHERE "id" = ${actor.businessId}
+            AND "businessAccountId" = ${actor.businessAccountId}
+            AND "deletedAt" IS NULL
+          FOR UPDATE
+        `);
+        const existing = await tx.business.findFirst({
+          where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
+          select: PROFILE_SELECT,
+        });
+        if (!existing) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+
+        const nextEmail = input.email === undefined ? existing.email : input.email;
+        const nextPhone = input.phone === undefined ? existing.phone : input.phone;
+        if (!present(nextEmail) && !present(nextPhone)) {
+          throw new AppError(422, "At least one business phone number or email address is required.", "VALIDATION_ERROR");
+        }
+
+        const actualChangedFields = requestedFields.filter((field) => {
+          const key = field as keyof typeof existing;
+          return existing[key] !== input[field as keyof UpdateBusinessProfileInput];
+        });
+        if (actualChangedFields.length === 0) return { updated: existing, actualChangedFields };
+
+        const data = Object.fromEntries(actualChangedFields.map((field) => [field, input[field as keyof UpdateBusinessProfileInput]]));
+        const previousValues = Object.fromEntries(actualChangedFields.map((field) => [field, existing[field as keyof typeof existing]]));
         const next = await tx.business.update({
           where: { id: existing.id },
           data,
@@ -191,7 +202,7 @@ export const businessProfileService = {
             }),
           },
         });
-        return next;
+        return { updated: next, actualChangedFields };
       });
     } catch (error) {
       if (
@@ -202,6 +213,8 @@ export const businessProfileService = {
       }
       throw error;
     }
+    const { updated, actualChangedFields } = result;
+    if (actualChangedFields.length === 0) return safeProfile(updated);
 
     await Promise.all([
       invalidateBusinessProfile(actor.businessId),

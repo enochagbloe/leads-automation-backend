@@ -114,6 +114,14 @@ Subscription helpers live in `src/middleware/subscription-guard.ts`. Subscriptio
 | GET | `/api/business/setup-status` | Active business member |
 | GET | `/api/business/profile` | Active business member |
 | PATCH | `/api/business/profile` | Business owner/manager, field-scoped |
+| GET | `/api/business/services` | Active business member |
+| POST | `/api/business/services` | Business owner/manager |
+| GET | `/api/business/services/summary` | Active business member |
+| GET | `/api/business/services/:serviceId` | Active business member |
+| PATCH | `/api/business/services/:serviceId` | Business owner/manager |
+| DELETE | `/api/business/services/:serviceId` | Business owner/manager, archive |
+| POST | `/api/business/services/:serviceId/restore` | Business owner/manager |
+| PATCH | `/api/business/services/reorder` | Business owner/manager |
 | POST | `/api/leads` | Business member |
 | GET | `/api/leads` | Business member |
 | GET | `/api/leads/stats` | Business member |

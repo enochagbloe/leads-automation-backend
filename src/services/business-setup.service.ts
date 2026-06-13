@@ -1,4 +1,4 @@
-import { PlanCode, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
+import { PlanCode, ServiceReadinessStatus, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { decryptCredential } from "../utils/credential-encryption";
@@ -31,6 +31,14 @@ type SetupStatusResponse = {
   missingItems: ReturnType<typeof publicItem>[];
   completedItems: Array<{ key: string; label: string }>;
   nextRecommendedStep: { key: string; label: string; route: string } | null;
+  serviceProgress: {
+    servicesAdded: number;
+    servicesWithPricing: number;
+    servicesReadyForAi: number;
+    servicesReadyForBooking: number;
+    missingServicePrices: number;
+    missingServiceDurations: number;
+  };
 };
 type CachedSetupStatus = {
   businessAccountId: string;
@@ -83,8 +91,8 @@ export const businessSetupService = {
         where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
         include: {
           services: {
-            where: { isActive: true, deletedAt: null },
-            select: { id: true, price: true, pricingNote: true },
+            where: { isActive: true, isArchived: false },
+            select: { id: true, readinessStatus: true, missingFields: true },
           },
           availability: {
             where: { isActive: true },
@@ -135,7 +143,14 @@ export const businessSetupService = {
       ),
     );
     const servicesComplete = business.services.length > 0;
-    const pricingComplete = business.services.some((service) => service.price !== null || present(service.pricingNote));
+    const servicesWithPricing = business.services.filter((service) => !service.missingFields.includes("price")).length;
+    const servicesReadyForAi = business.services.filter((service) =>
+      service.readinessStatus === ServiceReadinessStatus.READY_FOR_AI
+      || service.readinessStatus === ServiceReadinessStatus.READY_FOR_BOOKING).length;
+    const servicesReadyForBooking = business.services.filter((service) => service.readinessStatus === ServiceReadinessStatus.READY_FOR_BOOKING).length;
+    const missingServicePrices = business.services.filter((service) => service.missingFields.includes("price")).length;
+    const missingServiceDurations = business.services.filter((service) => service.missingFields.includes("durationMinutes")).length;
+    const pricingComplete = servicesWithPricing > 0;
     const availabilityComplete = business.availability.some((entry) => present(entry.openTime) && present(entry.closeTime));
     const policiesComplete = business.policies.length > 0;
     const items: SetupItem[] = [
@@ -252,6 +267,14 @@ export const businessSetupService = {
       missingItems,
       completedItems,
       nextRecommendedStep: next ? { key: next.key, label: next.label, route: next.route } : null,
+      serviceProgress: {
+        servicesAdded: business.services.length,
+        servicesWithPricing,
+        servicesReadyForAi,
+        servicesReadyForBooking,
+        missingServicePrices,
+        missingServiceDurations,
+      },
     };
     await cacheService.set<CachedSetupStatus>(cacheKey, { businessAccountId: actor.businessAccountId, response: result }, CACHE_TTL_SECONDS);
     return result;

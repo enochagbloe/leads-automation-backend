@@ -28,6 +28,7 @@ X-Business-Id: <activeBusinessId>
 4. Invalid currency returns `INVALID_CURRENCY`.
 5. Clearing both phone and email returns `VALIDATION_ERROR`.
 6. Sending human handoff fields returns `VALIDATION_ERROR`.
+7. Owner can clear previously saved country and city values by sending `null`.
 
 ## Side Effects
 
@@ -36,3 +37,4 @@ X-Business-Id: <activeBusinessId>
 3. `GET /api/business/setup-status` reflects the updated profile.
 4. SSE emits `business.profile.updated`.
 5. Behavior is identical across Basic, Plus, and Premium plans.
+6. Concurrent updates to the same field produce serialized audit entries whose `previousValues` match the value each request actually replaced.

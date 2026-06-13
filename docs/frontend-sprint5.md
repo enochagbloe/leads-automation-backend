@@ -68,6 +68,84 @@ After a successful update, refetch setup status. The SSE stream also emits `busi
 
 Do not render or send static human-handoff email or phone fields. Human handoff will later use assigned business members.
 
+## Services & Pricing
+
+Use these business-scoped endpoints:
+
+```text
+GET    /api/business/services
+GET    /api/business/services/summary
+GET    /api/business/services/:serviceId
+POST   /api/business/services
+PATCH  /api/business/services/:serviceId
+DELETE /api/business/services/:serviceId
+POST   /api/business/services/:serviceId/restore
+PATCH  /api/business/services/reorder
+```
+
+Owners and managers can manage services. Staff can view active services only.
+
+Service readiness values:
+
+```text
+DRAFT
+INCOMPLETE
+READY_FOR_AI
+READY_FOR_BOOKING
+ARCHIVED
+```
+
+Price types:
+
+```text
+FIXED
+STARTING_FROM
+RANGE
+QUOTE_ONLY
+FREE
+NOT_SET
+```
+
+Incomplete services are valid. Render `missingFields` as reminders. Common values are `description`, `price`, `currency`, `durationMinutes`, and `paymentRequirement`.
+
+Active-service limits are shared across the workspace:
+
+```text
+BASIC: 5
+PLUS: 20
+PREMIUM: 100
+```
+
+Default list query:
+
+```text
+GET /api/business/services?status=active&page=1&limit=20&sort=displayOrder&sortOrder=asc
+```
+
+Handle:
+
+```text
+SERVICE_NOT_FOUND
+SERVICE_LIMIT_REACHED
+SERVICE_NAME_ALREADY_EXISTS
+FORBIDDEN
+VALIDATION_ERROR
+INVALID_CURRENCY
+```
+
+Listen for:
+
+```text
+business.service.created
+business.service.updated
+business.service.archived
+business.service.restored
+business.service.reordered
+business.services.summary.updated
+```
+
+After service events, refresh the services list/summary and setup status.
+
 ## Sprint 5 Module 1 Goal
 
 Show business setup progress and explain whether the selected business is ready for manual inbox use or future AI automation.
@@ -116,6 +194,14 @@ type BusinessSetupStatus = {
     label: string;
     route: string;
   } | null;
+  serviceProgress: {
+    servicesAdded: number;
+    servicesWithPricing: number;
+    servicesReadyForAi: number;
+    servicesReadyForBooking: number;
+    missingServicePrices: number;
+    missingServiceDurations: number;
+  };
 };
 ```
 
