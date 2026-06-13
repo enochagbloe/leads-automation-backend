@@ -30,21 +30,54 @@ ALTER TABLE "Service"
   ADD COLUMN "createdById" TEXT,
   ADD COLUMN "updatedById" TEXT;
 
-UPDATE "Service"
+UPDATE "Service" service
 SET
-  "slug" = LOWER(REGEXP_REPLACE(TRIM("name"), '[^a-zA-Z0-9]+', '-', 'g')) || '-' || SUBSTRING(md5("id"), 1, 8),
-  "isArchived" = "archivedAt" IS NOT NULL,
-  "isActive" = CASE WHEN "archivedAt" IS NOT NULL THEN false ELSE "isActive" END,
-  "priceType" = CASE WHEN "basePrice" IS NOT NULL THEN 'FIXED'::"ServicePriceType" ELSE 'NOT_SET'::"ServicePriceType" END,
-  "readinessStatus" = CASE WHEN "archivedAt" IS NOT NULL THEN 'ARCHIVED'::"ServiceReadinessStatus" ELSE 'DRAFT'::"ServiceReadinessStatus" END,
+  "slug" = LOWER(REGEXP_REPLACE(TRIM(service."name"), '[^a-zA-Z0-9]+', '-', 'g')) || '-' || SUBSTRING(md5(service."id"), 1, 8),
+  "currency" = business."defaultCurrency",
+  "isArchived" = service."archivedAt" IS NOT NULL,
+  "isActive" = CASE WHEN service."archivedAt" IS NOT NULL THEN false ELSE service."isActive" END,
+  "priceType" = CASE
+    WHEN service."basePrice" IS NOT NULL THEN 'FIXED'::"ServicePriceType"
+    WHEN NULLIF(BTRIM(service."priceDescription"), '') IS NOT NULL THEN 'QUOTE_ONLY'::"ServicePriceType"
+    ELSE 'NOT_SET'::"ServicePriceType"
+  END,
+  "readinessStatus" = CASE WHEN service."archivedAt" IS NOT NULL THEN 'ARCHIVED'::"ServiceReadinessStatus" ELSE 'DRAFT'::"ServiceReadinessStatus" END,
   "missingFields" = ARRAY['description', 'durationMinutes']::TEXT[]
-    || CASE WHEN "basePrice" IS NULL THEN ARRAY['price']::TEXT[] ELSE ARRAY[]::TEXT[] END;
+    || CASE
+      WHEN service."basePrice" IS NOT NULL OR NULLIF(BTRIM(service."priceDescription"), '') IS NOT NULL THEN ARRAY[]::TEXT[]
+      ELSE ARRAY['price']::TEXT[]
+    END
+FROM "Business" business
+WHERE business."id" = service."businessId";
 
 ALTER TABLE "Service" ALTER COLUMN "slug" SET NOT NULL;
 ALTER TABLE "Service" ADD CONSTRAINT "Service_basePrice_nonnegative" CHECK ("basePrice" IS NULL OR "basePrice" >= 0);
 ALTER TABLE "Service" ADD CONSTRAINT "Service_duration_positive" CHECK ("durationMinutes" IS NULL OR "durationMinutes" > 0);
 ALTER TABLE "Service" ADD CONSTRAINT "Service_buffer_nonnegative" CHECK ("bufferMinutes" >= 0);
 ALTER TABLE "Service" ADD CONSTRAINT "Service_payment_requirement_valid" CHECK (NOT "paymentRequiredBeforeBooking" OR "requiresPayment");
+
+-- Legacy service names were not unique. Preserve the oldest non-archived record and
+-- archive later case-insensitive duplicates before adding the unique index.
+WITH ranked_duplicates AS (
+  SELECT
+    "id",
+    ROW_NUMBER() OVER (
+      PARTITION BY "businessId", LOWER("name")
+      ORDER BY "createdAt" ASC, "id" ASC
+    ) AS duplicate_rank
+  FROM "Service"
+  WHERE "isArchived" = false
+)
+UPDATE "Service" service
+SET
+  "isArchived" = true,
+  "isActive" = false,
+  "readinessStatus" = 'ARCHIVED'::"ServiceReadinessStatus",
+  "missingFields" = ARRAY[]::TEXT[],
+  "archivedAt" = COALESCE(service."archivedAt", NOW())
+FROM ranked_duplicates duplicate
+WHERE service."id" = duplicate."id"
+  AND duplicate.duplicate_rank > 1;
 
 DROP INDEX IF EXISTS "Service_businessId_deletedAt_idx";
 CREATE INDEX "Service_businessId_idx" ON "Service"("businessId");
