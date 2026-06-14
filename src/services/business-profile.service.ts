@@ -185,6 +185,12 @@ export const businessProfileService = {
           data,
           select: PROFILE_SELECT,
         });
+        if (actualChangedFields.includes("timezone")) {
+          await tx.businessAvailability.updateMany({
+            where: { businessId: actor.businessId },
+            data: { timezone: next.timezone, updatedById: actor.userId },
+          });
+        }
         const newValues = Object.fromEntries(actualChangedFields.map((field) => [field, next[field as keyof typeof next]]));
         await tx.auditLog.create({
           data: {
@@ -219,6 +225,10 @@ export const businessProfileService = {
     await Promise.all([
       invalidateBusinessProfile(actor.businessId),
       invalidateBusinessSetupStatus(actor.businessId),
+      ...(actualChangedFields.includes("timezone") ? [
+        cacheService.del(`business:${actor.businessId}:availability`),
+        cacheService.del(`business:${actor.businessId}:availability:summary`),
+      ] : []),
     ]);
     realtimeService.publish({
       type: "business.profile.updated",
@@ -226,6 +236,16 @@ export const businessProfileService = {
       broadcastToStaff: true,
       payload: { businessId: actor.businessId, changedFields: actualChangedFields, updatedAt: updated.updatedAt.toISOString() },
     });
+    if (actualChangedFields.includes("timezone")) {
+      for (const type of ["business.availability.updated", "business.availability.summary.updated"] as const) {
+        realtimeService.publish({
+          type,
+          businessId: actor.businessId,
+          broadcastToStaff: true,
+          payload: { businessId: actor.businessId, changedDays: [], updatedAt: updated.updatedAt.toISOString() },
+        });
+      }
+    }
     return safeProfile(updated);
   },
 };

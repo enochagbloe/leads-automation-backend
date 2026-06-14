@@ -10,16 +10,7 @@ Authorization: Bearer <accessToken>
 X-Business-Id: <activeBusinessId>
 ```
 
-Owners and managers can update profile settings:
-
-```http
-PATCH /api/business/profile
-Authorization: Bearer <accessToken>
-X-Business-Id: <activeBusinessId>
-Content-Type: application/json
-```
-
-PATCH is partial. Optional fields can be cleared with `null`. At least one of `phone` or `email` must remain.
+Owners and managers can update profile settings with `PATCH /api/business/profile`. PATCH is partial, optional fields can be cleared with `null`, and at least one of `phone` or `email` must remain.
 
 Owner can update every field. Manager can update only:
 
@@ -45,28 +36,7 @@ INVALID_TIMEZONE
 INVALID_CURRENCY
 ```
 
-Recommended industries:
-
-```text
-REAL_ESTATE
-CONSTRUCTION
-ARCHITECTURE
-CONSULTING
-SALON_BEAUTY
-CLINIC_HEALTHCARE
-HOTEL_HOSPITALITY
-ONLINE_STORE
-EDUCATION
-LEGAL
-FINANCE
-OTHER
-```
-
-Custom human-readable industry values are also accepted.
-
 After a successful update, refetch setup status. The SSE stream also emits `business.profile.updated`.
-
-Do not render or send static human-handoff email or phone fields. Human handoff will later use assigned business members.
 
 ## Services & Pricing
 
@@ -106,32 +76,7 @@ FREE
 NOT_SET
 ```
 
-Incomplete services are valid. Render `missingFields` as reminders. Common values are `description`, `price`, `currency`, `durationMinutes`, and `paymentRequirement`.
-
-Active-service limits are shared across the workspace:
-
-```text
-BASIC: 5
-PLUS: 20
-PREMIUM: 100
-```
-
-Default list query:
-
-```text
-GET /api/business/services?status=active&page=1&limit=20&sort=displayOrder&sortOrder=asc
-```
-
-Handle:
-
-```text
-SERVICE_NOT_FOUND
-SERVICE_LIMIT_REACHED
-SERVICE_NAME_ALREADY_EXISTS
-FORBIDDEN
-VALIDATION_ERROR
-INVALID_CURRENCY
-```
+Incomplete services are valid. Render `missingFields` as reminders. Active-service limits are shared across the workspace: Basic 5, Plus 20, Premium 100.
 
 Listen for:
 
@@ -146,13 +91,9 @@ business.services.summary.updated
 
 After service events, refresh the services list/summary and setup status.
 
-## Sprint 5 Module 1 Goal
+## Setup Status
 
-Show business setup progress and explain whether the selected business is ready for manual inbox use or future AI automation.
-
-This sprint now provides business profile editing. Service, availability, and policy editing endpoints remain future modules.
-
-## Endpoint
+Use:
 
 ```http
 GET /api/business/setup-status
@@ -161,8 +102,6 @@ X-Business-Id: <activeBusinessId>
 ```
 
 All active business members can safely view the response.
-
-## Response
 
 ```ts
 type BusinessReadinessStatus =
@@ -205,52 +144,9 @@ type BusinessSetupStatus = {
 };
 ```
 
-Example:
+Display `completionPercentage` directly and use `nextRecommendedStep.route` for the primary setup action. Do not block the dashboard when setup is incomplete. Manual inbox readiness and AI readiness are separate.
 
-```json
-{
-  "businessId": "business-id",
-  "plan": "BASIC",
-  "completionPercentage": 30,
-  "readinessStatus": "INCOMPLETE",
-  "isManualInboxReady": false,
-  "isAiReady": false,
-  "missingItems": [
-    {
-      "key": "services",
-      "label": "Add at least one service",
-      "description": "Services help BizReply understand what your business offers.",
-      "route": "/settings/business/services",
-      "requiredFor": "AI_AUTOMATION",
-      "planRequired": "BASIC"
-    }
-  ],
-  "completedItems": [
-    {
-      "key": "businessBasicInfo",
-      "label": "Complete business contact information"
-    }
-  ],
-  "nextRecommendedStep": {
-    "key": "industryDescription",
-    "label": "Add industry and business description",
-    "route": "/settings/business/profile"
-  }
-}
-```
-
-## UI Behavior
-
-- Fetch setup status after the active business is selected.
-- Show a dashboard setup-progress card when readiness is not `READY_FOR_AI_AUTOMATION`.
-- Display `completionPercentage` directly; do not calculate progress on the frontend.
-- Use `nextRecommendedStep.route` for the primary setup action.
-- Render missing items as a checklist grouped by `requiredFor`.
-- Show manual inbox readiness separately from AI readiness.
-- Do not block the dashboard when setup is incomplete.
-- Do not imply AI automation is active when `isAiReady` is true. It only means the business has enough setup information for a future AI module.
-
-## Scoring
+Setup scoring:
 
 ```text
 Business basic info: 20%
@@ -259,51 +155,87 @@ Business country and city: 10%
 WhatsApp connection: 15%
 Services: 15%
 Service pricing: 10%
-Business hours: 10%
+Business availability: 10%
 Policies: 5%
 ```
 
-Human handoff is not an editable profile field and is not part of setup scoring. A future handoff workflow will route conversations to eligible business members.
+## Module 4: Business Availability
 
-## Readiness Rules
+Business owners and managers can configure one weekly schedule per business. Staff can view it but cannot update it.
 
-Manual inbox readiness requires:
+All endpoints require:
 
-- Business basic information
-- Industry
-- Business country and city
-- Usable WhatsApp connection
-
-AI readiness additionally requires:
-
-- Business description
-- Active service
-- Service price or pricing note
-- Business hours
-- Active policy
-
-Mock WhatsApp counts only while the backend uses mock provider mode. A live connection counts only when it has a usable tenant credential or an eligible legacy credential migration path.
-
-## Current Missing Setup Forms
-
-The backend now has data foundations for:
-
-- Business description, country, city, address, service area, website, timezone, currency, and notification email
-- Services and basic pricing
-- Business availability
-- Business policies
-
-Service, availability, and policy editing APIs are later modules. Until records exist, setup status correctly returns those sections as missing.
-
-## Errors
-
-```text
-UNAUTHENTICATED
-BUSINESS_ACCESS_DENIED
-BUSINESS_NOT_FOUND
-SUBSCRIPTION_REQUIRED
+```http
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
 ```
 
-## Caching
+## Endpoints
 
-The response is cached briefly. WhatsApp lifecycle changes invalidate it immediately. Future profile, service, availability, and policy mutations must call the shared setup-status cache invalidation helper.
+| Method | Endpoint | Access |
+|---|---|---|
+| GET | `/api/business/availability` | Owner, manager, staff |
+| GET | `/api/business/availability/summary` | Owner, manager, staff |
+| PUT | `/api/business/availability` | Owner, manager |
+
+The weekly update must send exactly one rule for each day:
+
+```json
+{
+  "timezone": "Africa/Accra",
+  "rules": [
+    {
+      "dayOfWeek": "MONDAY",
+      "isOpen": true,
+      "openTime": "08:00",
+      "closeTime": "17:00",
+      "breakStartTime": "12:00",
+      "breakEndTime": "13:00",
+      "appliesToAllServices": true
+    },
+    {
+      "dayOfWeek": "SUNDAY",
+      "isOpen": false
+    }
+  ]
+}
+```
+
+Include all seven enum values: `MONDAY`, `TUESDAY`, `WEDNESDAY`, `THURSDAY`, `FRIDAY`, `SATURDAY`, and `SUNDAY`.
+
+Closed days must not send opening or break times. Open days require `openTime` and `closeTime` in 24-hour `HH:mm` format. Break start/end must either both be set or both be null.
+
+The GET response includes `businessId`, `timezone`, ordered `rules`, and:
+
+```json
+{
+  "summary": {
+    "openDays": 6,
+    "closedDays": 1,
+    "hasBreakTimes": true,
+    "isComplete": true
+  }
+}
+```
+
+The summary endpoint additionally returns `hasWeeklySchedule`, `hasCompleteWeeklySchedule`, `nextOpenDay`, and `todayStatus`.
+
+Listen for:
+
+```text
+business.availability.updated
+business.availability.summary.updated
+```
+
+Both events should invalidate the availability queries and setup-status query. Updating the business profile timezone also updates the saved weekly schedule timezone and emits these events.
+
+Errors to handle:
+
+```text
+FORBIDDEN
+INVALID_TIMEZONE
+VALIDATION_ERROR
+BUSINESS_NOT_FOUND
+```
+
+Availability exceptions and service-specific/staff-specific schedules are not implemented in this module.
