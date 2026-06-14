@@ -163,6 +163,7 @@ function summaryKey(businessId: string, role: BusinessRole) {
 
 async function invalidateServiceCaches(businessId: string, serviceId?: string) {
   await Promise.all([
+    cacheService.del(`business:${businessId}:knowledge-preview`),
     cacheService.delByPattern(`business:${businessId}:services:list:*`),
     cacheService.delByPattern(`business:${businessId}:services:summary:*`),
     ...(serviceId ? [cacheService.delByPattern(`business:${businessId}:services:detail:${serviceId}:*`)] : []),

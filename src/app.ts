@@ -41,6 +41,7 @@ app.get("/api", (_req, res) => res.json({
     businesses: "/api/businesses",
     businessSetupStatus: "/api/business/setup-status",
     businessProfile: "/api/business/profile",
+    businessKnowledgePreview: "/api/business/knowledge-preview",
     businessServices: "/api/business/services",
     businessAvailability: "/api/business/availability",
     businessPolicies: "/api/business/policies",
