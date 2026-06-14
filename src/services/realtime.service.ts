@@ -23,7 +23,9 @@ export type RealtimeEventType =
   | "business.service.archived"
   | "business.service.restored"
   | "business.service.reordered"
-  | "business.services.summary.updated";
+  | "business.services.summary.updated"
+  | "business.availability.updated"
+  | "business.availability.summary.updated";
 
 export type RealtimeEvent = {
   id: string;

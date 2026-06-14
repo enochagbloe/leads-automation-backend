@@ -16,6 +16,7 @@ import { realtimeRouter } from "./routes/realtime.routes";
 import { whatsappConnectionRouter } from "./routes/whatsapp-connection.routes";
 import { businessSetupRouter } from "./routes/business-setup.routes";
 import { serviceRouter } from "./routes/service.routes";
+import { availabilityRouter } from "./routes/availability.routes";
 
 export const app = express();
 
@@ -40,6 +41,7 @@ app.get("/api", (_req, res) => res.json({
     businessSetupStatus: "/api/business/setup-status",
     businessProfile: "/api/business/profile",
     businessServices: "/api/business/services",
+    businessAvailability: "/api/business/availability",
     leads: "/api/leads",
     conversations: "/api/conversations",
     realtime: "/api/realtime/events",
@@ -68,6 +70,7 @@ app.use("/api/businesses", businessRouter);
 app.use("/api/business/whatsapp", whatsappConnectionRouter);
 app.use("/api/business", businessSetupRouter);
 app.use("/api/business/services", serviceRouter);
+app.use("/api/business/availability", availabilityRouter);
 app.use("/api/leads", leadRouter);
 app.use("/api/conversations", conversationRouter);
 app.use("/api/realtime", realtimeRouter);

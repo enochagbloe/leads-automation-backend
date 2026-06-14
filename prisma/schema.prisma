@@ -265,6 +265,17 @@ enum AuditAction {
   BUSINESS_SERVICE_ARCHIVED
   BUSINESS_SERVICE_RESTORED
   BUSINESS_SERVICE_REORDERED
+  BUSINESS_AVAILABILITY_UPDATED
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
 }
 
 model User {
@@ -280,19 +291,21 @@ model User {
   updatedAt     DateTime      @updatedAt
   deletedAt     DateTime?
 
-  ownedBusinesses       Business[]           @relation("BusinessOwner")
-  ownedBusinessAccounts BusinessAccount[]    @relation("BusinessAccountOwner")
-  memberships           BusinessMember[]     @relation("MemberUser")
-  invitedMembers        BusinessMember[]     @relation("MemberInviter")
-  sentInvitations       BusinessInvitation[] @relation("InvitationInviter")
+  ownedBusinesses       Business[]             @relation("BusinessOwner")
+  ownedBusinessAccounts BusinessAccount[]      @relation("BusinessAccountOwner")
+  memberships           BusinessMember[]       @relation("MemberUser")
+  invitedMembers        BusinessMember[]       @relation("MemberInviter")
+  sentInvitations       BusinessInvitation[]   @relation("InvitationInviter")
   authTokens            AuthToken[]
   refreshTokens         RefreshToken[]
   auditLogs             AuditLog[]
-  createdLeads          Lead[]               @relation("LeadCreator")
-  leadActivities        LeadActivity[]       @relation("LeadActivityActor")
-  sentMessages          Message[]            @relation("MessageSender")
-  createdServices       Service[]            @relation("ServiceCreator")
-  updatedServices       Service[]            @relation("ServiceUpdater")
+  createdLeads          Lead[]                 @relation("LeadCreator")
+  leadActivities        LeadActivity[]         @relation("LeadActivityActor")
+  sentMessages          Message[]              @relation("MessageSender")
+  createdServices       Service[]              @relation("ServiceCreator")
+  updatedServices       Service[]              @relation("ServiceUpdater")
+  createdAvailability   BusinessAvailability[] @relation("AvailabilityCreator")
+  updatedAvailability   BusinessAvailability[] @relation("AvailabilityUpdater")
 }
 
 model BusinessAccount {
@@ -394,18 +407,28 @@ model Service {
 }
 
 model BusinessAvailability {
-  id         String   @id @default(cuid())
-  businessId String
-  dayOfWeek  Int
-  openTime   String
-  closeTime  String
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id                   String    @id @default(cuid())
+  businessId           String
+  dayOfWeek            DayOfWeek
+  isOpen               Boolean   @default(false)
+  openTime             String?
+  closeTime            String?
+  breakStartTime       String?
+  breakEndTime         String?
+  timezone             String    @default("Africa/Accra")
+  appliesToAllServices Boolean   @default(true)
+  isActive             Boolean   @default(true)
+  createdById          String?
+  updatedById          String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation("AvailabilityCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User?    @relation("AvailabilityUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
 
   @@unique([businessId, dayOfWeek])
+  @@index([businessId])
   @@index([businessId, isActive])
 }
 

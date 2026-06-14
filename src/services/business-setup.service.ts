@@ -1,4 +1,4 @@
-import { PlanCode, ServiceReadinessStatus, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
+import { DayOfWeek, PlanCode, ServiceReadinessStatus, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { decryptCredential } from "../utils/credential-encryption";
@@ -51,6 +51,14 @@ function present(value?: string | null) {
   return Boolean(value?.trim());
 }
 
+function validAvailability(rules: Array<{ dayOfWeek: DayOfWeek; isOpen: boolean; openTime: string | null; closeTime: string | null }>, timezone: string) {
+  return present(timezone)
+    && rules.length === 7
+    && new Set(rules.map((rule) => rule.dayOfWeek)).size === 7
+    && rules.some((rule) => rule.isOpen)
+    && rules.every((rule) => !rule.isOpen || Boolean(rule.openTime && rule.closeTime && rule.openTime < rule.closeTime));
+}
+
 function publicItem(item: SetupItem) {
   return {
     key: item.key,
@@ -96,7 +104,7 @@ export const businessSetupService = {
           },
           availability: {
             where: { isActive: true },
-            select: { id: true, openTime: true, closeTime: true },
+            select: { dayOfWeek: true, isOpen: true, openTime: true, closeTime: true },
           },
           policies: {
             where: { isActive: true, deletedAt: null },
@@ -151,7 +159,7 @@ export const businessSetupService = {
     const missingServicePrices = business.services.filter((service) => service.missingFields.includes("price")).length;
     const missingServiceDurations = business.services.filter((service) => service.missingFields.includes("durationMinutes")).length;
     const pricingComplete = servicesWithPricing > 0;
-    const availabilityComplete = business.availability.some((entry) => present(entry.openTime) && present(entry.closeTime));
+    const availabilityComplete = validAvailability(business.availability, business.timezone);
     const policiesComplete = business.policies.length > 0;
     const items: SetupItem[] = [
       {
@@ -215,9 +223,9 @@ export const businessSetupService = {
         complete: pricingComplete,
       },
       {
-        key: "businessHours",
-        label: "Add business working hours",
-        description: "Working hours help BizReply know when your business is available.",
+        key: "business-availability",
+        label: "Configure availability",
+        description: "Add your business hours so BizReply can answer when customers ask if you are open.",
         route: "/settings/business/availability",
         requiredFor: "AI_AUTOMATION",
         planRequired: PlanCode.BASIC,
