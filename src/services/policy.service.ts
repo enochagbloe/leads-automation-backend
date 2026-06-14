@@ -100,6 +100,7 @@ function safe<T extends object>(policy: T) {
 
 async function invalidatePolicyCaches(businessId: string, policyId?: string) {
   await Promise.all([
+    cacheService.del(`business:${businessId}:knowledge-preview`),
     cacheService.delByPattern(`business:${businessId}:policies:list:*`),
     cacheService.delByPattern(`business:${businessId}:policies:summary:*`),
     cacheService.delByPattern(`business:${businessId}:policies:detail:${policyId ?? "*"}:*`),
