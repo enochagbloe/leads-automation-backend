@@ -1,5 +1,6 @@
 import { MembershipStatus, UserStatus } from "@prisma/client";
 import { RequestHandler } from "express";
+import { JsonWebTokenError, NotBeforeError, TokenExpiredError } from "jsonwebtoken";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { tokenService } from "../services/token.service";
@@ -17,6 +18,7 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
         memberships: {
           where: {
             status: MembershipStatus.ACTIVE,
+            business: { deletedAt: null },
             ...(requestedBusinessId ? { businessId: requestedBusinessId } : {}),
           },
           orderBy: { joinedAt: "asc" },
@@ -40,6 +42,10 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
     };
     next();
   } catch (error) {
-    next(error instanceof AppError ? error : new AppError(401, "Invalid or expired access token", "INVALID_ACCESS_TOKEN"));
+    if (error instanceof AppError) return next(error);
+    if (error instanceof JsonWebTokenError || error instanceof TokenExpiredError || error instanceof NotBeforeError) {
+      return next(new AppError(401, "Invalid or expired access token", "INVALID_ACCESS_TOKEN"));
+    }
+    next(error);
   }
 };
