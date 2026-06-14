@@ -110,6 +110,7 @@ async function activeIntegration(businessId: string) {
 
 async function invalidateConnectionCaches(businessId: string) {
   await Promise.all([
+    cacheService.del(`business:${businessId}:knowledge-preview`),
     cacheService.del(`business:${businessId}:whatsapp:status`),
     cacheService.del(`business:${businessId}:whatsapp:health`),
     cacheService.delByPattern(`business:${businessId}:profile*`),

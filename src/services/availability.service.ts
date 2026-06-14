@@ -148,6 +148,7 @@ async function load(businessId: string, businessAccountId?: string) {
 
 export async function invalidateAvailabilityCaches(businessId: string) {
   await Promise.all([
+    cacheService.del(`business:${businessId}:knowledge-preview`),
     cacheService.del(availabilityKey(businessId)),
     cacheService.del(summaryKey(businessId)),
     invalidateBusinessSetupStatus(businessId),

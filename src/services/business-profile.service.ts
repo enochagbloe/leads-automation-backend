@@ -96,7 +96,7 @@ function jsonValue(value: unknown): Prisma.InputJsonValue {
 }
 
 export async function invalidateBusinessProfile(businessId: string) {
-  await cacheService.del(cacheKey(businessId));
+  await Promise.all([cacheService.del(cacheKey(businessId)), cacheService.del(`business:${businessId}:knowledge-preview`)]);
 }
 
 export const businessProfileService = {

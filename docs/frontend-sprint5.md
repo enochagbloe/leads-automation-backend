@@ -239,3 +239,95 @@ BUSINESS_NOT_FOUND
 ```
 
 Availability exceptions and service-specific/staff-specific schedules are not implemented in this module.
+
+## Module 5: Business Policies
+
+Business owners and managers can manage approved operational policies. Staff can only view active customer-facing policies.
+
+Endpoints:
+
+```text
+GET    /api/business/policies
+GET    /api/business/policies/summary
+GET    /api/business/policies/:policyId
+POST   /api/business/policies
+PATCH  /api/business/policies/:policyId
+DELETE /api/business/policies/:policyId
+POST   /api/business/policies/:policyId/restore
+PATCH  /api/business/policies/reorder
+```
+
+List query params:
+
+```text
+category
+visibility
+status=active|inactive|archived|all
+search
+page
+limit
+sort=displayOrder|priority|category|createdAt|updatedAt
+sortOrder=asc|desc
+```
+
+Policy categories:
+
+```text
+GENERAL PAYMENT DEPOSIT REFUND CANCELLATION RESCHEDULING LATE_ARRIVAL
+NO_SHOW TRANSPORTATION SERVICE_AREA APPOINTMENT PRIVACY TERMS OTHER
+```
+
+Visibility values:
+
+```text
+INTERNAL_ONLY
+CUSTOMER_FACING
+```
+
+Active policy limits:
+
+```text
+BASIC: 10
+PLUS: 30
+PREMIUM: 100
+```
+
+Active policy limits are shared across all businesses in the workspace. Archived and inactive policies do not count toward the active limit. Handle `POLICY_LIMIT_REACHED` by showing an upgrade prompt.
+
+The policy summary returns total, active, inactive, archived, customer-facing and internal-only counts, configured categories, and missing recommended categories.
+
+Setup status now includes:
+
+```ts
+policyProgress: {
+  policiesAdded: number;
+  customerFacingPolicies: number;
+  missingRecommendedPolicyCategories: BusinessPolicyCategory[];
+};
+```
+
+Listen for:
+
+```text
+business.policy.created
+business.policy.updated
+business.policy.archived
+business.policy.restored
+business.policy.reordered
+business.policies.summary.updated
+```
+
+After these events, refresh the policy list, policy summary, and setup status.
+
+Errors:
+
+```text
+POLICY_NOT_FOUND
+POLICY_LIMIT_REACHED
+FORBIDDEN
+VALIDATION_ERROR
+BUSINESS_NOT_FOUND
+BUSINESS_ACCESS_DENIED
+```
+
+AI-generated policies, policy templates, approval workflows, and version history are not implemented.
