@@ -1,4 +1,4 @@
-import { DayOfWeek, PlanCode, ServiceReadinessStatus, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
+import { BusinessPolicyCategory, BusinessPolicyVisibility, DayOfWeek, PlanCode, ServiceReadinessStatus, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { decryptCredential } from "../utils/credential-encryption";
@@ -38,6 +38,11 @@ type SetupStatusResponse = {
     servicesReadyForBooking: number;
     missingServicePrices: number;
     missingServiceDurations: number;
+  };
+  policyProgress: {
+    policiesAdded: number;
+    customerFacingPolicies: number;
+    missingRecommendedPolicyCategories: BusinessPolicyCategory[];
   };
 };
 type CachedSetupStatus = {
@@ -107,8 +112,8 @@ export const businessSetupService = {
             select: { dayOfWeek: true, isOpen: true, openTime: true, closeTime: true },
           },
           policies: {
-            where: { isActive: true, deletedAt: null },
-            select: { id: true },
+            where: { isActive: true, isArchived: false },
+            select: { id: true, category: true, visibility: true },
           },
           whatsAppIntegrations: {
             orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
@@ -160,7 +165,18 @@ export const businessSetupService = {
     const missingServiceDurations = business.services.filter((service) => service.missingFields.includes("durationMinutes")).length;
     const pricingComplete = servicesWithPricing > 0;
     const availabilityComplete = validAvailability(business.availability, business.timezone);
-    const policiesComplete = business.policies.length > 0;
+    const recommendedPolicyCategories = [
+      BusinessPolicyCategory.PAYMENT,
+      BusinessPolicyCategory.CANCELLATION,
+      BusinessPolicyCategory.REFUND,
+      BusinessPolicyCategory.RESCHEDULING,
+      BusinessPolicyCategory.DEPOSIT,
+      BusinessPolicyCategory.SERVICE_AREA,
+    ];
+    const customerFacingPolicies = business.policies.filter((policy) => policy.visibility === BusinessPolicyVisibility.CUSTOMER_FACING);
+    const configuredPolicyCategories = new Set(customerFacingPolicies.map((policy) => policy.category));
+    const missingRecommendedPolicyCategories = recommendedPolicyCategories.filter((category) => !configuredPolicyCategories.has(category));
+    const policiesComplete = customerFacingPolicies.length > 0;
     const items: SetupItem[] = [
       {
         key: "businessBasicInfo",
@@ -233,9 +249,9 @@ export const businessSetupService = {
         complete: availabilityComplete,
       },
       {
-        key: "policies",
-        label: "Add terms and policies",
-        description: "Policies help BizReply answer safely about payments, cancellations, delays, and fees.",
+        key: "business-policies",
+        label: "Add business policies",
+        description: "Add payment, cancellation, refund, or service-area policies so BizReply can answer customer questions safely.",
         route: "/settings/business/policies",
         requiredFor: "AI_AUTOMATION",
         planRequired: PlanCode.BASIC,
@@ -282,6 +298,11 @@ export const businessSetupService = {
         servicesReadyForBooking,
         missingServicePrices,
         missingServiceDurations,
+      },
+      policyProgress: {
+        policiesAdded: business.policies.length,
+        customerFacingPolicies: customerFacingPolicies.length,
+        missingRecommendedPolicyCategories,
       },
     };
     await cacheService.set<CachedSetupStatus>(cacheKey, { businessAccountId: actor.businessAccountId, response: result }, CACHE_TTL_SECONDS);

@@ -198,6 +198,35 @@ enum ServiceSource {
   AI_APPROVED
 }
 
+enum BusinessPolicyCategory {
+  GENERAL
+  PAYMENT
+  DEPOSIT
+  REFUND
+  CANCELLATION
+  RESCHEDULING
+  LATE_ARRIVAL
+  NO_SHOW
+  TRANSPORTATION
+  SERVICE_AREA
+  APPOINTMENT
+  PRIVACY
+  TERMS
+  OTHER
+}
+
+enum BusinessPolicyVisibility {
+  INTERNAL_ONLY
+  CUSTOMER_FACING
+}
+
+enum BusinessPolicySource {
+  MANUAL
+  IMPORTED
+  AI_SUGGESTED
+  AI_APPROVED
+}
+
 enum PlanCode {
   BASIC
   PLUS
@@ -266,6 +295,11 @@ enum AuditAction {
   BUSINESS_SERVICE_RESTORED
   BUSINESS_SERVICE_REORDERED
   BUSINESS_AVAILABILITY_UPDATED
+  BUSINESS_POLICY_CREATED
+  BUSINESS_POLICY_UPDATED
+  BUSINESS_POLICY_ARCHIVED
+  BUSINESS_POLICY_RESTORED
+  BUSINESS_POLICY_REORDERED
 }
 
 enum DayOfWeek {
@@ -306,6 +340,8 @@ model User {
   updatedServices       Service[]              @relation("ServiceUpdater")
   createdAvailability   BusinessAvailability[] @relation("AvailabilityCreator")
   updatedAvailability   BusinessAvailability[] @relation("AvailabilityUpdater")
+  createdPolicies       BusinessPolicy[]       @relation("PolicyCreator")
+  updatedPolicies       BusinessPolicy[]       @relation("PolicyUpdater")
 }
 
 model BusinessAccount {
@@ -433,19 +469,34 @@ model BusinessAvailability {
 }
 
 model BusinessPolicy {
-  id         String    @id @default(cuid())
-  businessId String
-  title      String
-  content    String
-  isActive   Boolean   @default(true)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  deletedAt  DateTime?
+  id           String                   @id @default(cuid())
+  businessId   String
+  title        String
+  category     BusinessPolicyCategory   @default(GENERAL)
+  content      String
+  shortSummary String?
+  visibility   BusinessPolicyVisibility @default(CUSTOMER_FACING)
+  isActive     Boolean                  @default(true)
+  isArchived   Boolean                  @default(false)
+  displayOrder Int                      @default(0)
+  priority     Int                      @default(0)
+  source       BusinessPolicySource     @default(MANUAL)
+  createdById  String?
+  updatedById  String?
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  archivedAt   DateTime?
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation("PolicyCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User?    @relation("PolicyUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
 
+  @@index([businessId])
+  @@index([businessId, isArchived])
   @@index([businessId, isActive])
-  @@index([businessId, deletedAt])
+  @@index([businessId, category])
+  @@index([businessId, visibility])
+  @@index([businessId, displayOrder])
 }
 
 model BusinessMember {
