@@ -331,3 +331,83 @@ BUSINESS_ACCESS_DENIED
 ```
 
 AI-generated policies, policy templates, approval workflows, and version history are not implemented.
+
+## Module 6: Business Knowledge Preview
+
+Use the deterministic knowledge preview to show what BizReply knows, what is missing, and whether the selected business is ready for future AI or booking workflows.
+
+```http
+GET /api/business/knowledge-preview
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+Business owners and managers can view the full preview. Staff receive `FORBIDDEN`.
+
+Main response sections:
+
+```ts
+{
+  businessId: string;
+  generatedAt: string;
+  readiness: {
+    overallScore: number;
+    level: "NOT_READY" | "PARTIAL" | "AI_READY" | "BOOKING_READY";
+    isAiReady: boolean;
+    isBookingReady: boolean;
+  };
+  sections: {
+    profile: KnowledgeSectionStatus;
+    services: KnowledgeSectionStatus;
+    availability: KnowledgeSectionStatus;
+    policies: KnowledgeSectionStatus;
+    whatsapp: KnowledgeSectionStatus;
+  };
+  businessSummary: object;
+  servicesPreview: object;
+  availabilityPreview: object;
+  policiesPreview: object;
+  whatsappPreview: object;
+  safeToAnswerTopics: array;
+  needsHumanConfirmationTopics: array;
+  gaps: array;
+  recommendedNextActions: array;
+  aiInstructionsPreview: {
+    canAnswer: string[];
+    shouldAvoid: string[];
+    shouldHandoff: string[];
+  };
+}
+```
+
+Readiness weights:
+
+```text
+Business Profile: 20%
+Services & Pricing: 25%
+Availability: 20%
+Policies: 20%
+WhatsApp: 15%
+```
+
+Use backend-provided scores, topics, gaps, actions, and routes directly. Do not recalculate readiness on the frontend.
+
+Listen for:
+
+```text
+business.knowledge_preview.updated
+```
+
+Payload:
+
+```json
+{
+  "businessId": "...",
+  "changedSection": "PROFILE",
+  "updatedAt": "..."
+}
+```
+
+`changedSection` is one of `PROFILE`, `SERVICES`, `AVAILABILITY`, `POLICIES`, or `WHATSAPP`. Refetch the knowledge preview after this event.
+
+The endpoint is deterministic. It does not call AI or mutate setup data.

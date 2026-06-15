@@ -19,6 +19,7 @@ import type {
 } from "../validation/policy.schemas";
 import type { AuditInput } from "./audit.service";
 import { invalidateBusinessSetupStatus } from "./business-setup.service";
+import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService, RealtimeEventType } from "./realtime.service";
 
@@ -100,7 +101,7 @@ function safe<T extends object>(policy: T) {
 
 async function invalidatePolicyCaches(businessId: string, policyId?: string) {
   await Promise.all([
-    cacheService.del(`business:${businessId}:knowledge-preview`),
+    invalidateBusinessKnowledgePreview(businessId, "POLICIES"),
     cacheService.delByPattern(`business:${businessId}:policies:list:*`),
     cacheService.delByPattern(`business:${businessId}:policies:summary:*`),
     cacheService.delByPattern(`business:${businessId}:policies:detail:${policyId ?? "*"}:*`),

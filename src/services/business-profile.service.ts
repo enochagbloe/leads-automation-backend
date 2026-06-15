@@ -4,6 +4,7 @@ import { UpdateBusinessProfileInput } from "../validation/business.schemas";
 import { AppError } from "../utils/errors";
 import type { AuditInput } from "./audit.service";
 import { invalidateBusinessSetupStatus } from "./business-setup.service";
+import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
 
@@ -96,7 +97,7 @@ function jsonValue(value: unknown): Prisma.InputJsonValue {
 }
 
 export async function invalidateBusinessProfile(businessId: string) {
-  await Promise.all([cacheService.del(cacheKey(businessId)), cacheService.del(`business:${businessId}:knowledge-preview`)]);
+  await Promise.all([cacheService.del(cacheKey(businessId)), invalidateBusinessKnowledgePreview(businessId, "PROFILE")]);
 }
 
 export const businessProfileService = {
