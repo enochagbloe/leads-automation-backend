@@ -4,6 +4,7 @@ import { AppError } from "../utils/errors";
 import type { UpsertAvailabilityInput } from "../validation/availability.schemas";
 import type { AuditInput } from "./audit.service";
 import { invalidateBusinessSetupStatus } from "./business-setup.service";
+import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
 
@@ -148,7 +149,7 @@ async function load(businessId: string, businessAccountId?: string) {
 
 export async function invalidateAvailabilityCaches(businessId: string) {
   await Promise.all([
-    cacheService.del(`business:${businessId}:knowledge-preview`),
+    invalidateBusinessKnowledgePreview(businessId, "AVAILABILITY"),
     cacheService.del(availabilityKey(businessId)),
     cacheService.del(summaryKey(businessId)),
     invalidateBusinessSetupStatus(businessId),

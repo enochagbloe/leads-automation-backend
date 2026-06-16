@@ -14,6 +14,7 @@ import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import type { AuditInput } from "./audit.service";
 import { invalidateBusinessSetupStatus } from "./business-setup.service";
+import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService, RealtimeEventType } from "./realtime.service";
 import {
@@ -163,7 +164,7 @@ function summaryKey(businessId: string, role: BusinessRole) {
 
 async function invalidateServiceCaches(businessId: string, serviceId?: string) {
   await Promise.all([
-    cacheService.del(`business:${businessId}:knowledge-preview`),
+    invalidateBusinessKnowledgePreview(businessId, "SERVICES"),
     cacheService.delByPattern(`business:${businessId}:services:list:*`),
     cacheService.delByPattern(`business:${businessId}:services:summary:*`),
     ...(serviceId ? [cacheService.delByPattern(`business:${businessId}:services:detail:${serviceId}:*`)] : []),

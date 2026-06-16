@@ -17,6 +17,7 @@ import { isMetaCredentialExpired, metaCredentialExpiresAt } from "../utils/whats
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
+import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { subscriptionService } from "./subscription.service";
 
 export type WhatsAppConnectionActor = {
@@ -110,7 +111,7 @@ async function activeIntegration(businessId: string) {
 
 async function invalidateConnectionCaches(businessId: string) {
   await Promise.all([
-    cacheService.del(`business:${businessId}:knowledge-preview`),
+    invalidateBusinessKnowledgePreview(businessId, "WHATSAPP"),
     cacheService.del(`business:${businessId}:whatsapp:status`),
     cacheService.del(`business:${businessId}:whatsapp:health`),
     cacheService.delByPattern(`business:${businessId}:profile*`),

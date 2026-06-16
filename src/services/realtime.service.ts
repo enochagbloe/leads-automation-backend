@@ -31,7 +31,8 @@ export type RealtimeEventType =
   | "business.policy.archived"
   | "business.policy.restored"
   | "business.policy.reordered"
-  | "business.policies.summary.updated";
+  | "business.policies.summary.updated"
+  | "business.knowledge_preview.updated";
 
 export type RealtimeEvent = {
   id: string;
