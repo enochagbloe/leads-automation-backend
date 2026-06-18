@@ -32,7 +32,15 @@ export type RealtimeEventType =
   | "business.policy.restored"
   | "business.policy.reordered"
   | "business.policies.summary.updated"
-  | "business.knowledge_preview.updated";
+  | "business.knowledge_preview.updated"
+  | "business.appointment.created"
+  | "business.appointment.updated"
+  | "business.appointment.rescheduled"
+  | "business.appointment.cancelled"
+  | "business.appointment.completed"
+  | "business.appointment.no_show"
+  | "business.appointment.assigned"
+  | "business.appointments.calendar.updated";
 
 export type RealtimeEvent = {
   id: string;

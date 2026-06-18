@@ -75,6 +75,13 @@ enum LeadActivityAction {
   MESSAGE_STATUS_UPDATED
   MESSAGE_RETRY_ATTEMPTED
   CONVERSATION_MARKED_READ
+  APPOINTMENT_CREATED
+  APPOINTMENT_UPDATED
+  APPOINTMENT_RESCHEDULED
+  APPOINTMENT_CANCELLED
+  APPOINTMENT_COMPLETED
+  APPOINTMENT_NO_SHOW
+  APPOINTMENT_ASSIGNED
 }
 
 enum ConversationChannel {
@@ -227,6 +234,61 @@ enum BusinessPolicySource {
   AI_APPROVED
 }
 
+enum AppointmentStatus {
+  PENDING_BUSINESS_CONFIRMATION
+  CONFIRMED
+  NEEDS_HUMAN_CONFIRMATION
+  RESCHEDULE_REQUESTED
+  RESCHEDULED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  MANUAL
+  CONVERSATION
+  AI_ASSISTED
+  AI_CREATED
+  CUSTOMER_REQUESTED
+}
+
+enum AppointmentLocationType {
+  BUSINESS_LOCATION
+  CUSTOMER_LOCATION
+  ONLINE
+  PHONE_CALL
+  TO_BE_CONFIRMED
+}
+
+enum AppointmentLocationStatus {
+  CONFIRMED
+  NEEDS_CONFIRMATION
+  NOT_REQUIRED
+}
+
+enum AppointmentHumanConfirmationReason {
+  LOCATION_REQUIRED
+  PAYMENT_REQUIRED
+  STAFF_REQUIRED
+  SPECIAL_REQUEST
+  POLICY_EXCEPTION
+  AVAILABILITY_CONFLICT
+  OTHER
+}
+
+enum AppointmentActivityType {
+  APPOINTMENT_CREATED
+  APPOINTMENT_UPDATED
+  APPOINTMENT_RESCHEDULED
+  APPOINTMENT_CANCELLED
+  APPOINTMENT_COMPLETED
+  APPOINTMENT_NO_SHOW
+  APPOINTMENT_ASSIGNED
+  HUMAN_CONFIRMATION_REQUIRED
+  APPOINTMENT_STATUS_CHANGED
+}
+
 enum PlanCode {
   BASIC
   PLUS
@@ -300,6 +362,13 @@ enum AuditAction {
   BUSINESS_POLICY_ARCHIVED
   BUSINESS_POLICY_RESTORED
   BUSINESS_POLICY_REORDERED
+  APPOINTMENT_CREATED
+  APPOINTMENT_UPDATED
+  APPOINTMENT_RESCHEDULED
+  APPOINTMENT_CANCELLED
+  APPOINTMENT_COMPLETED
+  APPOINTMENT_NO_SHOW
+  APPOINTMENT_ASSIGNED
 }
 
 enum DayOfWeek {
@@ -325,23 +394,29 @@ model User {
   updatedAt     DateTime      @updatedAt
   deletedAt     DateTime?
 
-  ownedBusinesses       Business[]             @relation("BusinessOwner")
-  ownedBusinessAccounts BusinessAccount[]      @relation("BusinessAccountOwner")
-  memberships           BusinessMember[]       @relation("MemberUser")
-  invitedMembers        BusinessMember[]       @relation("MemberInviter")
-  sentInvitations       BusinessInvitation[]   @relation("InvitationInviter")
-  authTokens            AuthToken[]
-  refreshTokens         RefreshToken[]
-  auditLogs             AuditLog[]
-  createdLeads          Lead[]                 @relation("LeadCreator")
-  leadActivities        LeadActivity[]         @relation("LeadActivityActor")
-  sentMessages          Message[]              @relation("MessageSender")
-  createdServices       Service[]              @relation("ServiceCreator")
-  updatedServices       Service[]              @relation("ServiceUpdater")
-  createdAvailability   BusinessAvailability[] @relation("AvailabilityCreator")
-  updatedAvailability   BusinessAvailability[] @relation("AvailabilityUpdater")
-  createdPolicies       BusinessPolicy[]       @relation("PolicyCreator")
-  updatedPolicies       BusinessPolicy[]       @relation("PolicyUpdater")
+  ownedBusinesses         Business[]             @relation("BusinessOwner")
+  ownedBusinessAccounts   BusinessAccount[]      @relation("BusinessAccountOwner")
+  memberships             BusinessMember[]       @relation("MemberUser")
+  invitedMembers          BusinessMember[]       @relation("MemberInviter")
+  sentInvitations         BusinessInvitation[]   @relation("InvitationInviter")
+  authTokens              AuthToken[]
+  refreshTokens           RefreshToken[]
+  auditLogs               AuditLog[]
+  createdLeads            Lead[]                 @relation("LeadCreator")
+  leadActivities          LeadActivity[]         @relation("LeadActivityActor")
+  sentMessages            Message[]              @relation("MessageSender")
+  createdServices         Service[]              @relation("ServiceCreator")
+  updatedServices         Service[]              @relation("ServiceUpdater")
+  createdAvailability     BusinessAvailability[] @relation("AvailabilityCreator")
+  updatedAvailability     BusinessAvailability[] @relation("AvailabilityUpdater")
+  createdPolicies         BusinessPolicy[]       @relation("PolicyCreator")
+  updatedPolicies         BusinessPolicy[]       @relation("PolicyUpdater")
+  createdAppointments     Appointment[]          @relation("AppointmentCreator")
+  updatedAppointments     Appointment[]          @relation("AppointmentUpdater")
+  rescheduledAppointments Appointment[]          @relation("AppointmentRescheduler")
+  cancelledAppointments   Appointment[]          @relation("AppointmentCanceller")
+  completedAppointments   Appointment[]          @relation("AppointmentCompleter")
+  appointmentActivities   AppointmentActivity[]  @relation("AppointmentActivityActorUser")
 }
 
 model BusinessAccount {
@@ -355,6 +430,7 @@ model BusinessAccount {
   businesses    Business[]
   subscriptions Subscription[]
   usageRecords  AccountUsageRecord[]
+  appointments  Appointment[]
 
   @@index([ownerId])
 }
@@ -382,21 +458,23 @@ model Business {
   updatedAt                DateTime       @updatedAt
   deletedAt                DateTime?
 
-  owner                User                   @relation("BusinessOwner", fields: [ownerId], references: [id])
-  businessAccount      BusinessAccount        @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  members              BusinessMember[]
-  invitations          BusinessInvitation[]
-  usageRecords         BusinessUsageRecord[]
-  auditLogs            AuditLog[]
-  leads                Lead[]
-  leadActivities       LeadActivity[]
-  conversations        Conversation[]
-  messages             Message[]
-  whatsAppIntegrations WhatsAppIntegration[]
-  webhookEventLogs     WebhookEventLog[]
-  services             Service[]
-  availability         BusinessAvailability[]
-  policies             BusinessPolicy[]
+  owner                 User                   @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount       BusinessAccount        @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members               BusinessMember[]
+  invitations           BusinessInvitation[]
+  usageRecords          BusinessUsageRecord[]
+  auditLogs             AuditLog[]
+  leads                 Lead[]
+  leadActivities        LeadActivity[]
+  conversations         Conversation[]
+  messages              Message[]
+  whatsAppIntegrations  WhatsAppIntegration[]
+  webhookEventLogs      WebhookEventLog[]
+  services              Service[]
+  availability          BusinessAvailability[]
+  policies              BusinessPolicy[]
+  appointments          Appointment[]
+  appointmentActivities AppointmentActivity[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -430,9 +508,10 @@ model Service {
   updatedAt                    DateTime               @updatedAt
   archivedAt                   DateTime?
 
-  business  Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdBy User?    @relation("ServiceCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  updatedBy User?    @relation("ServiceUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy    User?         @relation("ServiceCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy    User?         @relation("ServiceUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  appointments Appointment[]
 
   @@index([businessId])
   @@index([businessId, isArchived])
@@ -510,11 +589,13 @@ model BusinessMember {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
-  business              Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user                  User           @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy             User?          @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
-  assignedLeads         Lead[]         @relation("LeadAssignee")
-  assignedConversations Conversation[] @relation("ConversationAssignee")
+  business              Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user                  User                  @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy             User?                 @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads         Lead[]                @relation("LeadAssignee")
+  assignedConversations Conversation[]        @relation("ConversationAssignee")
+  assignedAppointments  Appointment[]         @relation("AppointmentAssignee")
+  appointmentActivities AppointmentActivity[] @relation("AppointmentActivityActorMembership")
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -694,6 +775,7 @@ model Lead {
   activities    LeadActivity[]
   conversations Conversation[]
   messages      Message[]
+  appointments  Appointment[]
 
   @@index([businessId])
   @@index([businessId, phone])
@@ -746,6 +828,7 @@ model Conversation {
   lead          Lead            @relation(fields: [leadId], references: [id], onDelete: Cascade)
   assignedStaff BusinessMember? @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
   messages      Message[]
+  appointments  Appointment[]
 
   @@index([businessId])
   @@index([businessId, leadId])
@@ -844,4 +927,89 @@ model WebhookEventLog {
   @@index([conversationId, receivedAt])
   @@index([messageId, receivedAt])
   @@index([processingStatus, receivedAt])
+}
+
+model Appointment {
+  id                        String                              @id @default(cuid())
+  businessId                String
+  businessAccountId         String?
+  leadId                    String?
+  conversationId            String?
+  serviceId                 String?
+  assignedStaffId           String?
+  customerName              String?
+  customerPhone             String?
+  customerEmail             String?
+  title                     String
+  description               String?
+  notes                     String?
+  appointmentDate           DateTime
+  startTime                 DateTime
+  endTime                   DateTime
+  timezone                  String
+  status                    AppointmentStatus                   @default(CONFIRMED)
+  source                    AppointmentSource                   @default(MANUAL)
+  locationType              AppointmentLocationType             @default(TO_BE_CONFIRMED)
+  location                  String?
+  locationStatus            AppointmentLocationStatus           @default(NEEDS_CONFIRMATION)
+  humanConfirmationRequired Boolean                             @default(false)
+  humanConfirmationReason   AppointmentHumanConfirmationReason?
+  cancellationReason        String?
+  rescheduleReason          String?
+  createdById               String?
+  updatedById               String?
+  rescheduledById           String?
+  cancelledById             String?
+  completedById             String?
+  createdAt                 DateTime                            @default(now())
+  updatedAt                 DateTime                            @updatedAt
+  rescheduledAt             DateTime?
+  cancelledAt               DateTime?
+  completedAt               DateTime?
+
+  business        Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessAccount BusinessAccount?      @relation(fields: [businessAccountId], references: [id], onDelete: SetNull)
+  lead            Lead?                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation    Conversation?         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  service         Service?              @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  assignedStaff   BusinessMember?       @relation("AppointmentAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  createdBy       User?                 @relation("AppointmentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy       User?                 @relation("AppointmentUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  rescheduledBy   User?                 @relation("AppointmentRescheduler", fields: [rescheduledById], references: [id], onDelete: SetNull)
+  cancelledBy     User?                 @relation("AppointmentCanceller", fields: [cancelledById], references: [id], onDelete: SetNull)
+  completedBy     User?                 @relation("AppointmentCompleter", fields: [completedById], references: [id], onDelete: SetNull)
+  activities      AppointmentActivity[]
+
+  @@index([businessId])
+  @@index([businessAccountId])
+  @@index([businessId, leadId])
+  @@index([businessId, conversationId])
+  @@index([businessId, serviceId])
+  @@index([businessId, assignedStaffId])
+  @@index([businessId, status])
+  @@index([businessId, source])
+  @@index([businessId, appointmentDate])
+  @@index([businessId, startTime])
+  @@index([businessId, startTime, endTime])
+}
+
+model AppointmentActivity {
+  id                String                  @id @default(cuid())
+  businessId        String
+  appointmentId     String
+  actorUserId       String?
+  actorMembershipId String?
+  type              AppointmentActivityType
+  message           String
+  metadata          Json?
+  createdAt         DateTime                @default(now())
+
+  business        Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  appointment     Appointment     @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  actorUser       User?           @relation("AppointmentActivityActorUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorMembership BusinessMember? @relation("AppointmentActivityActorMembership", fields: [actorMembershipId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, appointmentId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([actorMembershipId, createdAt])
 }
