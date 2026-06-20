@@ -1,3 +1,4 @@
+import { AppointmentConfirmationMode } from "@prisma/client";
 import { z } from "zod";
 
 const businessName = z.string().trim().min(2).max(120);
@@ -67,6 +68,7 @@ export const updateBusinessProfileSchema = z.object({
   timezone: z.string().trim().min(1).max(100).optional(),
   defaultCurrency: z.string().trim().min(1).max(10).transform((value) => value.toUpperCase()).optional(),
   defaultNotificationEmail: email.nullable().optional(),
+  appointmentConfirmationMode: z.nativeEnum(AppointmentConfirmationMode).optional(),
   humanHandoffEmail: z.unknown().optional(),
   humanHandoffPhone: z.unknown().optional(),
   handoffEmail: z.unknown().optional(),

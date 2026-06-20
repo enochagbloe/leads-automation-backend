@@ -1,4 +1,5 @@
 import {
+  AppointmentConfirmationMode,
   AppointmentLocationType,
   AppointmentSource,
   AppointmentStatus,
@@ -64,6 +65,10 @@ export const checkAppointmentAvailabilitySchema = z.object({
   excludeAppointmentId: z.string().cuid().optional(),
 });
 
+export const appointmentSettingsSchema = z.object({
+  appointmentConfirmationMode: z.nativeEnum(AppointmentConfirmationMode),
+});
+
 export const createAppointmentSchema = z.object({
   leadId: z.string().cuid().nullable().optional(),
   conversationId: z.string().cuid().nullable().optional(),
@@ -90,16 +95,60 @@ export const createAppointmentSchema = z.object({
 });
 
 export const rescheduleAppointmentSchema = z.object({
-  date: dateString,
-  time: timeString,
+  date: dateString.optional(),
+  newDate: dateString.optional(),
+  time: timeString.optional(),
+  newStartTime: timeString.optional(),
   timezone,
   durationMinutes,
+  rescheduleReason: z.string().trim().max(500).nullable().optional(),
   reason: z.string().trim().max(500).nullable().optional(),
-});
+  notifyCustomer: z.boolean().optional(),
+}).superRefine((input, context) => {
+  if (!input.date && !input.newDate) context.addIssue({ code: z.ZodIssueCode.custom, path: ["date"], message: "Date is required" });
+  if (!input.time && !input.newStartTime) context.addIssue({ code: z.ZodIssueCode.custom, path: ["time"], message: "Time is required" });
+}).transform((input) => ({
+  date: input.date ?? input.newDate!,
+  time: input.time ?? input.newStartTime!,
+  timezone: input.timezone,
+  durationMinutes: input.durationMinutes,
+  reason: input.reason ?? input.rescheduleReason,
+  notifyCustomer: input.notifyCustomer ?? false,
+}));
 
 export const cancelAppointmentSchema = z.object({
+  cancellationReason: z.string().trim().max(500).nullable().optional(),
   reason: z.string().trim().max(500).nullable().optional(),
+  notifyCustomer: z.boolean().optional(),
+}).transform((input) => ({
+  reason: input.reason ?? input.cancellationReason,
+  notifyCustomer: input.notifyCustomer ?? false,
+}));
+
+export const confirmAppointmentSchema = z.object({
+  note: z.string().trim().max(500).nullable().optional(),
 });
+
+export const completeAppointmentSchema = z.object({
+  completedNote: z.string().trim().max(1000).nullable().optional(),
+  outcomeNote: z.string().trim().max(1000).nullable().optional(),
+}).transform((input) => ({
+  completedNote: input.completedNote ?? input.outcomeNote,
+}));
+
+export const noShowAppointmentSchema = z.object({
+  noShowReason: z.string().trim().max(1000).nullable().optional(),
+  outcomeNote: z.string().trim().max(1000).nullable().optional(),
+}).transform((input) => ({
+  noShowReason: input.noShowReason ?? input.outcomeNote,
+}));
+
+export const missedAppointmentSchema = z.object({
+  missedReason: z.string().trim().max(1000).nullable().optional(),
+  outcomeNote: z.string().trim().max(1000).nullable().optional(),
+}).transform((input) => ({
+  missedReason: input.missedReason ?? input.outcomeNote,
+}));
 
 export const assignAppointmentSchema = z.object({
   assignedStaffId: z.string().cuid().nullable(),
@@ -108,7 +157,12 @@ export const assignAppointmentSchema = z.object({
 export type AppointmentListQuery = z.infer<typeof appointmentListQuerySchema>;
 export type AppointmentCalendarQuery = z.infer<typeof appointmentCalendarQuerySchema>;
 export type CheckAppointmentAvailabilityInput = z.infer<typeof checkAppointmentAvailabilitySchema>;
+export type AppointmentSettingsInput = z.infer<typeof appointmentSettingsSchema>;
 export type CreateAppointmentInput = z.infer<typeof createAppointmentSchema>;
 export type RescheduleAppointmentInput = z.infer<typeof rescheduleAppointmentSchema>;
 export type CancelAppointmentInput = z.infer<typeof cancelAppointmentSchema>;
 export type AssignAppointmentInput = z.infer<typeof assignAppointmentSchema>;
+export type ConfirmAppointmentInput = z.infer<typeof confirmAppointmentSchema>;
+export type CompleteAppointmentInput = z.infer<typeof completeAppointmentSchema>;
+export type NoShowAppointmentInput = z.infer<typeof noShowAppointmentSchema>;
+export type MissedAppointmentInput = z.infer<typeof missedAppointmentSchema>;

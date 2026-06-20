@@ -79,9 +79,13 @@ enum LeadActivityAction {
   APPOINTMENT_UPDATED
   APPOINTMENT_RESCHEDULED
   APPOINTMENT_CANCELLED
+  APPOINTMENT_CONFIRMATION_REQUIRED
+  APPOINTMENT_CONFIRMED
   APPOINTMENT_COMPLETED
   APPOINTMENT_NO_SHOW
+  APPOINTMENT_MISSED
   APPOINTMENT_ASSIGNED
+  APPOINTMENT_NOTIFICATION_CREATED
 }
 
 enum ConversationChannel {
@@ -240,9 +244,11 @@ enum AppointmentStatus {
   NEEDS_HUMAN_CONFIRMATION
   RESCHEDULE_REQUESTED
   RESCHEDULED
+  NEEDS_OUTCOME_CONFIRMATION
   CANCELLED
   COMPLETED
   NO_SHOW
+  MISSED
 }
 
 enum AppointmentSource {
@@ -268,12 +274,14 @@ enum AppointmentLocationStatus {
 }
 
 enum AppointmentHumanConfirmationReason {
+  BUSINESS_CONFIRMATION_REQUIRED
   LOCATION_REQUIRED
   PAYMENT_REQUIRED
   STAFF_REQUIRED
   SPECIAL_REQUEST
   POLICY_EXCEPTION
   AVAILABILITY_CONFLICT
+  LOW_AI_CONFIDENCE
   OTHER
 }
 
@@ -282,11 +290,48 @@ enum AppointmentActivityType {
   APPOINTMENT_UPDATED
   APPOINTMENT_RESCHEDULED
   APPOINTMENT_CANCELLED
+  APPOINTMENT_CONFIRMED
   APPOINTMENT_COMPLETED
   APPOINTMENT_NO_SHOW
+  APPOINTMENT_MISSED
   APPOINTMENT_ASSIGNED
+  APPOINTMENT_STAFF_ASSIGNED
+  APPOINTMENT_CONFIRMATION_REQUIRED
+  APPOINTMENT_OUTCOME_REQUIRED
+  APPOINTMENT_AUTO_CONFIRMED_STAFF_ASSIGNED
+  APPOINTMENT_AUTO_CONFIRMED_SAFE_BOOKING
+  APPOINTMENT_SAFE_CONFIRMATION_REJECTED
+  APPOINTMENT_HUMAN_CONFIRMATION_REQUIRED
+  APPOINTMENT_STAFF_CONFLICT_DETECTED
+  APPOINTMENT_RESCHEDULE_LIMIT_REACHED
+  APPOINTMENT_RESCHEDULE_BLOCKED_PAST
   HUMAN_CONFIRMATION_REQUIRED
   APPOINTMENT_STATUS_CHANGED
+}
+
+enum AppointmentConfirmationMode {
+  MANUAL_CONFIRMATION_REQUIRED
+  AUTO_CONFIRM_WHEN_STAFF_ASSIGNED
+  AUTO_CONFIRM_SAFE_BOOKINGS
+}
+
+enum BusinessNotificationType {
+  APPOINTMENT_NEEDS_CONFIRMATION
+  APPOINTMENT_OUTCOME_REQUIRED
+  APPOINTMENT_ASSIGNED
+  APPOINTMENT_AUTO_CONFIRMED
+}
+
+enum BusinessNotificationPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum BusinessNotificationStatus {
+  UNREAD
+  READ
+  ARCHIVED
 }
 
 enum PlanCode {
@@ -366,9 +411,23 @@ enum AuditAction {
   APPOINTMENT_UPDATED
   APPOINTMENT_RESCHEDULED
   APPOINTMENT_CANCELLED
+  APPOINTMENT_CONFIRMATION_REQUIRED
+  APPOINTMENT_CONFIRMED
   APPOINTMENT_COMPLETED
   APPOINTMENT_NO_SHOW
+  APPOINTMENT_MISSED
   APPOINTMENT_ASSIGNED
+  APPOINTMENT_NOTIFICATION_CREATED
+  APPOINTMENT_OUTCOME_REQUIRED
+  APPOINTMENT_CONFIRMATION_MODE_UPDATED
+  APPOINTMENT_STAFF_ASSIGNED
+  APPOINTMENT_AUTO_CONFIRMED_STAFF_ASSIGNED
+  APPOINTMENT_AUTO_CONFIRMED_SAFE_BOOKING
+  APPOINTMENT_SAFE_CONFIRMATION_REJECTED
+  APPOINTMENT_HUMAN_CONFIRMATION_REQUIRED
+  APPOINTMENT_STAFF_CONFLICT_DETECTED
+  APPOINTMENT_RESCHEDULE_LIMIT_REACHED
+  APPOINTMENT_RESCHEDULE_BLOCKED_PAST
 }
 
 enum DayOfWeek {
@@ -394,29 +453,32 @@ model User {
   updatedAt     DateTime      @updatedAt
   deletedAt     DateTime?
 
-  ownedBusinesses         Business[]             @relation("BusinessOwner")
-  ownedBusinessAccounts   BusinessAccount[]      @relation("BusinessAccountOwner")
-  memberships             BusinessMember[]       @relation("MemberUser")
-  invitedMembers          BusinessMember[]       @relation("MemberInviter")
-  sentInvitations         BusinessInvitation[]   @relation("InvitationInviter")
-  authTokens              AuthToken[]
-  refreshTokens           RefreshToken[]
-  auditLogs               AuditLog[]
-  createdLeads            Lead[]                 @relation("LeadCreator")
-  leadActivities          LeadActivity[]         @relation("LeadActivityActor")
-  sentMessages            Message[]              @relation("MessageSender")
-  createdServices         Service[]              @relation("ServiceCreator")
-  updatedServices         Service[]              @relation("ServiceUpdater")
-  createdAvailability     BusinessAvailability[] @relation("AvailabilityCreator")
-  updatedAvailability     BusinessAvailability[] @relation("AvailabilityUpdater")
-  createdPolicies         BusinessPolicy[]       @relation("PolicyCreator")
-  updatedPolicies         BusinessPolicy[]       @relation("PolicyUpdater")
-  createdAppointments     Appointment[]          @relation("AppointmentCreator")
-  updatedAppointments     Appointment[]          @relation("AppointmentUpdater")
-  rescheduledAppointments Appointment[]          @relation("AppointmentRescheduler")
-  cancelledAppointments   Appointment[]          @relation("AppointmentCanceller")
-  completedAppointments   Appointment[]          @relation("AppointmentCompleter")
-  appointmentActivities   AppointmentActivity[]  @relation("AppointmentActivityActorUser")
+  ownedBusinesses              Business[]             @relation("BusinessOwner")
+  ownedBusinessAccounts        BusinessAccount[]      @relation("BusinessAccountOwner")
+  memberships                  BusinessMember[]       @relation("MemberUser")
+  invitedMembers               BusinessMember[]       @relation("MemberInviter")
+  sentInvitations              BusinessInvitation[]   @relation("InvitationInviter")
+  authTokens                   AuthToken[]
+  refreshTokens                RefreshToken[]
+  auditLogs                    AuditLog[]
+  createdLeads                 Lead[]                 @relation("LeadCreator")
+  leadActivities               LeadActivity[]         @relation("LeadActivityActor")
+  sentMessages                 Message[]              @relation("MessageSender")
+  createdServices              Service[]              @relation("ServiceCreator")
+  updatedServices              Service[]              @relation("ServiceUpdater")
+  createdAvailability          BusinessAvailability[] @relation("AvailabilityCreator")
+  updatedAvailability          BusinessAvailability[] @relation("AvailabilityUpdater")
+  createdPolicies              BusinessPolicy[]       @relation("PolicyCreator")
+  updatedPolicies              BusinessPolicy[]       @relation("PolicyUpdater")
+  createdAppointments          Appointment[]          @relation("AppointmentCreator")
+  updatedAppointments          Appointment[]          @relation("AppointmentUpdater")
+  rescheduledAppointments      Appointment[]          @relation("AppointmentRescheduler")
+  confirmedAppointments        Appointment[]          @relation("AppointmentConfirmer")
+  cancelledAppointments        Appointment[]          @relation("AppointmentCanceller")
+  completedAppointments        Appointment[]          @relation("AppointmentCompleter")
+  appointmentActivities        AppointmentActivity[]  @relation("AppointmentActivityActorUser")
+  businessNotifications        BusinessNotification[] @relation("BusinessNotificationRecipient")
+  createdBusinessNotifications BusinessNotification[] @relation("BusinessNotificationCreator")
 }
 
 model BusinessAccount {
@@ -436,27 +498,28 @@ model BusinessAccount {
 }
 
 model Business {
-  id                       String         @id @default(cuid())
-  businessAccountId        String
-  name                     String
-  industry                 String
-  description              String?
-  slug                     String         @unique
-  ownerId                  String
-  email                    String?
-  phone                    String?
-  country                  String?
-  city                     String?
-  address                  String?
-  serviceArea              String?
-  website                  String?
-  timezone                 String         @default("Africa/Accra")
-  defaultCurrency          String         @default("GHS")
-  defaultNotificationEmail String?
-  status                   BusinessStatus @default(PENDING_SETUP)
-  createdAt                DateTime       @default(now())
-  updatedAt                DateTime       @updatedAt
-  deletedAt                DateTime?
+  id                          String                      @id @default(cuid())
+  businessAccountId           String
+  name                        String
+  industry                    String
+  description                 String?
+  slug                        String                      @unique
+  ownerId                     String
+  email                       String?
+  phone                       String?
+  country                     String?
+  city                        String?
+  address                     String?
+  serviceArea                 String?
+  website                     String?
+  timezone                    String                      @default("Africa/Accra")
+  defaultCurrency             String                      @default("GHS")
+  defaultNotificationEmail    String?
+  appointmentConfirmationMode AppointmentConfirmationMode @default(MANUAL_CONFIRMATION_REQUIRED)
+  status                      BusinessStatus              @default(PENDING_SETUP)
+  createdAt                   DateTime                    @default(now())
+  updatedAt                   DateTime                    @updatedAt
+  deletedAt                   DateTime?
 
   owner                 User                   @relation("BusinessOwner", fields: [ownerId], references: [id])
   businessAccount       BusinessAccount        @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
@@ -475,6 +538,7 @@ model Business {
   policies              BusinessPolicy[]
   appointments          Appointment[]
   appointmentActivities AppointmentActivity[]
+  notifications         BusinessNotification[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -589,13 +653,16 @@ model BusinessMember {
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
 
-  business              Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user                  User                  @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy             User?                 @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
-  assignedLeads         Lead[]                @relation("LeadAssignee")
-  assignedConversations Conversation[]        @relation("ConversationAssignee")
-  assignedAppointments  Appointment[]         @relation("AppointmentAssignee")
-  appointmentActivities AppointmentActivity[] @relation("AppointmentActivityActorMembership")
+  business                     Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user                         User                   @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy                    User?                  @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads                Lead[]                 @relation("LeadAssignee")
+  assignedConversations        Conversation[]         @relation("ConversationAssignee")
+  assignedAppointments         Appointment[]          @relation("AppointmentAssignee")
+  lastRescheduledAppointments  Appointment[]          @relation("AppointmentLastRescheduler")
+  outcomeConfirmedAppointments Appointment[]          @relation("AppointmentOutcomeConfirmer")
+  appointmentActivities        AppointmentActivity[]  @relation("AppointmentActivityActorMembership")
+  notifications                BusinessNotification[]
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -956,29 +1023,44 @@ model Appointment {
   humanConfirmationReason   AppointmentHumanConfirmationReason?
   cancellationReason        String?
   rescheduleReason          String?
+  rescheduleCount           Int                                 @default(0)
+  lastRescheduledById       String?
+  outcomeConfirmedById      String?
+  outcomeNote               String?
+  missedReason              String?
+  noShowReason              String?
+  completedNote             String?
   createdById               String?
   updatedById               String?
   rescheduledById           String?
+  confirmedById             String?
   cancelledById             String?
   completedById             String?
   createdAt                 DateTime                            @default(now())
   updatedAt                 DateTime                            @updatedAt
   rescheduledAt             DateTime?
+  lastRescheduledAt         DateTime?
+  confirmedAt               DateTime?
   cancelledAt               DateTime?
   completedAt               DateTime?
+  outcomeRequiredAt         DateTime?
+  outcomeConfirmedAt        DateTime?
 
-  business        Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  businessAccount BusinessAccount?      @relation(fields: [businessAccountId], references: [id], onDelete: SetNull)
-  lead            Lead?                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  conversation    Conversation?         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  service         Service?              @relation(fields: [serviceId], references: [id], onDelete: SetNull)
-  assignedStaff   BusinessMember?       @relation("AppointmentAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
-  createdBy       User?                 @relation("AppointmentCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  updatedBy       User?                 @relation("AppointmentUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
-  rescheduledBy   User?                 @relation("AppointmentRescheduler", fields: [rescheduledById], references: [id], onDelete: SetNull)
-  cancelledBy     User?                 @relation("AppointmentCanceller", fields: [cancelledById], references: [id], onDelete: SetNull)
-  completedBy     User?                 @relation("AppointmentCompleter", fields: [completedById], references: [id], onDelete: SetNull)
-  activities      AppointmentActivity[]
+  business           Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessAccount    BusinessAccount?      @relation(fields: [businessAccountId], references: [id], onDelete: SetNull)
+  lead               Lead?                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation       Conversation?         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  service            Service?              @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  assignedStaff      BusinessMember?       @relation("AppointmentAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  lastRescheduledBy  BusinessMember?       @relation("AppointmentLastRescheduler", fields: [lastRescheduledById], references: [id], onDelete: SetNull)
+  outcomeConfirmedBy BusinessMember?       @relation("AppointmentOutcomeConfirmer", fields: [outcomeConfirmedById], references: [id], onDelete: SetNull)
+  createdBy          User?                 @relation("AppointmentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy          User?                 @relation("AppointmentUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  rescheduledBy      User?                 @relation("AppointmentRescheduler", fields: [rescheduledById], references: [id], onDelete: SetNull)
+  confirmedBy        User?                 @relation("AppointmentConfirmer", fields: [confirmedById], references: [id], onDelete: SetNull)
+  cancelledBy        User?                 @relation("AppointmentCanceller", fields: [cancelledById], references: [id], onDelete: SetNull)
+  completedBy        User?                 @relation("AppointmentCompleter", fields: [completedById], references: [id], onDelete: SetNull)
+  activities         AppointmentActivity[]
 
   @@index([businessId])
   @@index([businessAccountId])
@@ -1012,4 +1094,32 @@ model AppointmentActivity {
   @@index([businessId, appointmentId, createdAt])
   @@index([actorUserId, createdAt])
   @@index([actorMembershipId, createdAt])
+}
+
+model BusinessNotification {
+  id                    String                       @id @default(cuid())
+  businessId            String
+  recipientMembershipId String
+  recipientUserId       String
+  createdById           String?
+  type                  BusinessNotificationType
+  priority              BusinessNotificationPriority @default(NORMAL)
+  status                BusinessNotificationStatus   @default(UNREAD)
+  title                 String
+  message               String
+  metadata              Json?
+  readAt                DateTime?
+  archivedAt            DateTime?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+
+  business            Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  recipientMembership BusinessMember @relation(fields: [recipientMembershipId], references: [id], onDelete: Cascade)
+  recipientUser       User           @relation("BusinessNotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  createdBy           User?          @relation("BusinessNotificationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([businessId, status, createdAt])
+  @@index([recipientMembershipId, status, createdAt])
+  @@index([recipientUserId, status, createdAt])
+  @@index([businessId, type, createdAt])
 }
