@@ -283,6 +283,21 @@ function appointmentInOutcomeGrace(appointment: { endTime: Date }, now = new Dat
   return appointmentHasEnded(appointment, now) && !appointmentOutcomeDue(appointment, now);
 }
 
+function assertAppointmentEndedForOutcome(appointment: { endTime: Date }, action: "complete" | "no-show" | "missed") {
+  if (appointmentHasEnded(appointment)) return;
+  const messages = {
+    complete: "Appointments cannot be completed before their scheduled end time.",
+    "no-show": "Appointments cannot be marked no-show before their scheduled end time.",
+    missed: "Appointments cannot be marked missed before their scheduled end time.",
+  };
+  const codes = {
+    complete: "APPOINTMENT_CANNOT_COMPLETE",
+    "no-show": "APPOINTMENT_CANNOT_NO_SHOW",
+    missed: "APPOINTMENT_CANNOT_MARK_MISSED",
+  };
+  throw new AppError(422, messages[action], codes[action]);
+}
+
 function availableActions(appointment: { status: AppointmentStatus; endTime: Date; rescheduleCount?: number | null }) {
   if (TERMINAL_APPOINTMENT_STATUSES.has(appointment.status)) return [];
   if (appointment.status === AppointmentStatus.NEEDS_OUTCOME_CONFIRMATION || appointmentInOutcomeGrace(appointment)) {
@@ -315,6 +330,11 @@ function accessWhere(actor: AppointmentActor): Prisma.AppointmentWhereInput {
     businessId: actor.businessId,
     ...(actor.role === BusinessRole.STAFF ? { assignedStaffId: actor.membershipId } : {}),
   };
+}
+
+function assignedStaffFilter(actor: AppointmentActor, requestedAssignedStaffId?: string) {
+  if (actor.role === BusinessRole.STAFF) return { assignedStaffId: actor.membershipId };
+  return requestedAssignedStaffId ? { assignedStaffId: requestedAssignedStaffId } : {};
 }
 
 async function validateBusiness(actor: AppointmentActor, tx: Prisma.TransactionClient = prisma) {
@@ -1440,7 +1460,7 @@ export const appointmentService = {
       ...(query.status ? { status: query.status } : {}),
       ...(query.source ? { source: query.source } : {}),
       ...(query.serviceId ? { serviceId: query.serviceId } : {}),
-      ...(query.assignedStaffId ? { assignedStaffId: query.assignedStaffId } : {}),
+      ...assignedStaffFilter(actor, query.assignedStaffId),
       ...(query.leadId ? { leadId: query.leadId } : {}),
       ...(query.conversationId ? { conversationId: query.conversationId } : {}),
       ...(query.search ? {
@@ -1496,7 +1516,7 @@ export const appointmentService = {
       startTime: rangeFromDates(query.dateFrom, query.dateTo),
       ...(query.status ? { status: query.status } : {}),
       ...(query.serviceId ? { serviceId: query.serviceId } : {}),
-      ...(query.assignedStaffId ? { assignedStaffId: query.assignedStaffId } : {}),
+      ...assignedStaffFilter(actor, query.assignedStaffId),
     };
     const appointments = await prisma.appointment.findMany({
       where,
@@ -1624,6 +1644,9 @@ export const appointmentService = {
     const cancellationReason = requireReason(reason, "cancelling");
     const existing = await loadAppointment(actor, appointmentId);
     if (existing.status === AppointmentStatus.CANCELLED) throw new AppError(422, "Appointment is already cancelled.", "APPOINTMENT_ALREADY_CANCELLED");
+    if (existing.status === AppointmentStatus.COMPLETED || existing.status === AppointmentStatus.NO_SHOW || existing.status === AppointmentStatus.MISSED) {
+      throw new AppError(422, "Appointments with a recorded outcome cannot be cancelled.", "APPOINTMENT_OUTCOME_ALREADY_RECORDED");
+    }
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.appointment.update({
         where: { id: appointmentId },
@@ -1659,6 +1682,7 @@ export const appointmentService = {
     if (existing.status === AppointmentStatus.CANCELLED) {
       throw new AppError(422, "This appointment cannot be completed in its current status.", "APPOINTMENT_CANNOT_COMPLETE");
     }
+    assertAppointmentEndedForOutcome(existing, "complete");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.appointment.update({
@@ -1700,6 +1724,7 @@ export const appointmentService = {
     if (existing.status === AppointmentStatus.CANCELLED) {
       throw new AppError(422, "This appointment cannot be marked no-show in its current status.", "APPOINTMENT_CANNOT_NO_SHOW");
     }
+    assertAppointmentEndedForOutcome(existing, "no-show");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.appointment.update({
@@ -1739,6 +1764,7 @@ export const appointmentService = {
     if (existing.status === AppointmentStatus.CANCELLED) {
       throw new AppError(422, "This appointment cannot be marked missed in its current status.", "APPOINTMENT_CANNOT_MARK_MISSED");
     }
+    assertAppointmentEndedForOutcome(existing, "missed");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
       const record = await tx.appointment.update({
