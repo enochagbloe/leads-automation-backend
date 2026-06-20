@@ -32,7 +32,22 @@ export type RealtimeEventType =
   | "business.policy.restored"
   | "business.policy.reordered"
   | "business.policies.summary.updated"
-  | "business.knowledge_preview.updated";
+  | "business.knowledge_preview.updated"
+  | "business.appointment.created"
+  | "business.appointment.updated"
+  | "business.appointment.rescheduled"
+  | "business.appointment.cancelled"
+  | "business.appointment.confirmation_required"
+  | "business.appointment.needs_confirmation"
+  | "business.appointment.confirmed"
+  | "business.appointment.outcome_required"
+  | "business.appointment.completed"
+  | "business.appointment.no_show"
+  | "business.appointment.missed"
+  | "business.appointment.reschedule_limit_reached"
+  | "business.appointment.assigned"
+  | "business.appointments.calendar.updated"
+  | "business.notification.created";
 
 export type RealtimeEvent = {
   id: string;

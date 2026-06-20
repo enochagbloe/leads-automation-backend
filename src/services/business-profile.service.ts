@@ -1,4 +1,4 @@
-import { AuditAction, BusinessRole, Prisma } from "@prisma/client";
+import { AppointmentConfirmationMode, AuditAction, BusinessRole, Prisma, SubscriptionStatus } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { UpdateBusinessProfileInput } from "../validation/business.schemas";
 import { AppError } from "../utils/errors";
@@ -7,6 +7,7 @@ import { invalidateBusinessSetupStatus } from "./business-setup.service";
 import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
+import { assertAppointmentConfirmationModeAllowed } from "./appointment.service";
 
 export type BusinessProfileActor = {
   userId: string;
@@ -36,6 +37,7 @@ const PROFILE_EDITABLE_FIELDS = new Set([
   "timezone",
   "defaultCurrency",
   "defaultNotificationEmail",
+  "appointmentConfirmationMode",
 ]);
 const MANAGER_EDITABLE_FIELDS = new Set([
   "description",
@@ -62,6 +64,7 @@ const PROFILE_SELECT = {
   timezone: true,
   defaultCurrency: true,
   defaultNotificationEmail: true,
+  appointmentConfirmationMode: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.BusinessSelect;
@@ -145,6 +148,18 @@ export const businessProfileService = {
     }
     if (input.defaultCurrency !== undefined && !validCurrency(input.defaultCurrency)) {
       throw new AppError(422, "Invalid currency code.", "INVALID_CURRENCY");
+    }
+    if (
+      input.appointmentConfirmationMode !== undefined
+      && input.appointmentConfirmationMode !== AppointmentConfirmationMode.MANUAL_CONFIRMATION_REQUIRED
+    ) {
+      const subscription = await prisma.subscription.findFirst({
+        where: { businessAccountId: actor.businessAccountId, status: { in: [SubscriptionStatus.TRIALING, SubscriptionStatus.ACTIVE] } },
+        orderBy: { createdAt: "desc" },
+        include: { plan: true },
+      });
+      if (!subscription) throw new AppError(403, "No active subscription", "SUBSCRIPTION_REQUIRED");
+      assertAppointmentConfirmationModeAllowed(subscription.plan.code, input.appointmentConfirmationMode);
     }
 
     let result: {

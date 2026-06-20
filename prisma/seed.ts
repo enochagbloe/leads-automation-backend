@@ -42,7 +42,7 @@ const plans = [
     currency: "GHS",
     maxStaff: null,
     maxServices: 100,
-    maxAppointmentsPerMonth: null,
+    maxAppointmentsPerMonth: 2000,
     maxConversationsPerMonth: 10000,
     maxAiRepliesPerMonth: 10000,
     maxKnowledgeItems: null,
