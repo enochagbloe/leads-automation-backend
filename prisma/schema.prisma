@@ -316,22 +316,37 @@ enum AppointmentConfirmationMode {
 }
 
 enum BusinessNotificationType {
+  INFO
   APPOINTMENT_NEEDS_CONFIRMATION
   APPOINTMENT_OUTCOME_REQUIRED
+  APPOINTMENT_NEEDS_REVIEW
   APPOINTMENT_ASSIGNED
+  APPOINTMENT_CONFIRMED
   APPOINTMENT_AUTO_CONFIRMED
+  AI_HUMAN_REVIEW_REQUIRED
+  CONVERSATION_HANDOFF_REQUIRED
 }
 
 enum BusinessNotificationPriority {
   LOW
   NORMAL
   HIGH
+  URGENT
 }
 
 enum BusinessNotificationStatus {
   UNREAD
   READ
+  ACTIONED
   ARCHIVED
+  DISMISSED
+}
+
+enum BusinessNotificationEntityType {
+  APPOINTMENT
+  CONVERSATION
+  LEAD
+  BUSINESS
 }
 
 enum PlanCode {
@@ -428,6 +443,10 @@ enum AuditAction {
   APPOINTMENT_STAFF_CONFLICT_DETECTED
   APPOINTMENT_RESCHEDULE_LIMIT_REACHED
   APPOINTMENT_RESCHEDULE_BLOCKED_PAST
+  NOTIFICATION_CREATED
+  NOTIFICATION_READ
+  NOTIFICATION_DISMISSED
+  NOTIFICATION_ACTIONED
 }
 
 enum DayOfWeek {
@@ -488,11 +507,12 @@ model BusinessAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  owner         User                 @relation("BusinessAccountOwner", fields: [ownerId], references: [id])
+  owner         User                   @relation("BusinessAccountOwner", fields: [ownerId], references: [id])
   businesses    Business[]
   subscriptions Subscription[]
   usageRecords  AccountUsageRecord[]
   appointments  Appointment[]
+  notifications BusinessNotification[]
 
   @@index([ownerId])
 }
@@ -1097,29 +1117,39 @@ model AppointmentActivity {
 }
 
 model BusinessNotification {
-  id                    String                       @id @default(cuid())
+  id                    String                          @id @default(cuid())
   businessId            String
+  businessAccountId     String?
   recipientMembershipId String
   recipientUserId       String
   createdById           String?
   type                  BusinessNotificationType
-  priority              BusinessNotificationPriority @default(NORMAL)
-  status                BusinessNotificationStatus   @default(UNREAD)
+  priority              BusinessNotificationPriority    @default(NORMAL)
+  status                BusinessNotificationStatus      @default(UNREAD)
   title                 String
   message               String
+  entityType            BusinessNotificationEntityType?
+  entityId              String?
+  actions               Json?
   metadata              Json?
   readAt                DateTime?
+  actionedAt            DateTime?
+  dismissedAt           DateTime?
+  expiresAt             DateTime?
   archivedAt            DateTime?
-  createdAt             DateTime                     @default(now())
-  updatedAt             DateTime                     @updatedAt
+  createdAt             DateTime                        @default(now())
+  updatedAt             DateTime                        @updatedAt
 
-  business            Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  recipientMembership BusinessMember @relation(fields: [recipientMembershipId], references: [id], onDelete: Cascade)
-  recipientUser       User           @relation("BusinessNotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
-  createdBy           User?          @relation("BusinessNotificationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  business            Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessAccount     BusinessAccount? @relation(fields: [businessAccountId], references: [id], onDelete: SetNull)
+  recipientMembership BusinessMember   @relation(fields: [recipientMembershipId], references: [id], onDelete: Cascade)
+  recipientUser       User             @relation("BusinessNotificationRecipient", fields: [recipientUserId], references: [id], onDelete: Cascade)
+  createdBy           User?            @relation("BusinessNotificationCreator", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([businessId, status, createdAt])
   @@index([recipientMembershipId, status, createdAt])
   @@index([recipientUserId, status, createdAt])
   @@index([businessId, type, createdAt])
+  @@index([businessId, entityType, entityId])
+  @@index([businessAccountId, createdAt])
 }

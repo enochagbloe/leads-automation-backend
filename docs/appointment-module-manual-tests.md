@@ -280,10 +280,45 @@ X-Business-Id: <activeBusinessId>
 83. Watch SSE during Premium safe appointment creation.
     Expected: `business.appointment.confirmed`, `business.notification.created`, and calendar update.
 
+## Actionable Notifications
+
+84. Create pending-confirmation appointment.
+    Expected: notification type `APPOINTMENT_NEEDS_CONFIRMATION`, entity `APPOINTMENT`, action payload includes confirm/reschedule/cancel/view.
+
+85. Create needs-human-confirmation appointment.
+    Expected: notification type `APPOINTMENT_NEEDS_REVIEW`, high priority, action payload includes review/confirm/reschedule/cancel.
+
+86. Trigger outcome-required lazy update.
+    Expected: notification type `APPOINTMENT_OUTCOME_REQUIRED`, action payload includes completed/no-show/missed/view.
+
+87. Assign appointment to staff.
+    Expected: assigned staff receives `APPOINTMENT_ASSIGNED` notification.
+
+88. Fetch `/api/business/notifications`.
+    Expected: only current membership's notifications are returned.
+
+89. Fetch `/api/business/notifications/counts`.
+    Expected: unread, highPriority, and urgent counts are correct.
+
+90. Mark notification read.
+    Expected: status `READ`, `readAt` set.
+
+91. Dismiss notification.
+    Expected: status `DISMISSED`, `dismissedAt` set.
+
+92. Mark notification actioned after successful appointment action.
+    Expected: status `ACTIONED`, `actionedAt` set.
+
+93. Try to access another member's notification as staff.
+    Expected: `NOTIFICATION_NOT_FOUND`.
+
+94. Re-trigger same unresolved appointment notification.
+    Expected: duplicate unresolved notification is not created.
+
 ## Out Of Scope Guardrails
 
-84. Verify appointment creation from conversation does not call WhatsApp outbound provider.
+95. Verify appointment creation from conversation does not call WhatsApp outbound provider.
     Expected: only internal system message is stored.
 
-85. Search code/logs during appointment flow.
+96. Search code/logs during appointment flow.
     Expected: no OpenAI/AI call and no Google Calendar sync call.

@@ -11,6 +11,7 @@ import {
   BusinessNotificationPriority,
   BusinessNotificationStatus,
   BusinessNotificationType,
+  BusinessNotificationEntityType,
   BusinessRole,
   DayOfWeek,
   LeadActivityAction,
@@ -37,6 +38,7 @@ import { cacheService } from "./cache.service";
 import { invalidateConversationCache } from "./conversation.service";
 import { createSystemMessage } from "./message.service";
 import { realtimeService, RealtimeEventType } from "./realtime.service";
+import { notificationService } from "./notification.service";
 
 export type AppointmentActor = {
   userId: string;
@@ -72,6 +74,27 @@ const CONFIRMABLE_APPOINTMENT_STATUSES = new Set<AppointmentStatus>([
   AppointmentStatus.NEEDS_HUMAN_CONFIRMATION,
   AppointmentStatus.RESCHEDULE_REQUESTED,
 ]);
+const APPOINTMENT_CONFIRMATION_ACTIONS = [
+  { label: "Confirm", action: "CONFIRM_APPOINTMENT", variant: "default" },
+  { label: "Reschedule", action: "RESCHEDULE_APPOINTMENT", variant: "secondary" },
+  { label: "Cancel", action: "CANCEL_APPOINTMENT", variant: "destructive" },
+  { label: "View appointment", action: "VIEW_APPOINTMENT", variant: "secondary" },
+] as const;
+const APPOINTMENT_REVIEW_ACTIONS = [
+  { label: "Review", action: "VIEW_APPOINTMENT", variant: "default" },
+  { label: "Confirm", action: "CONFIRM_APPOINTMENT", variant: "secondary" },
+  { label: "Reschedule", action: "RESCHEDULE_APPOINTMENT", variant: "secondary" },
+  { label: "Cancel", action: "CANCEL_APPOINTMENT", variant: "destructive" },
+] as const;
+const APPOINTMENT_OUTCOME_ACTIONS = [
+  { label: "Completed", action: "MARK_COMPLETED", variant: "default" },
+  { label: "No-show", action: "MARK_NO_SHOW", variant: "secondary" },
+  { label: "Missed", action: "MARK_MISSED", variant: "destructive" },
+  { label: "View appointment", action: "VIEW_APPOINTMENT", variant: "secondary" },
+] as const;
+const APPOINTMENT_ASSIGNED_ACTIONS = [
+  { label: "View appointment", action: "VIEW_APPOINTMENT", variant: "default" },
+] as const;
 
 const appointmentInclude = {
   service: {
@@ -540,67 +563,61 @@ async function createConfirmationNotifications(tx: Prisma.TransactionClient, act
   if (appointment.status !== AppointmentStatus.PENDING_BUSINESS_CONFIRMATION && appointment.status !== AppointmentStatus.NEEDS_HUMAN_CONFIRMATION) return [];
   const uniqueRecipients = await notificationRecipients(tx, actor, appointment.assignedStaffId);
   const message = confirmationNotificationMessage(appointment);
+  const isReview = appointment.status === AppointmentStatus.NEEDS_HUMAN_CONFIRMATION;
   const notifications = [];
   for (const recipient of uniqueRecipients) {
-    notifications.push(await tx.businessNotification.create({
-      data: {
-        businessId: actor.businessId,
-        recipientMembershipId: recipient.id,
-        recipientUserId: recipient.userId,
-        createdById: actor.userId,
-        type: BusinessNotificationType.APPOINTMENT_NEEDS_CONFIRMATION,
-        priority: BusinessNotificationPriority.HIGH,
-        status: BusinessNotificationStatus.UNREAD,
-        title: "Appointment needs confirmation",
-        message,
-        metadata: json({
-          appointmentId: appointment.id,
-          leadId: appointment.leadId,
-          conversationId: appointment.conversationId,
-          source: appointment.source,
-          status: appointment.status,
-        }),
+    notifications.push(await notificationService.createNotification({
+      businessId: actor.businessId,
+      businessAccountId: actor.businessAccountId,
+      recipientMembershipId: recipient.id,
+      createdById: actor.userId,
+      type: isReview ? BusinessNotificationType.APPOINTMENT_NEEDS_REVIEW : BusinessNotificationType.APPOINTMENT_NEEDS_CONFIRMATION,
+      priority: BusinessNotificationPriority.HIGH,
+      title: isReview ? "Appointment needs review" : "Appointment needs confirmation",
+      message,
+      entityType: BusinessNotificationEntityType.APPOINTMENT,
+      entityId: appointment.id,
+      actions: isReview ? [...APPOINTMENT_REVIEW_ACTIONS] : [...APPOINTMENT_CONFIRMATION_ACTIONS],
+      deferSideEffects: true,
+      metadata: {
+        appointmentId: appointment.id,
+        leadId: appointment.leadId,
+        conversationId: appointment.conversationId,
+        source: appointment.source,
+        status: appointment.status,
       },
-    }));
+    }, tx));
   }
   return notifications;
 }
 
 async function createOutcomeRequiredNotifications(tx: Prisma.TransactionClient, actor: AppointmentActor, appointment: Prisma.AppointmentGetPayload<{ include: typeof appointmentInclude }>) {
   if (appointment.status !== AppointmentStatus.NEEDS_OUTCOME_CONFIRMATION) return [];
-  const existing = await tx.businessNotification.findFirst({
-    where: {
-      businessId: actor.businessId,
-      type: BusinessNotificationType.APPOINTMENT_OUTCOME_REQUIRED,
-      metadata: { path: ["appointmentId"], equals: appointment.id },
-    },
-    select: { id: true },
-  });
-  if (existing) return [];
   const uniqueRecipients = await notificationRecipients(tx, actor, appointment.assignedStaffId);
   const message = outcomeNotificationMessage(appointment);
   const notifications = [];
   for (const recipient of uniqueRecipients) {
-    notifications.push(await tx.businessNotification.create({
-      data: {
-        businessId: actor.businessId,
-        recipientMembershipId: recipient.id,
-        recipientUserId: recipient.userId,
-        createdById: actor.userId,
-        type: BusinessNotificationType.APPOINTMENT_OUTCOME_REQUIRED,
-        priority: BusinessNotificationPriority.HIGH,
-        status: BusinessNotificationStatus.UNREAD,
-        title: "Appointment outcome needed",
-        message,
-        metadata: json({
-          appointmentId: appointment.id,
-          leadId: appointment.leadId,
-          conversationId: appointment.conversationId,
-          source: appointment.source,
-          status: appointment.status,
-        }),
+    notifications.push(await notificationService.createNotification({
+      businessId: actor.businessId,
+      businessAccountId: actor.businessAccountId,
+      recipientMembershipId: recipient.id,
+      createdById: actor.userId,
+      type: BusinessNotificationType.APPOINTMENT_OUTCOME_REQUIRED,
+      priority: BusinessNotificationPriority.HIGH,
+      title: "Appointment outcome needed",
+      message,
+      entityType: BusinessNotificationEntityType.APPOINTMENT,
+      entityId: appointment.id,
+      actions: [...APPOINTMENT_OUTCOME_ACTIONS],
+      deferSideEffects: true,
+      metadata: {
+        appointmentId: appointment.id,
+        leadId: appointment.leadId,
+        conversationId: appointment.conversationId,
+        source: appointment.source,
+        status: appointment.status,
       },
-    }));
+    }, tx));
   }
   return notifications;
 }
@@ -618,30 +635,31 @@ async function createStaffAssignmentNotifications(
   const notifications = [];
   for (const recipient of uniqueRecipients) {
     const isAssignedStaff = recipient.id === appointment.assignedStaffId;
-    notifications.push(await tx.businessNotification.create({
-      data: {
-        businessId: actor.businessId,
-        recipientMembershipId: recipient.id,
-        recipientUserId: recipient.userId,
-        createdById: actor.userId,
-        type,
-        priority: BusinessNotificationPriority.HIGH,
-        status: BusinessNotificationStatus.UNREAD,
-        title: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED ? "Appointment confirmed" : "Appointment assigned",
-        message: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED && !appointment.assignedStaffId
-          ? "Appointment confirmed."
-          : isAssignedStaff
-          ? "You have been assigned a new appointment."
-          : `Appointment confirmed and assigned to ${staffName}.`,
-        metadata: json({
-          appointmentId: appointment.id,
-          leadId: appointment.leadId,
-          conversationId: appointment.conversationId,
-          assignedStaffId: appointment.assignedStaffId,
-          status: appointment.status,
-        }),
+    notifications.push(await notificationService.createNotification({
+      businessId: actor.businessId,
+      businessAccountId: actor.businessAccountId,
+      recipientMembershipId: recipient.id,
+      createdById: actor.userId,
+      type: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED ? BusinessNotificationType.APPOINTMENT_CONFIRMED : BusinessNotificationType.APPOINTMENT_ASSIGNED,
+      priority: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED ? BusinessNotificationPriority.NORMAL : BusinessNotificationPriority.NORMAL,
+      title: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED ? "Appointment confirmed" : "New appointment assigned",
+      message: type === BusinessNotificationType.APPOINTMENT_AUTO_CONFIRMED && !appointment.assignedStaffId
+        ? "Appointment confirmed."
+        : isAssignedStaff
+        ? `You have been assigned to ${appointment.title}${appointment.customerName ? ` with ${appointment.customerName}` : ""}.`
+        : `Appointment confirmed and assigned to ${staffName}.`,
+      entityType: BusinessNotificationEntityType.APPOINTMENT,
+      entityId: appointment.id,
+      actions: [...APPOINTMENT_ASSIGNED_ACTIONS],
+      deferSideEffects: true,
+      metadata: {
+        appointmentId: appointment.id,
+        leadId: appointment.leadId,
+        conversationId: appointment.conversationId,
+        assignedStaffId: appointment.assignedStaffId,
+        status: appointment.status,
       },
-    }));
+    }, tx));
   }
   return notifications;
 }
@@ -836,10 +854,10 @@ async function publishAndInvalidate(
   });
 }
 
-function publishNotificationEvents(
+async function publishNotificationEvents(
   actor: AppointmentActor,
   appointment: { id: string; leadId: string | null; conversationId: string | null; assignedStaffId: string | null; status: AppointmentStatus; startTime: Date; endTime: Date; updatedAt: Date },
-  notifications: Array<{ id: string; recipientMembershipId: string; recipientUserId: string; type: BusinessNotificationType; priority: BusinessNotificationPriority; status: BusinessNotificationStatus; title: string; message: string; createdAt: Date }>,
+  notifications: Array<{ id: string; recipientMembershipId: string; recipientUserId: string; type: BusinessNotificationType; priority: BusinessNotificationPriority; status: BusinessNotificationStatus; title: string; message: string; entityType?: BusinessNotificationEntityType | null; entityId?: string | null; actions?: Prisma.JsonValue | null; createdAt: Date }>,
 ) {
   if (appointment.status === AppointmentStatus.PENDING_BUSINESS_CONFIRMATION || appointment.status === AppointmentStatus.NEEDS_OUTCOME_CONFIRMATION) {
     realtimeService.publish({
@@ -862,6 +880,10 @@ function publishNotificationEvents(
     });
   }
   for (const notification of notifications) {
+    await Promise.all([
+      cacheService.delByPattern(`business:${actor.businessId}:notifications:list:${notification.recipientMembershipId}:*`),
+      cacheService.delByPattern(`business:${actor.businessId}:notifications:counts:${notification.recipientMembershipId}`),
+    ]);
     realtimeService.publish({
       type: "business.notification.created",
       businessId: actor.businessId,
@@ -873,9 +895,25 @@ function publishNotificationEvents(
         status: notification.status,
         title: notification.title,
         message: notification.message,
+        entityType: notification.entityType ?? null,
+        entityId: notification.entityId ?? null,
+        actions: notification.actions ?? [],
         appointmentId: appointment.id,
         createdAt: notification.createdAt.toISOString(),
       },
+    });
+    await auditService.log({
+      action: AuditAction.NOTIFICATION_CREATED,
+      businessId: actor.businessId,
+      userId: actor.userId,
+      metadata: json({
+        notificationId: notification.id,
+        businessId: actor.businessId,
+        recipientMembershipId: notification.recipientMembershipId,
+        type: notification.type,
+        entityType: notification.entityType ?? null,
+        entityId: notification.entityId ?? null,
+      }),
     });
   }
 }
@@ -945,7 +983,7 @@ async function markDueAppointmentsForOutcome(actor: AppointmentActor, appointmen
       }),
       publishAndInvalidate(actor, "business.appointment.outcome_required", updated),
     ]);
-    publishNotificationEvents(actor, updated, notifications);
+    await publishNotificationEvents(actor, updated, notifications);
   }
 }
 
@@ -1210,8 +1248,8 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
     publishAndInvalidate(actor, "business.appointment.created", appointment),
     ...(assignmentNotifications.length > 0 ? [publishAndInvalidate(actor, "business.appointment.confirmed", appointment)] : []),
   ]);
-  publishNotificationEvents(actor, appointment, confirmationNotifications);
-  publishNotificationEvents(actor, appointment, assignmentNotifications);
+  await publishNotificationEvents(actor, appointment, confirmationNotifications);
+  await publishNotificationEvents(actor, appointment, assignmentNotifications);
   return withAvailableActions(appointment);
 }
 
@@ -1820,7 +1858,7 @@ export const appointmentService = {
       publishAndInvalidate(actor, "business.appointment.assigned", updated),
       ...(shouldAutoConfirm ? [publishAndInvalidate(actor, "business.appointment.confirmed", updated)] : []),
     ]);
-    publishNotificationEvents(actor, updated, assignmentNotifications);
+    await publishNotificationEvents(actor, updated, assignmentNotifications);
     return withAvailableActions(updated);
   },
 
