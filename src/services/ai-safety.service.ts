@@ -5,6 +5,7 @@ export type AiSafetyInput = {
   decision: AiReplyDecision | undefined;
   businessReady: boolean;
   humanTakeover: boolean;
+  minConfidence?: number;
 };
 
 export type AiSafetyResult = {
@@ -33,11 +34,14 @@ export const aiSafetyService = {
     if (input.humanTakeover) {
       return { allowed: false, decision, blockedReason: "Conversation is already in human takeover.", status: "BLOCKED_POLICY" };
     }
-    if (decision.confidence < env.AI_MIN_CONFIDENCE) {
+    if (decision.confidence < (input.minConfidence ?? env.AI_MIN_CONFIDENCE)) {
       return { allowed: false, decision, blockedReason: "AI confidence is below the configured threshold.", status: "BLOCKED_LOW_CONFIDENCE" };
     }
     if (decision.requiresHumanReview || HIGH_RISK_INTENTS.has(decision.intent)) {
       return { allowed: false, decision, blockedReason: decision.reason || "AI requested human review.", status: "BLOCKED_POLICY" };
+    }
+    if (decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
+      return { allowed: true, decision, status: "SUCCESS" };
     }
     if (!decision.shouldReply || decision.suggestedAction !== "SEND_REPLY" || !decision.replyText) {
       return { allowed: false, decision, blockedReason: decision.reason || "AI decision did not approve sending a reply.", status: "BLOCKED_POLICY" };

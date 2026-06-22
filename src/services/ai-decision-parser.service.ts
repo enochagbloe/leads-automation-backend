@@ -14,6 +14,7 @@ export type AiReplyIntent =
 export type AiSuggestedAction =
   | "SEND_REPLY"
   | "REQUEST_HUMAN_REVIEW"
+  | "CREATE_BOOKING_REQUEST"
   | "DETECT_BOOKING_ONLY"
   | "NO_ACTION";
 
@@ -34,9 +35,14 @@ export type AiReplyDecision = {
   suggestedAction: AiSuggestedAction;
   appointmentIntent?: {
     serviceName?: string;
+    serviceId?: string;
     preferredDate?: string;
     preferredTime?: string;
+    timezone?: string;
+    customerName?: string;
+    customerPhone?: string;
     customerLocation?: string;
+    notes?: string;
     missingFields?: string[];
   };
 };
@@ -58,6 +64,7 @@ const INTENTS = new Set<AiReplyIntent>([
 const ACTIONS = new Set<AiSuggestedAction>([
   "SEND_REPLY",
   "REQUEST_HUMAN_REVIEW",
+  "CREATE_BOOKING_REQUEST",
   "DETECT_BOOKING_ONLY",
   "NO_ACTION",
 ]);

@@ -6,16 +6,19 @@ import {
   ConversationChannel,
   ConversationStatus,
   LeadActivityAction,
+  AppointmentLocationType,
+  AppointmentSource,
   MessageDeliveryStatus,
   MessageDirection,
   MessageSenderType,
   MessageType,
+  PlanCode,
   Prisma,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
-import { aiBusinessContextService, aiPromptContextFormatter } from "./ai-context-builder.service";
+import { AiBusinessContext, aiBusinessContextService, aiPromptContextFormatter } from "./ai-context-builder.service";
 import { fallbackHumanReviewDecision } from "./ai-decision-parser.service";
 import { aiProvider, AiGenerateReplyResult } from "./ai-provider.service";
 import { aiSafetyService, AiSafetyResult } from "./ai-safety.service";
@@ -24,6 +27,7 @@ import { cacheService } from "./cache.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
 import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.service";
+import { appointmentInternalService } from "./appointment.service";
 
 export type AiReplyActor = {
   userId: string;
@@ -50,6 +54,11 @@ type AiExecutionStatus =
   | "PARSE_ERROR"
   | "WHATSAPP_SEND_FAILED"
   | "AI_FALLBACK_EXHAUSTED"
+  | "SUCCESS_AUTO_REPLIED"
+  | "SUCCESS_BOOKING_REQUEST_CREATED"
+  | "BLOCKED_UNAVAILABLE_SLOT"
+  | "BLOCKED_MISSING_CONTEXT"
+  | "BLOCKED_UNSAFE"
   | "AI_BUSINESS_NOT_READY"
   | "SKIPPED";
 
@@ -76,9 +85,8 @@ async function invalidateConversationCaches(businessId: string, conversationId: 
   ]);
 }
 
-function businessReadyForAi(readiness: { isAiReady: boolean; warnings: string[] }) {
-  return readiness.isAiReady || !readiness.warnings.some((warning) =>
-    /no active services|availability not configured|no customer-facing policies/i.test(warning));
+function businessReadyForAi(readiness: { isAiReady: boolean; completionPercentage: number }) {
+  return readiness.isAiReady || readiness.completionPercentage > 0;
 }
 
 async function createHumanReviewNotifications(input: {
@@ -93,14 +101,11 @@ async function createHumanReviewNotifications(input: {
     where: {
       businessId: input.businessId,
       status: "ACTIVE",
-      OR: [
-        { role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER] } },
-        ...(input.assignedStaffId ? [{ id: input.assignedStaffId }] : []),
-      ],
+      role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER] },
     },
     select: { id: true },
   });
-  await notificationService.createNotificationsForRecipients({
+  return notificationService.createNotificationsForRecipients({
     businessId: input.businessId,
     businessAccountId: input.businessAccountId,
     recipientMembershipIds: recipients.map((recipient) => recipient.id),
@@ -122,6 +127,116 @@ async function createHumanReviewNotifications(input: {
   });
 }
 
+async function markConversationNeedsHumanReview(input: {
+  businessId: string;
+  businessAccountId: string | null;
+  conversationId: string;
+  leadId: string;
+  assignedStaffId: string | null;
+  accountUsageId?: string;
+  reason: string;
+}) {
+  const notifications = await createHumanReviewNotifications(input);
+  await Promise.all([
+    prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: {
+        needsHumanReview: true,
+        humanReviewReason: input.reason,
+        status: ConversationStatus.NEEDS_HUMAN_REVIEW,
+      },
+    }),
+    input.accountUsageId ? aiUsageService.trackBlocked({ accountUsageId: input.accountUsageId, humanReview: true }) : Promise.resolve(),
+    invalidateConversationCaches(input.businessId, input.conversationId, input.leadId),
+  ]);
+  realtimeService.publish({
+    type: "business.ai.reply.blocked",
+    businessId: input.businessId,
+    conversationId: input.conversationId,
+    leadId: input.leadId,
+    assignedStaffId: input.assignedStaffId,
+    payload: {
+      conversationId: input.conversationId,
+      reason: input.reason,
+      needsHumanReview: true,
+      notificationsCreated: notifications.length,
+    },
+  });
+  return notifications;
+}
+
+async function ownerActorForBusiness(input: { businessId: string; businessAccountId: string }): Promise<AiReplyActor> {
+  const owner = await prisma.businessMember.findFirst({
+    where: { businessId: input.businessId, role: BusinessRole.BUSINESS_OWNER, status: "ACTIVE" },
+    select: { id: true, userId: true, role: true },
+  });
+  if (!owner) throw new AppError(422, "Business owner membership is required for AI booking requests.", "AI_BOOKING_BUSINESS_NOT_READY");
+  return {
+    userId: owner.userId,
+    businessAccountId: input.businessAccountId,
+    businessId: input.businessId,
+    membershipId: owner.id,
+    role: owner.role,
+  };
+}
+
+function normalizeName(value?: string | null) {
+  return value?.trim().toLowerCase();
+}
+
+function validDate(value?: string) {
+  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+}
+
+function validTime(value?: string) {
+  return Boolean(value && /^([01]\d|2[0-3]):[0-5]\d$/.test(value));
+}
+
+async function createAiBookingRequest(input: {
+  context: AiBusinessContext;
+  businessAccountId: string;
+  conversationId: string;
+  leadId: string;
+  decision: NonNullable<AiSafetyResult["decision"]>;
+}) {
+  const intent = input.decision.appointmentIntent;
+  const missing = new Set(intent?.missingFields ?? []);
+  if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
+  if (!validDate(intent?.preferredDate)) missing.add("preferredDate");
+  if (!validTime(intent?.preferredTime)) missing.add("preferredTime");
+  if (missing.size) {
+    throw new AppError(422, "AI booking request is missing required details.", "AI_BOOKING_MISSING_FIELDS", { missingFields: [...missing] });
+  }
+
+  const service = input.context.services.find((item) => item.id === intent?.serviceId)
+    ?? input.context.services.find((item) => normalizeName(item.name) === normalizeName(intent?.serviceName));
+  if (!service) throw new AppError(404, "AI booking service was not found.", "AI_BOOKING_SERVICE_NOT_FOUND");
+  if (!service.isBookable) throw new AppError(422, "AI booking service is not bookable.", "AI_BOOKING_SERVICE_NOT_BOOKABLE");
+
+  const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
+  const locationNote = intent?.customerLocation ? ` Customer location mentioned: ${intent.customerLocation}.` : "";
+  const appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
+    leadId: input.leadId,
+    conversationId: input.conversationId,
+    serviceId: service.id,
+    assignedStaffId: null,
+    customerName: intent?.customerName ?? input.context.lead?.name ?? null,
+    customerPhone: intent?.customerPhone ?? input.context.lead?.phone ?? null,
+    customerEmail: input.context.lead?.email ?? null,
+    title: `${service.name} request`,
+    description: "Appointment request created from AI-detected booking intent.",
+    notes: `${intent?.notes ?? input.decision.reason}${locationNote}`,
+    date: intent!.preferredDate!,
+    time: intent!.preferredTime!,
+    timezone: intent?.timezone ?? input.context.business.timezone ?? "Africa/Accra",
+    durationMinutes: service.durationMinutes ?? undefined,
+    locationType: AppointmentLocationType.TO_BE_CONFIRMED,
+    location: null,
+    source: AppointmentSource.AI_CONVERSATION,
+  }, { ipAddress: undefined, userAgent: undefined });
+  return appointment;
+}
+
 async function logInteraction(input: {
   businessId: string;
   businessAccountId: string | null;
@@ -133,6 +248,13 @@ async function logInteraction(input: {
   status: AiExecutionStatus;
   errorCode?: string | null;
   blockedReason?: string | null;
+  plan?: PlanCode | null;
+  quotaStatus?: string | null;
+  replySent?: boolean;
+  whatsappSendFailed?: boolean;
+  bookingRequestCreated?: boolean;
+  appointmentId?: string | null;
+  humanReviewNotificationCreated?: boolean;
 }) {
   const decision = input.safety?.decision ?? input.providerResult?.parsedDecision ?? null;
   return prisma.aiInteractionLog.create({
@@ -156,6 +278,13 @@ async function logInteraction(input: {
       fallbackModelsTried: input.providerResult ? json(input.providerResult.fallbackModelsTried) : undefined,
       fallbackFailureReasons: input.providerResult ? json(input.providerResult.fallbackFailureReasons) : undefined,
       providerRequestCount: input.providerResult?.providerRequestCount ?? 0,
+      plan: input.plan ?? null,
+      quotaStatus: input.quotaStatus ?? null,
+      replySent: input.replySent ?? false,
+      whatsappSendFailed: input.whatsappSendFailed ?? false,
+      bookingRequestCreated: input.bookingRequestCreated ?? false,
+      appointmentId: input.appointmentId ?? null,
+      humanReviewNotificationCreated: input.humanReviewNotificationCreated ?? false,
       promptTokens: input.providerResult?.promptTokens,
       completionTokens: input.providerResult?.completionTokens,
       totalTokens: input.providerResult?.totalTokens,
@@ -201,7 +330,17 @@ export const aiReplyEngine = {
     const conversation = await prisma.conversation.findFirst({
       where: { id: input.conversationId, businessId: input.businessId, deletedAt: null },
       include: {
-        business: { select: { id: true, businessAccountId: true, deletedAt: true } },
+        business: {
+          select: {
+            id: true,
+            businessAccountId: true,
+            deletedAt: true,
+            aiRepliesEnabled: true,
+            aiAutoReplyEnabled: true,
+            aiHandoffOnLowConfidence: true,
+            aiMinConfidence: true,
+          },
+        },
         lead: { select: { id: true, phone: true } },
       },
     });
@@ -214,8 +353,17 @@ export const aiReplyEngine = {
     if (conversation.status === ConversationStatus.CLOSED) {
       throw new AppError(422, "AI cannot process a closed conversation.", "AI_CONVERSATION_CLOSED");
     }
+    if (conversation.status === ConversationStatus.NEEDS_HUMAN_REVIEW || conversation.humanTakeover) {
+      throw new AppError(422, "AI cannot process a conversation that needs human review.", "AI_CONVERSATION_NOT_ELIGIBLE");
+    }
     if (conversation.aiEnabled === false) {
       throw new AppError(403, "AI is disabled for this conversation.", "AI_DISABLED");
+    }
+    if (!conversation.business.aiRepliesEnabled) {
+      throw new AppError(403, "AI replies are disabled for this business.", "AI_DISABLED");
+    }
+    if (!conversation.business.aiAutoReplyEnabled) {
+      throw new AppError(403, "AI auto-reply is disabled for this business.", "AI_AUTO_REPLY_DISABLED");
     }
 
     const message = await latestCustomerMessage(input.businessId, conversation.id, input.messageId);
@@ -234,7 +382,37 @@ export const aiReplyEngine = {
       payload: { conversationId: conversation.id, messageId: message.id, triggeredBy: input.triggeredBy },
     });
 
-    const usage = await aiUsageService.assertCanUseAiReplies(conversation.business.businessAccountId);
+    let usage: Awaited<ReturnType<typeof aiUsageService.assertCanUseAiReplies>>;
+    try {
+      usage = await aiUsageService.assertCanUseAiReplies(conversation.business.businessAccountId);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "AI_QUOTA_EXCEEDED") {
+        const decision = fallbackHumanReviewDecision("AI reply limit reached for this month. Please reply manually or upgrade your plan.");
+        const notifications = await markConversationNeedsHumanReview({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          assignedStaffId: conversation.assignedStaffId,
+          reason: decision.reason,
+        });
+        await logInteraction({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          messageId: message.id,
+          safety: { allowed: false, decision, status: "BLOCKED_POLICY", blockedReason: decision.reason },
+          status: "BLOCKED_QUOTA",
+          errorCode: error.code,
+          blockedReason: decision.reason,
+          plan: (error.context?.currentPlan as PlanCode | undefined) ?? null,
+          quotaStatus: "EXCEEDED",
+          humanReviewNotificationCreated: notifications.length > 0,
+        });
+        return { status: "BLOCKED_QUOTA", blocked: true, decision };
+      }
+      throw error;
+    }
     const businessUsage = await prisma.businessUsageRecord.findFirst({
       where: { businessId: conversation.businessId },
       orderBy: { periodStart: "desc" },
@@ -267,19 +445,16 @@ export const aiReplyEngine = {
       await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens });
       if (providerResult.fallbackExhausted) {
         const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
-        await prisma.conversation.update({
-          where: { id: conversation.id },
-          data: { humanTakeover: true, status: ConversationStatus.HUMAN_HANDLING },
+        const notifications = await markConversationNeedsHumanReview({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          assignedStaffId: conversation.assignedStaffId,
+          accountUsageId: usage.usage.id,
+          reason: fallbackDecision.reason,
         });
         await Promise.all([
-          createHumanReviewNotifications({
-            businessId: conversation.businessId,
-            businessAccountId: conversation.business.businessAccountId,
-            conversationId: conversation.id,
-            leadId: conversation.leadId,
-            assignedStaffId: conversation.assignedStaffId,
-            reason: fallbackDecision.reason,
-          }),
           logInteraction({
             businessId: conversation.businessId,
             businessAccountId: conversation.business.businessAccountId,
@@ -290,8 +465,10 @@ export const aiReplyEngine = {
             status: "AI_FALLBACK_EXHAUSTED",
             errorCode: "AI_FALLBACK_EXHAUSTED",
             blockedReason: fallbackDecision.reason,
+            plan: usage.subscription.plan.code,
+            quotaStatus: "OK",
+            humanReviewNotificationCreated: notifications.length > 0,
           }),
-          invalidateConversationCaches(conversation.businessId, conversation.id, conversation.leadId),
         ]);
         realtimeService.publish({
           type: "business.ai.reply.failed",
@@ -316,21 +493,20 @@ export const aiReplyEngine = {
         decision: providerResult.parsedDecision,
         businessReady: businessReadyForAi(context.readiness),
         humanTakeover: conversation.humanTakeover,
+        minConfidence: conversation.business.aiMinConfidence ?? undefined,
       });
       if (!safety.allowed) {
-        await prisma.conversation.update({
-          where: { id: conversation.id },
-          data: { humanTakeover: true, status: ConversationStatus.HUMAN_HANDLING },
+        const reviewReason = safety.blockedReason ?? safety.decision.reason;
+        const notifications = await markConversationNeedsHumanReview({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          assignedStaffId: conversation.assignedStaffId,
+          accountUsageId: usage.usage.id,
+          reason: reviewReason,
         });
         await Promise.all([
-          createHumanReviewNotifications({
-            businessId: conversation.businessId,
-            businessAccountId: conversation.business.businessAccountId,
-            conversationId: conversation.id,
-            leadId: conversation.leadId,
-            assignedStaffId: conversation.assignedStaffId,
-            reason: safety.blockedReason ?? safety.decision.reason,
-          }),
           logInteraction({
             businessId: conversation.businessId,
             businessAccountId: conversation.business.businessAccountId,
@@ -339,31 +515,110 @@ export const aiReplyEngine = {
             providerResult,
             safety,
             status: safety.status,
+            blockedReason: reviewReason,
+            plan: usage.subscription.plan.code,
+            quotaStatus: "OK",
+            humanReviewNotificationCreated: notifications.length > 0,
           }),
-          invalidateConversationCaches(conversation.businessId, conversation.id, conversation.leadId),
         ]);
-        realtimeService.publish({
-          type: "business.ai.reply.blocked",
-          businessId: conversation.businessId,
-          conversationId: conversation.id,
-          leadId: conversation.leadId,
-          messageId: message.id,
-          assignedStaffId: conversation.assignedStaffId,
-          payload: {
-            conversationId: conversation.id,
-            messageId: message.id,
-            reason: safety.blockedReason,
-            intent: safety.decision.intent,
-            confidence: safety.decision.confidence,
-            fallbackUsed: providerResult.fallbackAttempted,
-            finalModelUsed: providerResult.finalModelUsed,
-            providerRequestCount: providerResult.providerRequestCount,
-          },
-        });
         return { status: safety.status, blocked: true, decision: safety.decision };
       }
 
-      const replyText = safety.decision.replyText!;
+      let bookingAppointment: Awaited<ReturnType<typeof appointmentInternalService.createAppointmentFromValidatedInput>> | null = null;
+      let bookingRequestCreated = false;
+      let bookingBlockedReason: string | null = null;
+      let replyText = safety.decision.replyText ?? "";
+      let successStatus: AiExecutionStatus = "SUCCESS_AUTO_REPLIED";
+      if (safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
+        try {
+          bookingAppointment = await createAiBookingRequest({
+            context,
+            businessAccountId: conversation.business.businessAccountId,
+            conversationId: conversation.id,
+            leadId: conversation.leadId,
+            decision: safety.decision,
+          });
+          bookingRequestCreated = true;
+          successStatus = "SUCCESS_BOOKING_REQUEST_CREATED";
+          replyText = "Thanks. I’ve sent your appointment request to the business team for confirmation. They’ll confirm the final appointment shortly.";
+          await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id });
+          realtimeService.publish({
+            type: "business.ai.booking_request.created",
+            businessId: conversation.businessId,
+            conversationId: conversation.id,
+            leadId: conversation.leadId,
+            assignedStaffId: conversation.assignedStaffId,
+            payload: {
+              conversationId: conversation.id,
+              appointmentId: bookingAppointment.id,
+              appointmentStatus: bookingAppointment.status,
+              sourceMessageId: message.id,
+            },
+          });
+        } catch (error) {
+          const code = error instanceof AppError ? error.code : "AI_BOOKING_REQUEST_FAILED";
+          bookingBlockedReason = code;
+          if (code === "AI_BOOKING_MISSING_FIELDS") {
+            replyText = safety.decision.replyText
+              ?? "I can help request that appointment. Please share the service, preferred date, and preferred time.";
+          } else if (safety.decision.replyText && ["APPOINTMENT_SLOT_UNAVAILABLE", "APPOINTMENT_OUTSIDE_BUSINESS_HOURS", "APPOINTMENT_OVERLAPS_BREAK_TIME"].includes(code)) {
+            replyText = safety.decision.replyText;
+            successStatus = "BLOCKED_UNAVAILABLE_SLOT";
+          } else {
+            const fallbackDecision = fallbackHumanReviewDecision(code);
+            const notifications = await markConversationNeedsHumanReview({
+              businessId: conversation.businessId,
+              businessAccountId: conversation.business.businessAccountId,
+              conversationId: conversation.id,
+              leadId: conversation.leadId,
+              assignedStaffId: conversation.assignedStaffId,
+              accountUsageId: usage.usage.id,
+              reason: code,
+            });
+            await logInteraction({
+              businessId: conversation.businessId,
+              businessAccountId: conversation.business.businessAccountId,
+              conversationId: conversation.id,
+              messageId: message.id,
+              providerResult,
+              safety: { allowed: false, decision: fallbackDecision, status: "BLOCKED_POLICY", blockedReason: code },
+              status: "BLOCKED_MISSING_CONTEXT",
+              errorCode: code,
+              blockedReason: code,
+              plan: usage.subscription.plan.code,
+              quotaStatus: "OK",
+              humanReviewNotificationCreated: notifications.length > 0,
+            });
+            return { status: "BLOCKED_MISSING_CONTEXT", blocked: true, decision: fallbackDecision };
+          }
+        }
+      }
+      if (!replyText.trim()) {
+        const fallbackDecision = fallbackHumanReviewDecision("AI did not provide a reply to send.");
+        const notifications = await markConversationNeedsHumanReview({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          assignedStaffId: conversation.assignedStaffId,
+          accountUsageId: usage.usage.id,
+          reason: fallbackDecision.reason,
+        });
+        await logInteraction({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          messageId: message.id,
+          providerResult,
+          safety: { allowed: false, decision: fallbackDecision, status: "BLOCKED_POLICY", blockedReason: fallbackDecision.reason },
+          status: "BLOCKED_POLICY",
+          blockedReason: fallbackDecision.reason,
+          plan: usage.subscription.plan.code,
+          quotaStatus: "OK",
+          humanReviewNotificationCreated: notifications.length > 0,
+        });
+        return { status: "BLOCKED_POLICY", blocked: true, decision: fallbackDecision };
+      }
       let deliveryStatus: MessageDeliveryStatus = conversation.channel === ConversationChannel.WHATSAPP ? MessageDeliveryStatus.PENDING : MessageDeliveryStatus.INTERNAL;
       let provider: string = providerResult.provider;
       let providerMessageId: string | null = null;
@@ -393,6 +648,9 @@ export const aiReplyEngine = {
               intent: safety.decision.intent,
               suggestedAction: safety.decision.suggestedAction,
               requiresHumanReview: safety.decision.requiresHumanReview,
+              bookingRequestCreated,
+              bookingBlockedReason,
+              appointmentId: bookingAppointment?.id ?? null,
             }),
           },
         });
@@ -417,6 +675,8 @@ export const aiReplyEngine = {
               direction: MessageDirection.OUTBOUND,
               intent: safety.decision.intent,
               confidence: safety.decision.confidence,
+              bookingRequestCreated,
+              appointmentId: bookingAppointment?.id ?? null,
             },
           },
         });
@@ -460,7 +720,7 @@ export const aiReplyEngine = {
         },
       });
 
-      const finalStatus: AiExecutionStatus = deliveryStatus === MessageDeliveryStatus.FAILED ? "WHATSAPP_SEND_FAILED" : "SUCCESS";
+      const finalStatus: AiExecutionStatus = deliveryStatus === MessageDeliveryStatus.FAILED ? "WHATSAPP_SEND_FAILED" : successStatus;
       await Promise.all([
         aiUsageService.trackReply({ accountUsageId: usage.usage.id, businessUsageId: businessUsage?.id }),
         logInteraction({
@@ -473,6 +733,13 @@ export const aiReplyEngine = {
           safety,
           status: finalStatus,
           errorCode: sendError,
+          blockedReason: bookingBlockedReason,
+          plan: usage.subscription.plan.code,
+          quotaStatus: "OK",
+          replySent: deliveryStatus !== MessageDeliveryStatus.FAILED,
+          whatsappSendFailed: deliveryStatus === MessageDeliveryStatus.FAILED,
+          bookingRequestCreated,
+          appointmentId: bookingAppointment?.id ?? null,
         }),
         invalidateConversationCaches(conversation.businessId, conversation.id, conversation.leadId),
       ]);
@@ -487,7 +754,7 @@ export const aiReplyEngine = {
         payload: { message: settledMessage },
       });
       realtimeService.publish({
-        type: finalStatus === "SUCCESS" ? "business.ai.reply.completed" : "business.ai.reply.failed",
+        type: finalStatus === "WHATSAPP_SEND_FAILED" ? "business.ai.reply.failed" : "business.ai.reply.completed",
         businessId: conversation.businessId,
         conversationId: conversation.id,
         leadId: conversation.leadId,
@@ -502,6 +769,9 @@ export const aiReplyEngine = {
           fallbackUsed: providerResult.fallbackAttempted,
           finalModelUsed: providerResult.finalModelUsed,
           providerRequestCount: providerResult.providerRequestCount,
+          status: finalStatus,
+          bookingRequestCreated,
+          appointmentId: bookingAppointment?.id ?? null,
         },
       });
       return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision };
@@ -517,6 +787,8 @@ export const aiReplyEngine = {
         status: errorCode === "AI_QUOTA_EXCEEDED" ? "BLOCKED_QUOTA" : "PROVIDER_ERROR",
         errorCode,
         blockedReason: errorCode,
+        plan: usage.subscription.plan.code,
+        quotaStatus: errorCode === "AI_QUOTA_EXCEEDED" ? "EXCEEDED" : "OK",
       }).catch((logError) => console.error("AI interaction failure could not be logged", logError));
       realtimeService.publish({
         type: "business.ai.reply.failed",

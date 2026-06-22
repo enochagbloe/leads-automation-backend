@@ -7,7 +7,7 @@ export const ACTIVE_SUBSCRIPTION_STATUSES = [SubscriptionStatus.TRIALING, Subscr
 
 export type FeatureKey = "allowAnalytics" | "allowRemoveBranding" | "allowPrioritySupport";
 export type EnforcedUsageKey = "businessesCount" | "staffCount" | "servicesCount" | "appointmentsUsed";
-export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "knowledgeItemsCount";
+export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "aiBlockedUsed" | "aiHumanReviewsUsed" | "aiBookingRequestsCreated" | "knowledgeItemsCount";
 export type BusinessUsageKey = "conversationsUsed" | "aiRepliesUsed" | "appointmentsUsed" | "leadsCreated";
 
 export const PLAN_LIMIT_KEYS = {
@@ -69,6 +69,9 @@ export function getAccountUsage(usage?: AccountUsageRecord) {
     aiRepliesUsed: usage?.aiRepliesUsed ?? 0,
     aiRequestsUsed: usage?.aiRequestsUsed ?? 0,
     aiTokensUsed: usage?.aiTokensUsed ?? 0,
+    aiBlockedUsed: usage?.aiBlockedUsed ?? 0,
+    aiHumanReviewsUsed: usage?.aiHumanReviewsUsed ?? 0,
+    aiBookingRequestsCreated: usage?.aiBookingRequestsCreated ?? 0,
     knowledgeItemsCount: usage?.knowledgeItemsCount ?? 0,
   };
 }

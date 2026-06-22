@@ -59,7 +59,7 @@ X-Business-Id: <activeBusinessId>
     Expected: fallback model is attempted.
 
 16. All configured models fail or return malformed output.
-    Expected: `AI_FALLBACK_EXHAUSTED`, no auto-reply, human review notification, and `business.ai.reply.failed`.
+    Expected: `AI_FALLBACK_EXHAUSTED`, no auto-reply, conversation becomes `NEEDS_HUMAN_REVIEW`, human review notification, and `business.ai.reply.failed`.
 
 17. Provider returns confidence below `AI_MIN_CONFIDENCE`.
     Expected: `BLOCKED_LOW_CONFIDENCE`, no auto-reply, human review notification.
@@ -140,30 +140,65 @@ X-Business-Id: <activeBusinessId>
 41. AI usage is tracked.
     Expected: account usage increments AI requests, AI replies when attempted, and tokens when provider returns token usage.
 
+## Basic AI Auto-Reply And Booking Requests
+
+42. Basic plan safe service inquiry.
+    Expected: AI sends a normal reply with status `SUCCESS_AUTO_REPLIED`.
+
+43. Basic plan booking request with service, date, and time.
+    Expected: appointment is created with `source = AI_CONVERSATION`, status `PENDING_BUSINESS_CONFIRMATION`, and `humanConfirmationRequired = true`.
+
+44. Basic AI booking request.
+    Expected: AI response tells the customer the request was sent for confirmation and never says the appointment is confirmed.
+
+45. Plus or Premium booking request through AI.
+    Expected: uses the same safe request path; no advanced AI staff routing or AI safe auto-confirm is enabled.
+
+46. Booking intent missing service/date/time.
+    Expected: no appointment is created; AI asks a clarifying question if safe.
+
+47. Unavailable appointment slot.
+    Expected: no appointment is created; AI asks for another time or the conversation moves to human review.
+
+48. Appointment quota exceeded during AI booking.
+    Expected: no appointment is created; AI interaction is logged and human review is requested if no safe customer reply is possible.
+
+49. AI reply quota exceeded before processing.
+    Expected: OpenRouter is not called, status `BLOCKED_QUOTA`, conversation becomes `NEEDS_HUMAN_REVIEW`, and owner/manager notification is created.
+
+50. Low confidence decision.
+    Expected: no reply, account usage increments blocked/human review counters, conversation becomes `NEEDS_HUMAN_REVIEW`.
+
+51. Customer asks for human help.
+    Expected: no reply, conversation becomes `NEEDS_HUMAN_REVIEW`, notification type `AI_HUMAN_REVIEW_REQUIRED`.
+
 ## Realtime And Notifications
 
-42. Start AI processing.
+52. Start AI processing.
     Expected: `business.ai.reply.started` emits.
 
-43. AI completes.
+53. AI completes.
     Expected: `business.ai.reply.completed` and `message.created` emit. If fallback was used, payload includes safe fallback metadata.
 
-44. AI blocks.
+54. AI creates booking request.
+    Expected: `business.ai.booking_request.created`, `business.appointment.created`, `message.created`, and `business.notification.created` emit.
+
+55. AI blocks.
     Expected: `business.ai.reply.blocked` and `business.notification.created` emit.
 
-45. AI provider fails after fallback attempts.
+56. AI provider fails after fallback attempts.
     Expected: `business.ai.reply.failed`; inbound message remains stored.
 
 ## WhatsApp Inbound Integration
 
-46. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
+57. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
     Expected: AI processing starts after storage.
 
-47. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
+58. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
     Expected: no AI reply is attempted.
 
-48. Existing WhatsApp inbound storage with AI provider error.
+59. Existing WhatsApp inbound storage with AI provider error.
     Expected: lead, conversation, and message are still created/updated.
 
-49. Search routes.
+60. Search routes.
     Expected: no AI mock/simulator endpoint exists.
