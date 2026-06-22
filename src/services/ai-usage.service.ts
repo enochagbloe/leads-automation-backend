@@ -64,4 +64,21 @@ export const aiUsageService = {
     }
     await Promise.all(updates);
   },
+
+  async trackBlocked(input: { accountUsageId: string; humanReview?: boolean }) {
+    return prisma.accountUsageRecord.update({
+      where: { id: input.accountUsageId },
+      data: {
+        aiBlockedUsed: { increment: 1 },
+        ...(input.humanReview ? { aiHumanReviewsUsed: { increment: 1 } } : {}),
+      },
+    });
+  },
+
+  async trackBookingRequest(input: { accountUsageId: string }) {
+    return prisma.accountUsageRecord.update({
+      where: { id: input.accountUsageId },
+      data: { aiBookingRequestsCreated: { increment: 1 } },
+    });
+  },
 };

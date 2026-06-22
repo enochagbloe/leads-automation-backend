@@ -51,7 +51,8 @@ export type RealtimeEventType =
   | "business.ai.reply.started"
   | "business.ai.reply.completed"
   | "business.ai.reply.blocked"
-  | "business.ai.reply.failed";
+  | "business.ai.reply.failed"
+  | "business.ai.booking_request.created";
 
 export type RealtimeEvent = {
   id: string;

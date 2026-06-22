@@ -467,6 +467,14 @@ function confirmationForCreation(
   availability: { available: boolean; reason: string | null },
 ) {
   const businessConfirmationSource = source !== AppointmentSource.MANUAL;
+  if (planCode === PlanCode.BASIC && source === AppointmentSource.AI_CONVERSATION) {
+    return {
+      status: AppointmentStatus.PENDING_BUSINESS_CONFIRMATION,
+      locationStatus: location.locationStatus,
+      humanConfirmationRequired: true,
+      humanConfirmationReason: AppointmentHumanConfirmationReason.BUSINESS_CONFIRMATION_REQUIRED,
+    };
+  }
   if (
     planCode === PlanCode.BASIC
     && appointmentConfirmationMode === AppointmentConfirmationMode.MANUAL_CONFIRMATION_REQUIRED
