@@ -978,6 +978,12 @@ model AiInteractionLog {
   aiMessageId         String?
   provider            String
   model               String
+  primaryModel        String?
+  finalModelUsed      String?
+  fallbackAttempted   Boolean  @default(false)
+  fallbackModelsTried Json?
+  fallbackFailureReasons Json?
+  providerRequestCount Int     @default(1)
   intent              String?
   confidence          Float?
   suggestedAction     String?

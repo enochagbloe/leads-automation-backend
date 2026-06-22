@@ -36,7 +36,10 @@ const schema = z.object({
   OPENROUTER_API_KEY: optionalString,
   OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
   OPENROUTER_DEFAULT_MODEL: optionalString,
+  OPENROUTER_FALLBACK_MODELS: z.string().default("").transform((value) =>
+    value.split(",").map((model) => model.trim()).filter(Boolean)),
   OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  OPENROUTER_MAX_FALLBACK_ATTEMPTS: z.coerce.number().int().min(0).max(10).default(2),
   OPENROUTER_APP_NAME: z.string().min(1).default("BizReply AI"),
   OPENROUTER_APP_URL: optionalString,
   AI_REPLY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),

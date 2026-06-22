@@ -49,6 +49,7 @@ type AiExecutionStatus =
   | "PROVIDER_ERROR"
   | "PARSE_ERROR"
   | "WHATSAPP_SEND_FAILED"
+  | "AI_FALLBACK_EXHAUSTED"
   | "AI_BUSINESS_NOT_READY"
   | "SKIPPED";
 
@@ -148,6 +149,12 @@ async function logInteraction(input: {
       shouldReply: decision?.shouldReply ?? false,
       requiresHumanReview: decision?.requiresHumanReview ?? false,
       blockedReason: input.blockedReason ?? input.safety?.blockedReason ?? null,
+      primaryModel: input.providerResult?.primaryModel ?? env.OPENROUTER_DEFAULT_MODEL ?? null,
+      finalModelUsed: input.providerResult?.finalModelUsed ?? input.providerResult?.model ?? null,
+      fallbackAttempted: input.providerResult?.fallbackAttempted ?? false,
+      fallbackModelsTried: input.providerResult ? json(input.providerResult.fallbackModelsTried) : undefined,
+      fallbackFailureReasons: input.providerResult ? json(input.providerResult.fallbackFailureReasons) : undefined,
+      providerRequestCount: input.providerResult?.providerRequestCount ?? 0,
       promptTokens: input.providerResult?.promptTokens,
       completionTokens: input.providerResult?.completionTokens,
       totalTokens: input.providerResult?.totalTokens,
@@ -254,6 +261,53 @@ export const aiReplyEngine = {
       };
       providerResult = await aiProvider.generateReply(providerInput);
       await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens });
+      if (providerResult.fallbackExhausted) {
+        const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: { humanTakeover: true, status: ConversationStatus.HUMAN_HANDLING },
+        });
+        await Promise.all([
+          createHumanReviewNotifications({
+            businessId: conversation.businessId,
+            businessAccountId: conversation.business.businessAccountId,
+            conversationId: conversation.id,
+            leadId: conversation.leadId,
+            assignedStaffId: conversation.assignedStaffId,
+            reason: fallbackDecision.reason,
+          }),
+          logInteraction({
+            businessId: conversation.businessId,
+            businessAccountId: conversation.business.businessAccountId,
+            conversationId: conversation.id,
+            messageId: message.id,
+            providerResult,
+            safety: { allowed: false, decision: fallbackDecision, status: "BLOCKED_POLICY", blockedReason: fallbackDecision.reason },
+            status: "AI_FALLBACK_EXHAUSTED",
+            errorCode: "AI_FALLBACK_EXHAUSTED",
+            blockedReason: fallbackDecision.reason,
+          }),
+          invalidateConversationCaches(conversation.businessId, conversation.id, conversation.leadId),
+        ]);
+        realtimeService.publish({
+          type: "business.ai.reply.failed",
+          businessId: conversation.businessId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          messageId: message.id,
+          assignedStaffId: conversation.assignedStaffId,
+          payload: {
+            conversationId: conversation.id,
+            messageId: message.id,
+            errorCode: "AI_FALLBACK_EXHAUSTED",
+            fallbackUsed: providerResult.fallbackAttempted,
+            fallbackExhausted: true,
+            finalModelUsed: providerResult.finalModelUsed,
+            providerRequestCount: providerResult.providerRequestCount,
+          },
+        });
+        return { status: "AI_FALLBACK_EXHAUSTED", blocked: true, decision: fallbackDecision };
+      }
       const safety = aiSafetyService.evaluate({
         decision: providerResult.parsedDecision,
         businessReady: businessReadyForAi(context.businessKnowledge.gaps),
@@ -297,6 +351,9 @@ export const aiReplyEngine = {
             reason: safety.blockedReason,
             intent: safety.decision.intent,
             confidence: safety.decision.confidence,
+            fallbackUsed: providerResult.fallbackAttempted,
+            finalModelUsed: providerResult.finalModelUsed,
+            providerRequestCount: providerResult.providerRequestCount,
           },
         });
         return { status: safety.status, blocked: true, decision: safety.decision };
@@ -323,6 +380,11 @@ export const aiReplyEngine = {
             metadata: json({
               provider: providerResult?.provider,
               model: providerResult?.model,
+              primaryModel: providerResult?.primaryModel,
+              finalModelUsed: providerResult?.finalModelUsed,
+              fallbackAttempted: providerResult?.fallbackAttempted,
+              fallbackModelsTried: providerResult?.fallbackModelsTried,
+              providerRequestCount: providerResult?.providerRequestCount,
               confidence: safety.decision.confidence,
               intent: safety.decision.intent,
               suggestedAction: safety.decision.suggestedAction,
@@ -433,6 +495,9 @@ export const aiReplyEngine = {
           aiMessageId: settledMessage.id,
           deliveryStatus,
           errorCode: sendError,
+          fallbackUsed: providerResult.fallbackAttempted,
+          finalModelUsed: providerResult.finalModelUsed,
+          providerRequestCount: providerResult.providerRequestCount,
         },
       });
       return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision };

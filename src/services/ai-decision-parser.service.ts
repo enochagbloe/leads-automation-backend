@@ -62,6 +62,8 @@ const ACTIONS = new Set<AiSuggestedAction>([
   "NO_ACTION",
 ]);
 
+export const AI_DECISION_PARSE_FAILURE_REASON = "AI response could not be parsed as structured JSON.";
+
 export function fallbackHumanReviewDecision(reason: string): AiReplyDecision {
   return {
     intent: "UNKNOWN",
@@ -130,6 +132,6 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
       ...(appointmentIntent ? { appointmentIntent } : {}),
     };
   } catch {
-    return fallbackHumanReviewDecision("AI response could not be parsed as structured JSON.");
+    return fallbackHumanReviewDecision(AI_DECISION_PARSE_FAILURE_REASON);
   }
 }

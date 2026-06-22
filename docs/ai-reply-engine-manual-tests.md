@@ -18,93 +18,105 @@ X-Business-Id: <activeBusinessId>
 3. Start backend with `AI_REPLY_ENABLED=true`, `OPENROUTER_API_KEY`, and `OPENROUTER_DEFAULT_MODEL`.
    Expected: backend starts and AI trigger can call the provider abstraction.
 
+4. Configure `OPENROUTER_FALLBACK_MODELS` with two comma-separated models and `OPENROUTER_MAX_FALLBACK_ATTEMPTS=2`.
+   Expected: provider attempts the primary model first and can attempt up to two fallback models.
+
 ## Manual Trigger
 
-4. Owner calls `POST /api/business/conversations/:conversationId/ai/process-latest`.
+5. Owner calls `POST /api/business/conversations/:conversationId/ai/process-latest`.
    Expected: latest inbound customer message is processed.
 
-5. Manager calls the same endpoint.
+6. Manager calls the same endpoint.
    Expected: latest inbound customer message is processed.
 
-6. Staff calls the same endpoint.
+7. Staff calls the same endpoint.
    Expected: `FORBIDDEN`.
 
-7. Trigger AI for another business's conversation.
+8. Trigger AI for another business's conversation.
    Expected: `AI_CONVERSATION_NOT_FOUND` or `BUSINESS_ACCESS_DENIED`.
 
-8. Trigger AI on a closed conversation.
+9. Trigger AI on a closed conversation.
    Expected: processing is rejected.
 
-9. Trigger AI on a conversation with `aiEnabled=false`.
+10. Trigger AI on a conversation with `aiEnabled=false`.
    Expected: `AI_DISABLED`.
 
-10. Trigger AI where latest message is not from a customer.
+11. Trigger AI where latest message is not from a customer.
     Expected: `AI_MESSAGE_NOT_FOUND`.
 
 ## Decision Safety
 
-11. Provider returns valid structured decision with safe reply and high confidence.
+12. Provider returns valid structured decision with safe reply and high confidence.
     Expected: AI outbound message is stored.
 
-12. Provider returns invalid JSON.
-    Expected: interaction log records parse-safe failure and no auto-reply is sent.
+13. Primary provider model returns invalid JSON while fallback model returns valid JSON.
+    Expected: fallback model is used and AI processing continues.
 
-13. Provider returns confidence below `AI_MIN_CONFIDENCE`.
+14. Primary provider model times out.
+    Expected: fallback model is attempted.
+
+15. Primary provider model is rate limited or unavailable.
+    Expected: fallback model is attempted.
+
+16. All configured models fail or return malformed output.
+    Expected: `AI_FALLBACK_EXHAUSTED`, no auto-reply, human review notification, and `business.ai.reply.failed`.
+
+17. Provider returns confidence below `AI_MIN_CONFIDENCE`.
     Expected: `BLOCKED_LOW_CONFIDENCE`, no auto-reply, human review notification.
 
-14. Customer asks for a human.
+18. Customer asks for a human.
     Expected: no auto-reply, human review notification.
 
-15. Customer complains or asks about payment dispute.
+19. Customer complains or asks about payment dispute.
     Expected: no auto-reply, human review notification.
 
-16. AI reply attempts to confirm an appointment.
+20. AI reply attempts to confirm an appointment.
     Expected: blocked by safety service.
 
 ## Persistence
 
-17. Safe AI reply creates a message with `senderType: AI`.
+21. Safe AI reply creates a message with `senderType: AI`.
     Expected: `direction = OUTBOUND`, `messageType = TEXT`.
 
-18. WhatsApp conversation with connected provider.
+22. WhatsApp conversation with connected provider.
     Expected: AI message is sent through WhatsApp provider and status becomes `SENT` or `FAILED`.
 
-19. WhatsApp conversation without connected provider.
+23. WhatsApp conversation without connected provider.
     Expected: AI message is stored with `FAILED`; pipeline does not crash.
 
-20. Manual conversation.
+24. Manual conversation.
     Expected: AI message is stored internally and no WhatsApp call is made.
 
-21. AI interaction log is created.
-    Expected: provider, model, intent, confidence, status, token fields, and latency are recorded without raw prompts.
+25. AI interaction log is created.
+    Expected: provider, model, fallback metadata, intent, confidence, status, token fields, and latency are recorded without raw prompts.
 
-22. AI usage is tracked.
+26. AI usage is tracked.
     Expected: account usage increments AI requests, AI replies when attempted, and tokens when provider returns token usage.
 
 ## Realtime And Notifications
 
-23. Start AI processing.
+27. Start AI processing.
     Expected: `business.ai.reply.started` emits.
 
-24. AI completes.
-    Expected: `business.ai.reply.completed` and `message.created` emit.
+28. AI completes.
+    Expected: `business.ai.reply.completed` and `message.created` emit. If fallback was used, payload includes safe fallback metadata.
 
-25. AI blocks.
+29. AI blocks.
     Expected: `business.ai.reply.blocked` and `business.notification.created` emit.
 
-26. AI provider fails or times out.
+30. AI provider fails after fallback attempts.
     Expected: `business.ai.reply.failed`; inbound message remains stored.
 
 ## WhatsApp Inbound Integration
 
-27. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
+31. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
     Expected: AI processing starts after storage.
 
-28. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
+32. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
     Expected: no AI reply is attempted.
 
-29. Existing WhatsApp inbound storage with AI provider error.
+33. Existing WhatsApp inbound storage with AI provider error.
     Expected: lead, conversation, and message are still created/updated.
 
-30. Search routes.
+34. Search routes.
     Expected: no AI mock/simulator endpoint exists.

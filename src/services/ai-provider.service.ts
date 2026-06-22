@@ -1,7 +1,7 @@
 import { PlanCode } from "@prisma/client";
 import { env } from "../config/env";
 import { AppError } from "../utils/errors";
-import { AiReplyDecision, parseAiDecision } from "./ai-decision-parser.service";
+import { AI_DECISION_PARSE_FAILURE_REASON, AiReplyDecision, fallbackHumanReviewDecision, parseAiDecision } from "./ai-decision-parser.service";
 
 export type AiGenerateReplyInput = {
   businessId: string;
@@ -24,6 +24,13 @@ export type AiGenerateReplyResult = {
   parsedDecision?: AiReplyDecision;
   provider: "OPENROUTER";
   model: string;
+  primaryModel: string;
+  finalModelUsed: string;
+  fallbackAttempted: boolean;
+  fallbackModelsTried: string[];
+  fallbackFailureReasons: Array<{ model: string; reason: string }>;
+  providerRequestCount: number;
+  fallbackExhausted?: boolean;
   promptTokens?: number;
   completionTokens?: number;
   totalTokens?: number;
@@ -47,14 +54,44 @@ type OpenRouterResponse = {
   error?: { message?: string; code?: string };
 };
 
+function uniqueModels(primary: string, fallbacks: string[]) {
+  return Array.from(new Set([primary, ...fallbacks].map((model) => model.trim()).filter(Boolean)));
+}
+
+function attemptModels(primary: string) {
+  const fallbackLimit = env.OPENROUTER_MAX_FALLBACK_ATTEMPTS;
+  const fallbacks = env.OPENROUTER_FALLBACK_MODELS.slice(0, fallbackLimit);
+  return uniqueModels(primary, fallbacks);
+}
+
+function providerErrorCode(status: number) {
+  if (status === 408 || status === 504) return "AI_PROVIDER_TIMEOUT";
+  if (status === 429) return "AI_PROVIDER_RATE_LIMITED";
+  if (status === 404) return "AI_MODEL_UNAVAILABLE";
+  if (status >= 500) return "AI_PROVIDER_UNAVAILABLE";
+  return "AI_PROVIDER_ERROR";
+}
+
+function decisionValid(decision: AiReplyDecision | undefined) {
+  if (!decision) return false;
+  if (decision.requiresHumanReview || decision.suggestedAction === "REQUEST_HUMAN_REVIEW") return true;
+  if (decision.shouldReply && decision.suggestedAction === "SEND_REPLY") return Boolean(decision.replyText?.trim());
+  return decision.suggestedAction === "NO_ACTION" || decision.suggestedAction === "DETECT_BOOKING_ONLY";
+}
+
 export class OpenRouterProvider implements AiProvider {
   async generateReply(input: AiGenerateReplyInput): Promise<AiGenerateReplyResult> {
     if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
-    const model = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
-    if (!model) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
+    const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
+    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
 
     const startedAt = Date.now();
-    try {
+    const models = attemptModels(primaryModel);
+    const fallbackFailureReasons: Array<{ model: string; reason: string }> = [];
+
+    for (const model of models) {
+      const attemptStartedAt = Date.now();
+      try {
       const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -84,31 +121,62 @@ export class OpenRouterProvider implements AiProvider {
       const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
       const rawText = raw?.choices?.[0]?.message?.content;
       if (!response.ok || !rawText) {
-        throw new AppError(
-          response.status === 408 ? 504 : 502,
-          "AI provider request failed.",
-          response.status === 408 ? "AI_PROVIDER_TIMEOUT" : "AI_PROVIDER_ERROR",
-          { providerStatus: response.status, providerError: raw?.error?.message },
-        );
+        fallbackFailureReasons.push({ model, reason: providerErrorCode(response.status) });
+        continue;
+      }
+      const parsedDecision = parseAiDecision(rawText);
+      if (parsedDecision.reason === AI_DECISION_PARSE_FAILURE_REASON) {
+        fallbackFailureReasons.push({ model, reason: "AI_RESPONSE_PARSE_ERROR" });
+        continue;
+      }
+      if (!decisionValid(parsedDecision)) {
+        fallbackFailureReasons.push({ model, reason: "AI_RESPONSE_PARSE_ERROR" });
+        continue;
       }
       return {
         rawText,
-        parsedDecision: parseAiDecision(rawText),
+        parsedDecision,
         provider: "OPENROUTER",
         model: raw?.model ?? model,
+        primaryModel,
+        finalModelUsed: raw?.model ?? model,
+        fallbackAttempted: fallbackFailureReasons.length > 0,
+        fallbackModelsTried: [...fallbackFailureReasons.map((failure) => failure.model), model],
+        fallbackFailureReasons,
+        providerRequestCount: fallbackFailureReasons.length + 1,
         promptTokens: raw?.usage?.prompt_tokens,
         completionTokens: raw?.usage?.completion_tokens,
         totalTokens: raw?.usage?.total_tokens,
-        latencyMs: Date.now() - startedAt,
+        latencyMs: Date.now() - attemptStartedAt,
         requestId: raw?.id,
       };
-    } catch (error) {
-      if (error instanceof AppError) throw error;
+      } catch (error) {
       if (error instanceof DOMException && error.name === "TimeoutError") {
-        throw new AppError(504, "AI provider request timed out.", "AI_PROVIDER_TIMEOUT");
+          fallbackFailureReasons.push({ model, reason: "AI_PROVIDER_TIMEOUT" });
+          continue;
+        }
+        if (error instanceof AppError) {
+          fallbackFailureReasons.push({ model, reason: error.code });
+          continue;
+        }
+        fallbackFailureReasons.push({ model, reason: "AI_PROVIDER_ERROR" });
       }
-      throw new AppError(502, "AI provider request failed.", "AI_PROVIDER_ERROR");
     }
+
+    return {
+      rawText: "",
+      parsedDecision: fallbackHumanReviewDecision("AI provider failed after fallback attempts."),
+      provider: "OPENROUTER",
+      model: primaryModel,
+      primaryModel,
+      finalModelUsed: primaryModel,
+      fallbackAttempted: fallbackFailureReasons.length > 0,
+      fallbackModelsTried: fallbackFailureReasons.map((failure) => failure.model),
+      fallbackFailureReasons,
+      providerRequestCount: fallbackFailureReasons.length,
+      fallbackExhausted: true,
+      latencyMs: Date.now() - startedAt,
+    };
   }
 }
 

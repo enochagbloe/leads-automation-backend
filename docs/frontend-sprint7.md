@@ -13,11 +13,13 @@ The backend requires OpenRouter configuration when AI replies are enabled:
 ```env
 OPENROUTER_API_KEY=
 OPENROUTER_DEFAULT_MODEL=
+OPENROUTER_FALLBACK_MODELS=
+OPENROUTER_MAX_FALLBACK_ATTEMPTS=2
 AI_REPLY_ENABLED=true
 AI_MIN_CONFIDENCE=0.75
 ```
 
-Do not expose `OPENROUTER_API_KEY` or model provider details in the frontend.
+Do not expose `OPENROUTER_API_KEY` or raw provider request details in the frontend.
 
 ## Manual AI Trigger
 
@@ -118,6 +120,27 @@ business.notification.created
 
 Use these events to refetch the active conversation and notification counts. Do not rely on realtime payloads as the only source of truth.
 
+When fallback is used, AI realtime payloads may include:
+
+```json
+{
+  "fallbackUsed": true,
+  "finalModelUsed": "anthropic/claude-3.5-haiku",
+  "providerRequestCount": 2
+}
+```
+
+If all configured models fail, the backend emits `business.ai.reply.failed` with:
+
+```json
+{
+  "errorCode": "AI_FALLBACK_EXHAUSTED",
+  "fallbackExhausted": true
+}
+```
+
+The original customer message remains stored.
+
 ## Error Codes
 
 Handle:
@@ -125,7 +148,11 @@ Handle:
 ```text
 AI_PROVIDER_ERROR
 AI_PROVIDER_TIMEOUT
+AI_PROVIDER_RATE_LIMITED
+AI_PROVIDER_UNAVAILABLE
+AI_MODEL_UNAVAILABLE
 AI_RESPONSE_PARSE_ERROR
+AI_FALLBACK_EXHAUSTED
 AI_LOW_CONFIDENCE
 AI_HUMAN_REVIEW_REQUIRED
 AI_DISABLED
