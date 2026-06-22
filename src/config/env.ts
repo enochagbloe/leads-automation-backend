@@ -33,6 +33,16 @@ const schema = z.object({
   WHATSAPP_CREDENTIAL_KEY_ID: credentialKeyId,
   WHATSAPP_CREDENTIAL_ENCRYPTION_KEY: optionalString,
   WHATSAPP_CREDENTIAL_DECRYPTION_KEYS: optionalString,
+  OPENROUTER_API_KEY: optionalString,
+  OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
+  OPENROUTER_DEFAULT_MODEL: optionalString,
+  OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  OPENROUTER_APP_NAME: z.string().min(1).default("BizReply AI"),
+  OPENROUTER_APP_URL: optionalString,
+  AI_REPLY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
+  AI_MAX_CONTEXT_MESSAGES: z.coerce.number().int().positive().max(50).default(12),
+  AI_MAX_BUSINESS_CONTEXT_TOKENS: z.coerce.number().int().positive().default(6000),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === "production" && !value.RESEND_API_KEY) {
     context.addIssue({
@@ -71,6 +81,20 @@ const schema = z.object({
         message: "WHATSAPP_CREDENTIAL_DECRYPTION_KEYS must be a JSON object of key IDs to keys of at least 32 characters",
       });
     }
+  }
+  if (value.AI_REPLY_ENABLED && !value.OPENROUTER_API_KEY) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["OPENROUTER_API_KEY"],
+      message: "OPENROUTER_API_KEY is required when AI_REPLY_ENABLED=true",
+    });
+  }
+  if (value.AI_REPLY_ENABLED && !value.OPENROUTER_DEFAULT_MODEL) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["OPENROUTER_DEFAULT_MODEL"],
+      message: "OPENROUTER_DEFAULT_MODEL is required when AI_REPLY_ENABLED=true",
+    });
   }
 });
 

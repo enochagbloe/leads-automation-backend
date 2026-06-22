@@ -47,7 +47,11 @@ export type RealtimeEventType =
   | "business.appointment.reschedule_limit_reached"
   | "business.appointment.assigned"
   | "business.appointments.calendar.updated"
-  | "business.notification.created";
+  | "business.notification.created"
+  | "business.ai.reply.started"
+  | "business.ai.reply.completed"
+  | "business.ai.reply.blocked"
+  | "business.ai.reply.failed";
 
 export type RealtimeEvent = {
   id: string;

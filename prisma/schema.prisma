@@ -513,6 +513,7 @@ model BusinessAccount {
   usageRecords  AccountUsageRecord[]
   appointments  Appointment[]
   notifications BusinessNotification[]
+  aiInteractionLogs AiInteractionLog[]
 
   @@index([ownerId])
 }
@@ -553,6 +554,7 @@ model Business {
   messages              Message[]
   whatsAppIntegrations  WhatsAppIntegration[]
   webhookEventLogs      WebhookEventLog[]
+  aiInteractionLogs     AiInteractionLog[]
   services              Service[]
   availability          BusinessAvailability[]
   policies              BusinessPolicy[]
@@ -760,6 +762,8 @@ model AccountUsageRecord {
   businessesCount     Int      @default(1)
   conversationsUsed   Int      @default(0)
   aiRepliesUsed       Int      @default(0)
+  aiRequestsUsed      Int      @default(0)
+  aiTokensUsed        Int      @default(0)
   staffCount          Int      @default(1)
   servicesCount       Int      @default(0)
   appointmentsUsed    Int      @default(0)
@@ -916,6 +920,7 @@ model Conversation {
   assignedStaff BusinessMember? @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
   messages      Message[]
   appointments  Appointment[]
+  aiInteractionLogs AiInteractionLog[]
 
   @@index([businessId])
   @@index([businessId, leadId])
@@ -951,6 +956,8 @@ model Message {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
   senderUser   User?        @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+  sourceAiLogs AiInteractionLog[] @relation("AiInteractionSourceMessage")
+  replyAiLogs  AiInteractionLog[] @relation("AiInteractionReplyMessage")
 
   @@index([businessId])
   @@index([conversationId])
@@ -960,6 +967,43 @@ model Message {
   @@index([senderType])
   @@index([deliveryStatus])
   @@index([businessId, provider, providerMessageId])
+}
+
+model AiInteractionLog {
+  id                  String   @id @default(cuid())
+  businessId          String
+  businessAccountId   String?
+  conversationId      String
+  messageId           String
+  aiMessageId         String?
+  provider            String
+  model               String
+  intent              String?
+  confidence          Float?
+  suggestedAction     String?
+  shouldReply         Boolean  @default(false)
+  requiresHumanReview Boolean  @default(false)
+  blockedReason       String?
+  promptTokens        Int?
+  completionTokens    Int?
+  totalTokens         Int?
+  latencyMs           Int
+  status              String
+  errorCode           String?
+  createdAt           DateTime @default(now())
+
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  businessAccount BusinessAccount? @relation(fields: [businessAccountId], references: [id], onDelete: SetNull)
+  conversation    Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sourceMessage   Message          @relation("AiInteractionSourceMessage", fields: [messageId], references: [id], onDelete: Cascade)
+  aiMessage       Message?         @relation("AiInteractionReplyMessage", fields: [aiMessageId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt])
+  @@index([businessAccountId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([messageId])
+  @@index([aiMessageId])
+  @@index([status, createdAt])
 }
 
 model WhatsAppIntegration {

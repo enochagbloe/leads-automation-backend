@@ -25,6 +25,7 @@ import { cacheService } from "./cache.service";
 import { createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
 import { realtimeService } from "./realtime.service";
+import { aiReplyEngine } from "./ai-reply-engine.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
 const MOCK_VERIFY_TOKEN = "bizreplyai-mock-verify-token";
@@ -60,6 +61,7 @@ type PersistedInbound = {
     lastMessagePreview: string | null;
     lastMessageAt: Date | null;
     unreadCount: number;
+    aiEnabled: boolean;
   };
   message: { id: string; providerMessageId: string | null };
   leadCreated: boolean;
@@ -600,6 +602,14 @@ export const whatsappService = {
           assignedStaffId: result.conversation.assignedStaffId,
           payload: { conversationId: result.conversation.id, unreadCount: result.conversation.unreadCount },
         });
+        if (env.AI_REPLY_ENABLED && result.conversation.aiEnabled && result.conversation.status !== ConversationStatus.CLOSED) {
+          aiReplyEngine.processInboundMessageForAiSafely({
+            businessId: business.id,
+            conversationId: result.conversation.id,
+            messageId: result.message.id,
+            triggeredBy: "WHATSAPP_INBOUND",
+          });
+        }
       }
       return result;
     } catch (error) {

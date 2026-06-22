@@ -20,6 +20,7 @@ import { availabilityRouter } from "./routes/availability.routes";
 import { policyRouter } from "./routes/policy.routes";
 import { appointmentRouter } from "./routes/appointment.routes";
 import { notificationRouter } from "./routes/notification.routes";
+import { aiRouter } from "./routes/ai.routes";
 
 export const app = express();
 
@@ -49,6 +50,7 @@ app.get("/api", (_req, res) => res.json({
     businessPolicies: "/api/business/policies",
     businessAppointments: "/api/business/appointments",
     businessNotifications: "/api/business/notifications",
+    businessAi: "/api/business/conversations/:conversationId/ai/process-latest",
     leads: "/api/leads",
     conversations: "/api/conversations",
     realtime: "/api/realtime/events",
@@ -81,6 +83,7 @@ app.use("/api/business/availability", availabilityRouter);
 app.use("/api/business/policies", policyRouter);
 app.use("/api/business/appointments", appointmentRouter);
 app.use("/api/business/notifications", notificationRouter);
+app.use("/api/business", aiRouter);
 app.use("/api/leads", leadRouter);
 app.use("/api/conversations", conversationRouter);
 app.use("/api/realtime", realtimeRouter);
