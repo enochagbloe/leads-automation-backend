@@ -113,6 +113,21 @@ enum ConversationPriority {
   URGENT
 }
 
+enum HumanReviewType {
+  LOW_CONFIDENCE
+  CUSTOMER_REQUESTED_HUMAN
+  COMPLAINT
+  PAYMENT_OR_REFUND
+  POLICY_UNCERTAINTY
+  BOOKING_UNCLEAR
+  MISSING_BUSINESS_CONTEXT
+  MEDIA_OR_IMAGE_UNSUPPORTED
+  AI_PROVIDER_FAILED
+  QUOTA_EXCEEDED
+  SAFETY_BLOCKED
+  OTHER
+}
+
 enum MessageSenderType {
   CUSTOMER
   STAFF
@@ -455,6 +470,10 @@ enum AuditAction {
   NOTIFICATION_READ
   NOTIFICATION_DISMISSED
   NOTIFICATION_ACTIONED
+  AI_HUMAN_REVIEW_REQUESTED
+  CONVERSATION_HUMAN_TAKEOVER_STARTED
+  CONVERSATION_AI_RESUMED
+  CONVERSATION_HUMAN_REVIEW_RESOLVED
 }
 
 enum DayOfWeek {
@@ -928,6 +947,11 @@ model Conversation {
   humanTakeover      Boolean              @default(false)
   needsHumanReview   Boolean              @default(false)
   humanReviewReason  String?
+  humanReviewType    HumanReviewType?
+  humanReviewCreatedAt DateTime?
+  humanReviewResolvedAt DateTime?
+  humanReviewResolvedByMembershipId String?
+  lastAiBlockedReason String?
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   closedAt           DateTime?
@@ -949,6 +973,8 @@ model Conversation {
   @@index([businessId, channel])
   @@index([businessId, lastMessageAt])
   @@index([businessId, deletedAt])
+  @@index([businessId, needsHumanReview])
+  @@index([humanReviewResolvedByMembershipId])
 }
 
 model Message {

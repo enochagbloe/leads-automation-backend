@@ -172,33 +172,95 @@ X-Business-Id: <activeBusinessId>
 51. Customer asks for human help.
     Expected: no reply, conversation becomes `NEEDS_HUMAN_REVIEW`, notification type `AI_HUMAN_REVIEW_REQUIRED`.
 
+## Human Review And Handoff
+
+52. AI requests human review.
+    Expected: `needsHumanReview = true`, `status = NEEDS_HUMAN_REVIEW`, `aiEnabled = false`, `humanTakeover = false`.
+
+53. Human review stores metadata.
+    Expected: `humanReviewType`, `humanReviewReason`, `humanReviewCreatedAt`, and `lastAiBlockedReason` are set.
+
+54. Human review creates system message.
+    Expected: timeline contains “AI paused for human review.”
+
+55. Duplicate human review request for same conversation.
+    Expected: unresolved notification is reused; users are not spammed with duplicates.
+
+56. Owner calls `PATCH /api/business/conversations/:conversationId/take-over`.
+    Expected: `status = HUMAN_HANDLING`, `humanTakeover = true`, `aiEnabled = false`, `needsHumanReview = false`.
+
+57. Manager calls take-over.
+    Expected: succeeds for a business conversation.
+
+58. Assigned staff calls take-over.
+    Expected: succeeds for their assigned conversation.
+
+59. Staff calls take-over on another member's conversation.
+    Expected: `CONVERSATION_ACCESS_DENIED`.
+
+60. Take-over on unassigned conversation by owner/manager.
+    Expected: conversation becomes assigned to the actor membership if it was unassigned.
+
+61. Take-over creates system message.
+    Expected: timeline contains “Human takeover started.”
+
+62. Take-over creates audit log.
+    Expected: `CONVERSATION_HUMAN_TAKEOVER_STARTED` with previous/new status metadata.
+
+63. Owner/manager calls `PATCH /api/business/conversations/:conversationId/resume-ai`.
+    Expected: `status = AI_HANDLING`, `aiEnabled = true`, `humanTakeover = false`, `needsHumanReview = false`.
+
+64. Resume AI creates system message.
+    Expected: timeline contains “AI replies resumed.”
+
+65. Resume AI creates audit log.
+    Expected: `CONVERSATION_AI_RESUMED`.
+
+66. Resume AI on a closed conversation.
+    Expected: rejected; closed conversations do not resume AI.
+
+67. Staff sends manual message without take-over.
+    Expected: message is stored but `humanTakeover` is not automatically set.
+
+68. Inbound customer message while `NEEDS_HUMAN_REVIEW`.
+    Expected: message stores normally but AI auto-processing does not continue.
+
+69. Inbound customer message while `HUMAN_HANDLING`.
+    Expected: message stores normally but AI auto-processing does not continue.
+
 ## Realtime And Notifications
 
-52. Start AI processing.
+70. Start AI processing.
     Expected: `business.ai.reply.started` emits.
 
-53. AI completes.
+71. AI completes.
     Expected: `business.ai.reply.completed` and `message.created` emit. If fallback was used, payload includes safe fallback metadata.
 
-54. AI creates booking request.
+72. AI creates booking request.
     Expected: `business.ai.booking_request.created`, `business.appointment.created`, `message.created`, and `business.notification.created` emit.
 
-55. AI blocks.
-    Expected: `business.ai.reply.blocked` and `business.notification.created` emit.
+73. AI blocks.
+    Expected: `business.ai.reply.blocked`, `business.ai.human_review.required`, and `business.notification.created` emit.
 
-56. AI provider fails after fallback attempts.
+74. Take-over emits realtime.
+    Expected: `business.conversation.human_takeover.started` and `business.conversation.updated`.
+
+75. Resume AI emits realtime.
+    Expected: `business.conversation.ai_resumed` and `business.conversation.updated`.
+
+76. AI provider fails after fallback attempts.
     Expected: `business.ai.reply.failed`; inbound message remains stored.
 
 ## WhatsApp Inbound Integration
 
-57. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
+77. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
     Expected: AI processing starts after storage.
 
-58. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
+78. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
     Expected: no AI reply is attempted.
 
-59. Existing WhatsApp inbound storage with AI provider error.
+79. Existing WhatsApp inbound storage with AI provider error.
     Expected: lead, conversation, and message are still created/updated.
 
-60. Search routes.
+80. Search routes.
     Expected: no AI mock/simulator endpoint exists.

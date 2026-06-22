@@ -37,6 +37,9 @@ export const createMessageSchema = z.object({
 });
 
 export const assignConversationSchema = z.object({ assignedStaffId: z.string().cuid().nullable() });
+export const conversationHandoffReasonSchema = z.object({
+  reason: z.string().trim().min(1).max(500).nullable().optional(),
+}).default({});
 export const updateConversationStatusSchema = z.object({ status: z.nativeEnum(ConversationStatus) });
 export const updateConversationWorkspaceSchema = z.object({
   subject: z.string().trim().min(1).max(240).nullable().optional(),

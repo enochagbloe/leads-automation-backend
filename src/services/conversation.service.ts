@@ -341,8 +341,30 @@ export const conversationService = {
         data: {
           status,
           closedAt: status === ConversationStatus.CLOSED ? new Date() : null,
-          ...(status === ConversationStatus.HUMAN_HANDLING ? { humanTakeover: true } : {}),
-          ...(status === ConversationStatus.AI_HANDLING ? { aiEnabled: true, humanTakeover: false } : {}),
+          ...(status === ConversationStatus.NEEDS_HUMAN_REVIEW ? {
+            aiEnabled: false,
+            humanTakeover: false,
+            needsHumanReview: true,
+            humanReviewReason: conversation.humanReviewReason ?? "Conversation manually moved to human review.",
+            humanReviewCreatedAt: conversation.needsHumanReview ? undefined : new Date(),
+            humanReviewResolvedAt: null,
+            humanReviewResolvedByMembershipId: null,
+          } : {}),
+          ...(status === ConversationStatus.HUMAN_HANDLING ? {
+            aiEnabled: false,
+            humanTakeover: true,
+            needsHumanReview: false,
+            humanReviewResolvedAt: new Date(),
+            humanReviewResolvedByMembershipId: actor.membershipId,
+          } : {}),
+          ...(status === ConversationStatus.AI_HANDLING ? {
+            aiEnabled: true,
+            humanTakeover: false,
+            needsHumanReview: false,
+            humanReviewResolvedAt: new Date(),
+            humanReviewResolvedByMembershipId: actor.membershipId,
+          } : {}),
+          ...(status === ConversationStatus.OPEN ? { humanTakeover: false } : {}),
         },
         include: conversationInclude,
       });
@@ -374,7 +396,7 @@ export const conversationService = {
       conversationId,
       leadId: conversation.leadId,
       assignedStaffId: updated.assignedStaffId,
-      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: updated.aiEnabled, humanTakeover: updated.humanTakeover } },
+      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: updated.aiEnabled, humanTakeover: updated.humanTakeover, needsHumanReview: updated.needsHumanReview } },
     });
     realtimeService.publish({
       type: "message.created",
