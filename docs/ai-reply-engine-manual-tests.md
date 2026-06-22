@@ -73,50 +73,97 @@ X-Business-Id: <activeBusinessId>
 20. AI reply attempts to confirm an appointment.
     Expected: blocked by safety service.
 
+## Business Knowledge Context
+
+21. Build AI context for a valid business conversation.
+    Expected: business profile contains only safe editable fields.
+
+22. Inspect AI formatted context.
+    Expected: no OpenRouter key, WhatsApp token, webhook secret, billing data, or provider credential appears.
+
+23. Business has active and archived services.
+    Expected: active services are included and archived services are excluded.
+
+24. Business has customer-facing and internal-only policies.
+    Expected: customer-facing policies are included and internal-only policies are excluded.
+
+25. Availability is configured.
+    Expected: weekly hours and summary text are included.
+
+26. Availability is missing.
+    Expected: readiness warning says availability is not configured.
+
+27. Lead exists for the conversation.
+    Expected: basic lead name, phone, email, source, status, and assigned member id are included; private notes are excluded.
+
+28. Conversation has more than `AI_MAX_CONTEXT_MESSAGES`.
+    Expected: only the latest allowed messages are included, oldest to newest.
+
+29. Conversation has deleted messages.
+    Expected: deleted messages are excluded.
+
+30. Message contains media without text.
+    Expected: context represents it safely as an attachment/media message the AI cannot inspect.
+
+31. Basic plan context.
+    Expected: `aiReplies=true`, `teamRouting=false`, `safeAutoConfirm=false`.
+
+32. Plus plan context.
+    Expected: `aiReplies=true`, `teamRouting=true`, `safeAutoConfirm=false`.
+
+33. Premium plan context.
+    Expected: `aiReplies=true`, `teamRouting=true`, `safeAutoConfirm=true`.
+
+34. Profile/services/availability/policies are updated.
+    Expected: AI business context cache is invalidated.
+
+35. Conversation message is created.
+    Expected: AI context cache for that conversation is invalidated.
+
 ## Persistence
 
-21. Safe AI reply creates a message with `senderType: AI`.
+36. Safe AI reply creates a message with `senderType: AI`.
     Expected: `direction = OUTBOUND`, `messageType = TEXT`.
 
-22. WhatsApp conversation with connected provider.
+37. WhatsApp conversation with connected provider.
     Expected: AI message is sent through WhatsApp provider and status becomes `SENT` or `FAILED`.
 
-23. WhatsApp conversation without connected provider.
+38. WhatsApp conversation without connected provider.
     Expected: AI message is stored with `FAILED`; pipeline does not crash.
 
-24. Manual conversation.
+39. Manual conversation.
     Expected: AI message is stored internally and no WhatsApp call is made.
 
-25. AI interaction log is created.
+40. AI interaction log is created.
     Expected: provider, model, fallback metadata, intent, confidence, status, token fields, and latency are recorded without raw prompts.
 
-26. AI usage is tracked.
+41. AI usage is tracked.
     Expected: account usage increments AI requests, AI replies when attempted, and tokens when provider returns token usage.
 
 ## Realtime And Notifications
 
-27. Start AI processing.
+42. Start AI processing.
     Expected: `business.ai.reply.started` emits.
 
-28. AI completes.
+43. AI completes.
     Expected: `business.ai.reply.completed` and `message.created` emit. If fallback was used, payload includes safe fallback metadata.
 
-29. AI blocks.
+44. AI blocks.
     Expected: `business.ai.reply.blocked` and `business.notification.created` emit.
 
-30. AI provider fails after fallback attempts.
+45. AI provider fails after fallback attempts.
     Expected: `business.ai.reply.failed`; inbound message remains stored.
 
 ## WhatsApp Inbound Integration
 
-31. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
+46. Store inbound WhatsApp message for conversation with `aiEnabled=true`.
     Expected: AI processing starts after storage.
 
-32. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
+47. Store inbound WhatsApp message for conversation with `aiEnabled=false`.
     Expected: no AI reply is attempted.
 
-33. Existing WhatsApp inbound storage with AI provider error.
+48. Existing WhatsApp inbound storage with AI provider error.
     Expected: lead, conversation, and message are still created/updated.
 
-34. Search routes.
+49. Search routes.
     Expected: no AI mock/simulator endpoint exists.

@@ -18,6 +18,7 @@ import { cacheService } from "./cache.service";
 import { ConversationActor, createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
 import { realtimeService } from "./realtime.service";
+import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 
 const conversationInclude = {
   lead: { select: { id: true, fullName: true, phone: true, email: true, status: true } },
@@ -67,6 +68,7 @@ export async function invalidateConversationCache(businessId: string, conversati
     cacheService.delByPattern(`business:${businessId}:conversations:stats:*`),
     cacheService.delByPattern(`business:${businessId}:conversations:unread:*`),
     ...(conversationId ? [cacheService.delByPattern(`business:${businessId}:conversations:detail:${conversationId}:*`)] : []),
+    invalidateAiBusinessContext(businessId, conversationId),
   ]);
 }
 

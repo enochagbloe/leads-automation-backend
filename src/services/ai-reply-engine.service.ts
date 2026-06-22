@@ -15,7 +15,7 @@ import {
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
-import { aiContextBuilder } from "./ai-context-builder.service";
+import { aiBusinessContextService, aiPromptContextFormatter } from "./ai-context-builder.service";
 import { fallbackHumanReviewDecision } from "./ai-decision-parser.service";
 import { aiProvider, AiGenerateReplyResult } from "./ai-provider.service";
 import { aiSafetyService, AiSafetyResult } from "./ai-safety.service";
@@ -76,8 +76,9 @@ async function invalidateConversationCaches(businessId: string, conversationId: 
   ]);
 }
 
-function businessReadyForAi(gaps: Array<{ section: string; severity: string }>) {
-  return !gaps.some((gap) => gap.severity === "HIGH" && gap.section !== "WHATSAPP");
+function businessReadyForAi(readiness: { isAiReady: boolean; warnings: string[] }) {
+  return readiness.isAiReady || !readiness.warnings.some((warning) =>
+    /no active services|availability not configured|no customer-facing policies/i.test(warning));
 }
 
 async function createHumanReviewNotifications(input: {
@@ -242,17 +243,20 @@ export const aiReplyEngine = {
 
     let providerResult: AiGenerateReplyResult | null = null;
     try {
-      const context = await aiContextBuilder.build({
+      const context = await aiBusinessContextService.buildBusinessContextForAi({
         businessId: conversation.businessId,
         conversationId: conversation.id,
-        leadId: conversation.leadId,
+        messageId: message.id,
+        plan: usage.subscription.plan.code,
+        maxMessages: env.AI_MAX_CONTEXT_MESSAGES,
+        maxContextTokens: env.AI_MAX_BUSINESS_CONTEXT_TOKENS,
       });
       const providerInput = {
         businessId: conversation.businessId,
         conversationId: conversation.id,
         messageId: message.id,
-        systemPrompt: aiContextBuilder.buildSystemPrompt(),
-        userPrompt: aiContextBuilder.buildUserPrompt(context),
+        systemPrompt: aiPromptContextFormatter.buildSystemPrompt(context),
+        userPrompt: aiPromptContextFormatter.buildUserPrompt(context),
         metadata: {
           plan: usage.subscription.plan.code,
           channel: conversation.channel === ConversationChannel.WHATSAPP ? "WHATSAPP" as const : "MANUAL" as const,
@@ -310,7 +314,7 @@ export const aiReplyEngine = {
       }
       const safety = aiSafetyService.evaluate({
         decision: providerResult.parsedDecision,
-        businessReady: businessReadyForAi(context.businessKnowledge.gaps),
+        businessReady: businessReadyForAi(context.readiness),
         humanTakeover: conversation.humanTakeover,
       });
       if (!safety.allowed) {

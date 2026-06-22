@@ -17,6 +17,7 @@ import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./whatsapp-provider.service";
 import { realtimeService } from "./realtime.service";
+import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 
 export type ConversationActor = {
   userId: string;
@@ -71,6 +72,7 @@ async function invalidateMessageCaches(businessId: string, conversationId: strin
     cacheService.delByPattern(`business:${businessId}:conversations:stats:*`),
     cacheService.delByPattern(`business:${businessId}:conversations:unread:*`),
     cacheService.delByPattern(`business:${businessId}:conversations:detail:${conversationId}:*`),
+    invalidateAiBusinessContext(businessId, conversationId),
   ]);
 }
 

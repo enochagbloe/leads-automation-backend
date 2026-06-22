@@ -13,6 +13,7 @@ import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
 import { subscriptionService } from "./subscription.service";
 import { realtimeService } from "./realtime.service";
+import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { CreateLeadInput, LeadListQuery, UpdateLeadInput } from "../validation/lead.schemas";
 
 type LeadActor = {
@@ -75,6 +76,7 @@ async function invalidateLeadCache(businessId: string, leadId?: string) {
     cacheService.delByPattern(`business:${businessId}:leads:list:*`),
     cacheService.delByPattern(`business:${businessId}:leads:counts:*`),
     ...(leadId ? [cacheService.del(detailKey(businessId, leadId))] : []),
+    invalidateAiBusinessContext(businessId),
   ]);
 }
 

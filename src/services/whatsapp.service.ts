@@ -26,6 +26,7 @@ import { createSystemMessage } from "./message.service";
 import { subscriptionService } from "./subscription.service";
 import { realtimeService } from "./realtime.service";
 import { aiReplyEngine } from "./ai-reply-engine.service";
+import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
 const MOCK_VERIFY_TOKEN = "bizreplyai-mock-verify-token";
@@ -98,6 +99,7 @@ async function invalidateCaches(businessId: string, leadId: string, conversation
     cacheService.delByPattern(`business:${businessId}:conversations:detail:${conversationId}:*`),
     cacheService.delByPattern(`business:${businessId}:conversations:stats:*`),
     cacheService.delByPattern(`business:${businessId}:conversations:unread:*`),
+    invalidateAiBusinessContext(businessId, conversationId),
   ]);
 }
 
