@@ -2,7 +2,7 @@
 
 ## Sprint Goal
 
-Sprint 7 Module 1 adds the backend AI reply engine powered by OpenRouter. This is backend infrastructure for AI replies in existing conversations.
+Sprint 7 Modules 1-2 add the backend AI reply engine powered by OpenRouter and the business knowledge context layer used by that engine. This is backend infrastructure for AI replies in existing conversations.
 
 There is no AI playground, no mock AI mode, no dashboard simulator, no AI settings UI, and no appointment auto-booking UI in this module.
 
@@ -78,6 +78,35 @@ deliveryStatus: PENDING | SENT | FAILED | INTERNAL
 ```
 
 Render `senderType: AI` as a BizReply AI assistant message.
+
+## Business Knowledge Context
+
+The backend now builds a clean, business-scoped AI context before calling OpenRouter. The frontend does not need to send profile, services, pricing, availability, policy, lead, or conversation history data to the AI endpoint.
+
+The context includes only customer-safe data:
+
+- editable business profile fields
+- active non-archived services
+- safe pricing fields and pricing notes
+- business weekly availability
+- active customer-facing policies
+- basic lead/customer context
+- recent conversation messages
+- plan capability flags
+- AI readiness warnings
+
+The context excludes:
+
+- OpenRouter keys
+- WhatsApp tokens
+- webhook secrets
+- billing data
+- internal-only policies
+- staff private data
+- deleted messages
+- cross-business records
+
+If business knowledge is incomplete, the backend gives the AI readiness warnings and safety rules. The AI may still answer safe questions when enough context exists, but it should request human review when the missing data matters.
 
 For WhatsApp conversations:
 
