@@ -35,6 +35,93 @@ All endpoints are under:
 | PATCH | `/api/business/appointments/:appointmentId/missed` | Mark business-side missed appointment |
 | PATCH | `/api/business/appointments/:appointmentId/assign` | Assign/reassign staff |
 
+## Notification Endpoints
+
+Sprint 6.5 adds persistent actionable in-app notifications.
+
+All endpoints require the same auth and active business headers:
+
+```http
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+```http
+GET /api/business/notifications
+GET /api/business/notifications/counts
+PATCH /api/business/notifications/:notificationId/read
+PATCH /api/business/notifications/:notificationId/dismiss
+PATCH /api/business/notifications/:notificationId/actioned
+```
+
+List query params:
+
+```text
+status
+priority
+type
+limit
+cursor
+```
+
+Notification statuses:
+
+```text
+UNREAD
+READ
+ACTIONED
+DISMISSED
+```
+
+Notification priorities:
+
+```text
+LOW
+NORMAL
+HIGH
+URGENT
+```
+
+Supported appointment notification types:
+
+```text
+APPOINTMENT_NEEDS_CONFIRMATION
+APPOINTMENT_OUTCOME_REQUIRED
+APPOINTMENT_NEEDS_REVIEW
+APPOINTMENT_ASSIGNED
+APPOINTMENT_CONFIRMED
+```
+
+Notification response fields include:
+
+```ts
+id: string;
+type: string;
+priority: string;
+title: string;
+message: string;
+entityType: "APPOINTMENT" | "CONVERSATION" | "LEAD" | "BUSINESS" | null;
+entityId: string | null;
+actions: Array<{ label: string; action: string; variant: string }> | null;
+status: "UNREAD" | "READ" | "ACTIONED" | "DISMISSED";
+createdAt: string;
+readAt: string | null;
+actionedAt: string | null;
+dismissedAt: string | null;
+```
+
+Counts response:
+
+```json
+{
+  "unread": 5,
+  "highPriority": 2,
+  "urgent": 1
+}
+```
+
+Important: notification actions are UI hints only. The frontend must still call the appointment endpoint first, then call `/actioned` after the appointment action succeeds.
+
 ## Status Values
 
 ```text

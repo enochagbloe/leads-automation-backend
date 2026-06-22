@@ -39,7 +39,7 @@ X-Business-Id: <activeBusinessId>
    Expected: `STAFF_MEMBER_NOT_FOUND`.
 
 10. Staff lists appointments.
-    Expected: only appointments assigned to that staff member appear.
+    Expected: only appointments assigned to that staff member appear, including when `assignedStaffId` is set to another member in list or calendar query params.
 
 ## Availability
 
@@ -186,104 +186,145 @@ X-Business-Id: <activeBusinessId>
 53. Fetch an active appointment after its end time but before the 2-hour grace period ends.
     Expected: `availableActions` includes `COMPLETE`, `NO_SHOW`, and `MISSED`.
 
-54. Fetch an active appointment more than 2 hours after end time.
+54. Call complete/no-show/missed on a future confirmed appointment.
+    Expected: each endpoint is blocked with `APPOINTMENT_CANNOT_COMPLETE`, `APPOINTMENT_CANNOT_NO_SHOW`, or `APPOINTMENT_CANNOT_MARK_MISSED`.
+
+55. Fetch an active appointment more than 2 hours after end time.
     Expected: status becomes `NEEDS_OUTCOME_CONFIRMATION`.
 
-55. Fetch the same overdue appointment repeatedly.
+56. Fetch the same overdue appointment repeatedly.
     Expected: only one set of `APPOINTMENT_OUTCOME_REQUIRED` notifications exists.
 
-56. Fetch `NEEDS_OUTCOME_CONFIRMATION` appointment.
+57. Fetch `NEEDS_OUTCOME_CONFIRMATION` appointment.
     Expected: `availableActions` includes `COMPLETE`, `NO_SHOW`, and `MISSED`.
 
-57. Complete appointment with `completedNote`.
+58. Complete appointment with `completedNote`.
     Expected: status `COMPLETED`, `outcomeConfirmedAt`, `outcomeConfirmedById`, and `completedNote` set.
 
-58. Mark appointment no-show with `noShowReason`.
+59. Mark appointment no-show with `noShowReason`.
     Expected: status `NO_SHOW`, `outcomeConfirmedAt`, `outcomeConfirmedById`, and `noShowReason` set.
 
-59. Mark appointment missed with `missedReason`.
+60. Mark appointment missed with `missedReason`.
     Expected: status `MISSED`, `outcomeConfirmedAt`, `outcomeConfirmedById`, and `missedReason` set.
 
-60. Try another outcome action on completed/no-show/missed appointment.
+61. Try another outcome action on completed/no-show/missed appointment.
     Expected: `APPOINTMENT_OUTCOME_ALREADY_RECORDED`.
 
-61. Staff attempts outcome action on unassigned appointment.
+62. Try to cancel a completed/no-show/missed appointment.
+    Expected: `APPOINTMENT_OUTCOME_ALREADY_RECORDED`.
+
+63. Staff attempts outcome action on unassigned appointment.
     Expected: `FORBIDDEN`.
 
-62. Watch SSE during outcome-required and missed flows.
+64. Watch SSE during outcome-required and missed flows.
     Expected: `business.appointment.outcome_required`, `business.appointment.missed`, `business.notification.created`, and calendar update events emit.
 
 ## Plus Staff Auto-Confirm
 
-63. Plus owner enables `AUTO_CONFIRM_WHEN_STAFF_ASSIGNED`.
+65. Plus owner enables `AUTO_CONFIRM_WHEN_STAFF_ASSIGNED`.
     Expected: settings update succeeds.
 
-64. Basic owner enables `AUTO_CONFIRM_WHEN_STAFF_ASSIGNED`.
+66. Basic owner enables `AUTO_CONFIRM_WHEN_STAFF_ASSIGNED`.
     Expected: `PLAN_UPGRADE_REQUIRED`.
 
-65. Plus owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
+67. Plus owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
     Expected: `PLAN_UPGRADE_REQUIRED`.
 
-66. Plus business creates safe appointment with active assigned staff.
+68. Plus business creates safe appointment with active assigned staff.
     Expected: appointment status `CONFIRMED`, auto-confirm activity, assigned-staff notification, owner/manager notification.
 
-67. Plus business creates appointment without assigned staff.
+69. Plus business creates appointment without assigned staff.
     Expected: `PENDING_BUSINESS_CONFIRMATION`, reason `STAFF_REQUIRED`.
 
-68. Plus conversation-created appointment has assigned staff conflict.
+70. Plus conversation-created appointment has assigned staff conflict.
     Expected: `NEEDS_HUMAN_CONFIRMATION`, reason `AVAILABILITY_CONFLICT`.
 
-69. Manual appointment creation has assigned staff conflict.
+71. Manual appointment creation has assigned staff conflict.
     Expected: `APPOINTMENT_STAFF_UNAVAILABLE`.
 
-70. Assign staff from another business.
+72. Assign staff from another business.
     Expected: `INVALID_ASSIGNED_STAFF`.
 
-71. Assign inactive/removed staff member.
+73. Assign inactive/removed staff member.
     Expected: `INVALID_ASSIGNED_STAFF`.
 
-72. Assign active staff to pending Plus appointment whose only reason is `STAFF_REQUIRED`.
+74. Assign active staff to pending Plus appointment whose only reason is `STAFF_REQUIRED`.
     Expected: status becomes `CONFIRMED` and realtime emits assignment + confirmed events.
 
-73. Staff conflict check ignores cancelled/completed/no-show/missed appointments.
+75. Staff conflict check ignores cancelled/completed/no-show/missed appointments.
     Expected: new appointment can use that slot.
 
-74. Staff conflict check blocks active overlapping appointments including `NEEDS_OUTCOME_CONFIRMATION`.
+76. Staff conflict check blocks active overlapping appointments including `NEEDS_OUTCOME_CONFIRMATION`.
     Expected: `APPOINTMENT_STAFF_UNAVAILABLE` or human-confirmation conflict for non-manual Plus request.
 
 ## Premium Safe Auto-Confirm
 
-75. Premium owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
+77. Premium owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
     Expected: settings update succeeds.
 
-76. Basic owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
+78. Basic owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
     Expected: `PLAN_UPGRADE_REQUIRED`.
 
-77. Plus owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
+79. Plus owner enables `AUTO_CONFIRM_SAFE_BOOKINGS`.
     Expected: `PLAN_UPGRADE_REQUIRED`.
 
-78. Premium creates safe appointment.
+80. Premium creates safe appointment.
     Expected: status `CONFIRMED`, activity `APPOINTMENT_AUTO_CONFIRMED_SAFE_BOOKING`, notification created.
 
-79. Premium creates appointment with unclear location.
+81. Premium creates appointment with unclear location.
     Expected: `NEEDS_HUMAN_CONFIRMATION`, reason `LOCATION_REQUIRED`.
 
-80. Premium non-manual appointment has staff conflict.
+82. Premium non-manual appointment has staff conflict.
     Expected: `NEEDS_HUMAN_CONFIRMATION`, reason `AVAILABILITY_CONFLICT`.
 
-81. Premium direct manual appointment has staff conflict.
+83. Premium direct manual appointment has staff conflict.
     Expected: `APPOINTMENT_STAFF_UNAVAILABLE`.
 
-82. Watch SSE during Premium unsafe appointment creation.
+84. Watch SSE during Premium unsafe appointment creation.
     Expected: `business.appointment.needs_confirmation` and `business.notification.created`.
 
-83. Watch SSE during Premium safe appointment creation.
+85. Watch SSE during Premium safe appointment creation.
     Expected: `business.appointment.confirmed`, `business.notification.created`, and calendar update.
+
+## Actionable Notifications
+
+86. Create pending-confirmation appointment.
+    Expected: notification type `APPOINTMENT_NEEDS_CONFIRMATION`, entity `APPOINTMENT`, action payload includes confirm/reschedule/cancel/view.
+
+87. Create needs-human-confirmation appointment.
+    Expected: notification type `APPOINTMENT_NEEDS_REVIEW`, high priority, action payload includes review/confirm/reschedule/cancel.
+
+88. Trigger outcome-required lazy update.
+    Expected: notification type `APPOINTMENT_OUTCOME_REQUIRED`, action payload includes completed/no-show/missed/view.
+
+89. Assign appointment to staff.
+    Expected: assigned staff receives `APPOINTMENT_ASSIGNED` notification.
+
+90. Fetch `/api/business/notifications`.
+    Expected: only current membership's notifications are returned.
+
+91. Fetch `/api/business/notifications/counts`.
+    Expected: unread, highPriority, and urgent counts are correct.
+
+92. Mark notification read.
+    Expected: status `READ`, `readAt` set.
+
+93. Dismiss notification.
+    Expected: status `DISMISSED`, `dismissedAt` set.
+
+94. Mark notification actioned after successful appointment action.
+    Expected: status `ACTIONED`, `actionedAt` set.
+
+95. Try to access another member's notification as staff.
+    Expected: `NOTIFICATION_NOT_FOUND`.
+
+96. Re-trigger same unresolved appointment notification.
+    Expected: duplicate unresolved notification is not created.
 
 ## Out Of Scope Guardrails
 
-84. Verify appointment creation from conversation does not call WhatsApp outbound provider.
+97. Verify appointment creation from conversation does not call WhatsApp outbound provider.
     Expected: only internal system message is stored.
 
-85. Search code/logs during appointment flow.
+98. Search code/logs during appointment flow.
     Expected: no OpenAI/AI call and no Google Calendar sync call.
