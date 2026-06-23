@@ -482,6 +482,11 @@ enum AuditAction {
   USER_ACCOUNT_TYPE_SET
   BUSINESS_CREATION_BLOCKED_FOR_STAFF_ACCOUNT
   STAFF_INVITE_BLOCKED_OWNER_EMAIL
+  STAFF_INVITE_VIEWED
+  STAFF_INVITE_ACCEPTED
+  STAFF_ACCOUNT_CREATED_FROM_INVITE
+  BUSINESS_MEMBER_ACTIVATED_FROM_INVITE
+  STAFF_INVITE_ACCEPTANCE_BLOCKED
 }
 
 enum DayOfWeek {
@@ -743,6 +748,7 @@ model BusinessInvitation {
   tokenHash   String           @unique
   expiresAt   DateTime
   invitedById String
+  acceptedByUserId String?
   acceptedAt  DateTime?
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
@@ -752,6 +758,7 @@ model BusinessInvitation {
 
   @@index([businessId, status])
   @@index([email, status])
+  @@index([acceptedByUserId])
 }
 
 model Plan {

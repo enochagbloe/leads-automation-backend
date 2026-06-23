@@ -37,6 +37,7 @@ export const accountPolicyService = {
     targetEmail: string;
     actorUserId: string;
     context: Omit<AuditInput, "action">;
+    allowExistingBusinessMembership?: boolean;
   }) {
     const email = input.targetEmail.trim().toLowerCase();
     const user = await prisma.user.findUnique({
@@ -51,7 +52,7 @@ export const accountPolicyService = {
     if (!user) return { email, user: null };
 
     const existingMembership = user.memberships.find((membership) => membership.businessId === input.businessId);
-    if (existingMembership) {
+    if (existingMembership && !input.allowExistingBusinessMembership) {
       throw new AppError(409, "This user is already a member of this business.", "USER_ALREADY_BUSINESS_MEMBER");
     }
 

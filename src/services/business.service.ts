@@ -262,7 +262,7 @@ export const businessService = {
       });
       await tx.businessInvitation.update({
         where: { id: invitation.id },
-        data: { status: InvitationStatus.ACCEPTED, acceptedAt: now },
+        data: { status: InvitationStatus.ACCEPTED, acceptedAt: now, acceptedByUserId: user!.id },
       });
       return member;
     });
