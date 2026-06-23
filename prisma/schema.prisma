@@ -22,6 +22,11 @@ enum UserStatus {
   DISABLED
 }
 
+enum UserAccountType {
+  OWNER_CAPABLE
+  STAFF_ONLY
+}
+
 enum MembershipStatus {
   ACTIVE
   INVITED
@@ -474,6 +479,9 @@ enum AuditAction {
   CONVERSATION_HUMAN_TAKEOVER_STARTED
   CONVERSATION_AI_RESUMED
   CONVERSATION_HUMAN_REVIEW_RESOLVED
+  USER_ACCOUNT_TYPE_SET
+  BUSINESS_CREATION_BLOCKED_FOR_STAFF_ACCOUNT
+  STAFF_INVITE_BLOCKED_OWNER_EMAIL
 }
 
 enum DayOfWeek {
@@ -494,6 +502,8 @@ model User {
   passwordHash  String
   emailVerified Boolean       @default(false)
   status        UserStatus    @default(ACTIVE)
+  accountType   UserAccountType @default(OWNER_CAPABLE)
+  canCreateBusiness Boolean   @default(true)
   platformRole  PlatformRole?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt

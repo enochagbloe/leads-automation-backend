@@ -2,7 +2,7 @@
 
 ## Sprint Goal
 
-Sprint 7 Modules 1-4 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, and the human review / handoff foundation.
+Sprint 7 Modules 1-5A.1 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, human review / handoff foundation, and account-type rules for owner-capable vs staff-only users.
 
 There is no AI settings UI, AI simulator, advanced routing, AI analytics dashboard, image understanding UI, or Plus/Premium auto-confirm UI in this module.
 
@@ -49,6 +49,67 @@ PROVIDER_ERROR
 ```
 
 Blocked responses return `blocked: true`. Successful replies and booking-request acknowledgements return `blocked: false` with a stored AI message.
+
+## Account Type Rules
+
+Auth user objects now include:
+
+```ts
+type UserAccountType = "OWNER_CAPABLE" | "STAFF_ONLY";
+
+type AuthUser = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  emailVerified: boolean;
+  status: "ACTIVE" | "DISABLED";
+  accountType: UserAccountType;
+  canCreateBusiness: boolean;
+  createdAt: string;
+};
+```
+
+Normal registration creates:
+
+```text
+accountType: OWNER_CAPABLE
+canCreateBusiness: true
+```
+
+Invite-created staff accounts create:
+
+```text
+accountType: STAFF_ONLY
+canCreateBusiness: false
+```
+
+Frontend should hide or disable “Create business” for:
+
+```text
+accountType = STAFF_ONLY
+canCreateBusiness = false
+```
+
+The backend remains the source of truth. If a staff-only user calls business creation anyway, it returns:
+
+```json
+{
+  "error": {
+    "code": "STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS",
+    "message": "This account was created as a staff account. Staff accounts cannot create businesses."
+  }
+}
+```
+
+When inviting staff, owner/manager should handle:
+
+```text
+INVITED_EMAIL_ALREADY_BUSINESS_OWNER
+USER_ALREADY_BUSINESS_MEMBER
+```
+
+`INVITED_EMAIL_ALREADY_BUSINESS_OWNER` means the email belongs to a user with an active owner membership. Show a clear message asking for a staff email instead.
 
 ## Automatic Processing
 
@@ -287,6 +348,10 @@ AI_ALREADY_ENABLED
 AI_ALREADY_DISABLED
 HUMAN_TAKEOVER_FORBIDDEN
 HUMAN_REVIEW_NOT_FOUND
+STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS
+INVITED_EMAIL_ALREADY_BUSINESS_OWNER
+USER_ALREADY_BUSINESS_MEMBER
+INVALID_ACCOUNT_TYPE
 ```
 
 ## Frontend Notes
@@ -295,6 +360,7 @@ HUMAN_REVIEW_NOT_FOUND
 - Show `HUMAN_HANDLING` as “Human handling” or “Human takeover”.
 - Use the take-over endpoint for the notification action `TAKE_OVER_CONVERSATION`.
 - Use the resume endpoint when a user chooses to turn AI back on.
+- Use `user.accountType` and `user.canCreateBusiness` to conditionally show create-business UI.
 - Show failed AI messages with the existing failed-message UI.
 - Refetch appointments when `business.ai.booking_request.created` or `business.appointment.created` arrives.
 - Do not add an AI simulator button.

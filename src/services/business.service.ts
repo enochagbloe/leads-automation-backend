@@ -1,4 +1,4 @@
-import { AuditAction, BusinessRole, BusinessStatus, InvitationStatus, MembershipStatus, UserStatus } from "@prisma/client";
+import { AuditAction, BusinessRole, BusinessStatus, InvitationStatus, MembershipStatus, UserAccountType, UserStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { prisma } from "../config/prisma";
 import { createOpaqueToken, hashToken } from "../utils/crypto";
@@ -8,6 +8,7 @@ import { AuditInput, auditService } from "./audit.service";
 import { emailService } from "./email.service";
 import { canAddStaff, canCreateBusiness, updateStaffUsage } from "../middleware/subscription-guard";
 import { getAccountUsage, getPlanFeatures, getPlanLimits, subscriptionService } from "./subscription.service";
+import { accountPolicyService } from "./account-policy.service";
 
 const INVITATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -27,6 +28,7 @@ export const businessService = {
     if (!user || user.status !== UserStatus.ACTIVE || user.deletedAt) {
       throw new AppError(401, "Authentication required", "UNAUTHENTICATED");
     }
+    await accountPolicyService.assertCanCreateBusiness(user, context);
     if (!account) throw new AppError(403, "Only a workspace owner can create businesses", "BUSINESS_ACCOUNT_REQUIRED");
     await canCreateBusiness(account.id);
     const subscription = await subscriptionService.getCurrentRecord(account.id);
@@ -136,39 +138,45 @@ export const businessService = {
     const business = await prisma.business.findUnique({ where: { id: businessId } });
     if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
 
-    const existingUser = await prisma.user.findUnique({ where: { email: input.email } });
+    const inviteTarget = await accountPolicyService.validateStaffInviteTargetEmail({
+      businessId,
+      targetEmail: input.email,
+      actorUserId: invitedById,
+      context,
+    });
+    const existingUser = inviteTarget.user;
     if (existingUser) {
       const membership = await prisma.businessMember.findUnique({
         where: { businessId_userId: { businessId, userId: existingUser.id } },
       });
       if (membership && membership.status !== MembershipStatus.REMOVED) {
-        throw new AppError(409, "This user already belongs to the business", "MEMBERSHIP_EXISTS");
+        throw new AppError(409, "This user is already a member of this business.", "USER_ALREADY_BUSINESS_MEMBER");
       }
     }
 
     await canAddStaff(business.businessAccountId, businessId);
     const { token, tokenHash } = createOpaqueToken();
     await prisma.businessInvitation.updateMany({
-      where: { businessId, email: input.email, status: InvitationStatus.PENDING },
+      where: { businessId, email: inviteTarget.email, status: InvitationStatus.PENDING },
       data: { status: InvitationStatus.REVOKED },
     });
     const invitation = await prisma.businessInvitation.create({
       data: {
         businessId,
-        email: input.email,
+        email: inviteTarget.email,
         role,
         tokenHash,
         invitedById,
         expiresAt: new Date(Date.now() + INVITATION_EXPIRY_MS),
       },
     });
-    const sent = await emailService.sendBusinessInvitation(input.email, business.name, role, token);
+    const sent = await emailService.sendBusinessInvitation(inviteTarget.email, business.name, role, token);
     await auditService.log({
       ...context,
       action: AuditAction.STAFF_INVITED,
       businessId,
       userId: invitedById,
-      metadata: { invitationId: invitation.id, email: input.email, role, sent },
+      metadata: { invitationId: invitation.id, email: inviteTarget.email, role, sent },
     });
     return {
       invitation: { id: invitation.id, email: invitation.email, role: invitation.role, status: invitation.status, expiresAt: invitation.expiresAt },
@@ -187,6 +195,12 @@ export const businessService = {
 
     const invitedBusiness = await prisma.business.findUnique({ where: { id: invitation.businessId } });
     if (!invitedBusiness) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+    await accountPolicyService.validateStaffInviteTargetEmail({
+      businessId: invitation.businessId,
+      targetEmail: invitation.email,
+      actorUserId: invitation.invitedById,
+      context,
+    });
     await canAddStaff(invitedBusiness.businessAccountId, invitation.businessId);
     let user = await prisma.user.findUnique({ where: { email: invitation.email } });
     if (!user) {
@@ -201,6 +215,21 @@ export const businessService = {
           passwordHash: await bcrypt.hash(input.password, 12),
           emailVerified: true,
           status: UserStatus.ACTIVE,
+          accountType: UserAccountType.STAFF_ONLY,
+          canCreateBusiness: false,
+        },
+      });
+      await auditService.log({
+        ...context,
+        action: AuditAction.USER_ACCOUNT_TYPE_SET,
+        userId: user.id,
+        businessId: invitation.businessId,
+        metadata: {
+          targetUserId: user.id,
+          targetEmail: invitation.email,
+          accountType: UserAccountType.STAFF_ONLY,
+          canCreateBusiness: false,
+          reason: "Invite-created staff account",
         },
       });
     } else {

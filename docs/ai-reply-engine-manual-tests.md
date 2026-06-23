@@ -264,3 +264,38 @@ X-Business-Id: <activeBusinessId>
 
 80. Search routes.
     Expected: no AI mock/simulator endpoint exists.
+
+## Account Type And Business Creation Policy
+
+81. Normal registered user profile.
+    Expected: `user.accountType = OWNER_CAPABLE` and `user.canCreateBusiness = true`.
+
+82. Existing owner-capable user creates an additional business within plan limit.
+    Expected: business creation succeeds.
+
+83. Staff-only user calls `POST /api/businesses`.
+    Expected: `STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS`; user remains logged in.
+
+84. Unknown email is invited as staff.
+    Expected: invitation is created.
+
+85. Invited unknown email accepts invitation and creates a new account.
+    Expected: user is created with `accountType = STAFF_ONLY` and `canCreateBusiness = false`.
+
+86. Existing staff-only user is invited to a second business.
+    Expected: invitation is allowed.
+
+87. Existing active business owner email is invited as staff.
+    Expected: `INVITED_EMAIL_ALREADY_BUSINESS_OWNER`.
+
+88. Existing member of the same business is invited again.
+    Expected: `USER_ALREADY_BUSINESS_MEMBER`.
+
+89. Pending legacy invite for owner email is accepted.
+    Expected: accept flow blocks with `INVITED_EMAIL_ALREADY_BUSINESS_OWNER`.
+
+90. Business creation blocked for staff account.
+    Expected: audit log `BUSINESS_CREATION_BLOCKED_FOR_STAFF_ACCOUNT`.
+
+91. Owner email staff invite blocked.
+    Expected: audit log `STAFF_INVITE_BLOCKED_OWNER_EMAIL`.

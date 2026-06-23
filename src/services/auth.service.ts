@@ -1,4 +1,4 @@
-import { AuditAction, AuthTokenType, BusinessRole, MembershipStatus, PlanCode, PlatformRole, SubscriptionStatus, UserStatus } from "@prisma/client";
+import { AuditAction, AuthTokenType, BusinessRole, MembershipStatus, PlanCode, PlatformRole, SubscriptionStatus, UserAccountType, UserStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { prisma } from "../config/prisma";
 import { createOpaqueToken, hashToken } from "../utils/crypto";
@@ -11,13 +11,15 @@ import { tokenService } from "./token.service";
 
 const VERIFY_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const RESET_EXPIRY_MS = 30 * 60 * 1000;
-const publicUser = (user: { id: string; firstName: string; lastName: string; email: string; emailVerified: boolean; status: UserStatus; createdAt: Date }) => ({
+const publicUser = (user: { id: string; firstName: string; lastName: string; email: string; emailVerified: boolean; status: UserStatus; accountType: UserAccountType; canCreateBusiness: boolean; createdAt: Date }) => ({
   id: user.id,
   firstName: user.firstName,
   lastName: user.lastName,
   email: user.email,
   emailVerified: user.emailVerified,
   status: user.status,
+  accountType: user.accountType,
+  canCreateBusiness: user.canCreateBusiness,
   createdAt: user.createdAt,
 });
 
@@ -71,6 +73,19 @@ export const authService = {
     const verificationSent = await emailService.sendVerification(input.email, input.businessName, token);
     await Promise.all([
       auditService.log({ ...context, action: AuditAction.USER_REGISTERED, userId: result.user.id, businessId: result.business.id }),
+      auditService.log({
+        ...context,
+        action: AuditAction.USER_ACCOUNT_TYPE_SET,
+        userId: result.user.id,
+        businessId: result.business.id,
+        metadata: {
+          targetUserId: result.user.id,
+          targetEmail: result.user.email,
+          accountType: UserAccountType.OWNER_CAPABLE,
+          canCreateBusiness: true,
+          reason: "Normal owner registration",
+        },
+      }),
       ...(verificationSent ? [auditService.log({ ...context, action: AuditAction.EMAIL_VERIFICATION_SENT, userId: result.user.id, businessId: result.business.id })] : []),
       auditService.log({ ...context, action: AuditAction.SUBSCRIPTION_CREATED, userId: result.user.id, businessId: result.business.id }),
       auditService.log({ ...context, action: AuditAction.PLAN_ASSIGNED, userId: result.user.id, businessId: result.business.id, metadata: { plan: PlanCode.BASIC } }),
