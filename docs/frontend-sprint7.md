@@ -2,9 +2,9 @@
 
 ## Sprint Goal
 
-Sprint 7 Modules 1-3 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, human review state, and AI-created appointment booking requests.
+Sprint 7 Modules 1-4 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, and the human review / handoff foundation.
 
-There is no AI settings UI, AI simulator, advanced routing, AI analytics dashboard, or Plus/Premium auto-confirm UI in this module.
+There is no AI settings UI, AI simulator, advanced routing, AI analytics dashboard, image understanding UI, or Plus/Premium auto-confirm UI in this module.
 
 ## Environment Behavior
 
@@ -85,18 +85,106 @@ When AI is low-confidence, unsafe, over quota, missing required context, or the 
 - conversation moves to `status: NEEDS_HUMAN_REVIEW`
 - `needsHumanReview: true`
 - `humanReviewReason` is set
+- `humanReviewType` is set
+- `aiEnabled: false`
+- `humanTakeover: false`
 - notification type `AI_HUMAN_REVIEW_REQUIRED` is created for owners/managers
+- on Plus/Premium, the assigned staff member is also notified when the conversation has an assignee
 
 Notification actions:
 
 ```json
 [
   { "label": "View conversation", "action": "VIEW_CONVERSATION", "variant": "default" },
-  { "label": "Take over", "action": "TAKE_OVER_CONVERSATION", "variant": "secondary" }
+  { "label": "Take over", "action": "TAKE_OVER_CONVERSATION", "variant": "secondary" },
+  { "label": "Dismiss", "action": "DISMISS", "variant": "secondary" }
 ]
 ```
 
 Do not treat `NEEDS_HUMAN_REVIEW` as full human takeover. Human takeover still happens only when a human explicitly takes over.
+
+Human review types:
+
+```text
+LOW_CONFIDENCE
+CUSTOMER_REQUESTED_HUMAN
+COMPLAINT
+PAYMENT_OR_REFUND
+POLICY_UNCERTAINTY
+BOOKING_UNCLEAR
+MISSING_BUSINESS_CONTEXT
+MEDIA_OR_IMAGE_UNSUPPORTED
+AI_PROVIDER_FAILED
+QUOTA_EXCEEDED
+SAFETY_BLOCKED
+OTHER
+```
+
+## Human Handoff Endpoints
+
+Take over a conversation:
+
+```http
+PATCH /api/business/conversations/:conversationId/take-over
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "reason": "Customer asked for a human"
+}
+```
+
+`reason` is optional.
+
+Response conversation state:
+
+```text
+status: HUMAN_HANDLING
+humanTakeover: true
+aiEnabled: false
+needsHumanReview: false
+humanReviewResolvedAt: timestamp
+humanReviewResolvedByMembershipId: current membership id
+```
+
+Resume AI:
+
+```http
+PATCH /api/business/conversations/:conversationId/resume-ai
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "reason": "Issue reviewed"
+}
+```
+
+`reason` is optional.
+
+Response conversation state:
+
+```text
+status: AI_HANDLING
+humanTakeover: false
+aiEnabled: true
+needsHumanReview: false
+humanReviewResolvedAt: timestamp
+humanReviewResolvedByMembershipId: current membership id
+```
+
+Resume AI does not process old messages immediately. Future inbound customer messages can trigger AI again.
+
+Access:
+
+- owner/manager can take over or resume accessible business conversations
+- assigned staff can take over or resume their assigned conversations
+- staff cannot take over unassigned or other staff conversations
 
 ## Booking Requests
 
@@ -123,6 +211,10 @@ business.ai.reply.completed
 business.ai.reply.blocked
 business.ai.reply.failed
 business.ai.booking_request.created
+business.ai.human_review.required
+business.conversation.human_takeover.started
+business.conversation.ai_resumed
+business.conversation.updated
 message.created
 message.status.updated
 business.appointment.created
@@ -188,11 +280,21 @@ WHATSAPP_NOT_CONNECTED
 WHATSAPP_SEND_FAILED
 FORBIDDEN
 BUSINESS_ACCESS_DENIED
+CONVERSATION_ACCESS_DENIED
+CONVERSATION_ALREADY_HUMAN_HANDLING
+CONVERSATION_NOT_IN_HUMAN_REVIEW
+AI_ALREADY_ENABLED
+AI_ALREADY_DISABLED
+HUMAN_TAKEOVER_FORBIDDEN
+HUMAN_REVIEW_NOT_FOUND
 ```
 
 ## Frontend Notes
 
 - Show `NEEDS_HUMAN_REVIEW` as “Needs human review”.
+- Show `HUMAN_HANDLING` as “Human handling” or “Human takeover”.
+- Use the take-over endpoint for the notification action `TAKE_OVER_CONVERSATION`.
+- Use the resume endpoint when a user chooses to turn AI back on.
 - Show failed AI messages with the existing failed-message UI.
 - Refetch appointments when `business.ai.booking_request.created` or `business.appointment.created` arrives.
 - Do not add an AI simulator button.
