@@ -264,3 +264,88 @@ X-Business-Id: <activeBusinessId>
 
 80. Search routes.
     Expected: no AI mock/simulator endpoint exists.
+
+## Account Type And Business Creation Policy
+
+81. Normal registered user profile.
+    Expected: `user.accountType = OWNER_CAPABLE` and `user.canCreateBusiness = true`.
+
+82. Existing owner-capable user creates an additional business within plan limit.
+    Expected: business creation succeeds.
+
+83. Staff-only user calls `POST /api/businesses`.
+    Expected: `STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS`; user remains logged in.
+
+84. Unknown email is invited as staff.
+    Expected: invitation is created.
+
+85. Invited unknown email accepts invitation and creates a new account.
+    Expected: user is created with `accountType = STAFF_ONLY` and `canCreateBusiness = false`.
+
+86. Existing staff-only user is invited to a second business.
+    Expected: invitation is allowed.
+
+87. Existing active business owner email is invited as staff.
+    Expected: `INVITED_EMAIL_ALREADY_BUSINESS_OWNER`.
+
+88. Existing member of the same business is invited again.
+    Expected: `USER_ALREADY_BUSINESS_MEMBER`.
+
+89. Pending legacy invite for owner email is accepted.
+    Expected: accept flow blocks with `INVITED_EMAIL_ALREADY_BUSINESS_OWNER`.
+
+90. Business creation blocked for staff account.
+    Expected: audit log `BUSINESS_CREATION_BLOCKED_FOR_STAFF_ACCOUNT`.
+
+91. Owner email staff invite blocked.
+    Expected: audit log `STAFF_INVITE_BLOCKED_OWNER_EMAIL`.
+
+## Team Invite Acceptance Flow
+
+92. Public invite validation with a pending valid token.
+    Expected: `GET /api/invites/:token` returns safe business name, role, email, status, and expiry.
+
+93. Public invite validation with invalid token.
+    Expected: `{ valid: false, code: "INVITE_INVALID_OR_EXPIRED" }`.
+
+94. Expired invite acceptance.
+    Expected: `INVITE_INVALID_OR_EXPIRED`.
+
+95. Revoked invite acceptance.
+    Expected: `INVITE_CANCELLED`.
+
+96. Already accepted invite acceptance.
+    Expected: `INVITE_ALREADY_ACCEPTED`.
+
+97. Existing staff-only logged-in user accepts invite.
+    Expected: active `BusinessMember` is created or activated under invited business.
+
+98. Logged-in user with different email accepts invite.
+    Expected: `INVITE_EMAIL_MISMATCH`.
+
+99. Existing owner email accepts staff invite.
+    Expected: `INVITED_EMAIL_ALREADY_BUSINESS_OWNER`.
+
+100. New invitee signs up from invite.
+    Expected: new user is `STAFF_ONLY`, `canCreateBusiness = false`, email verified, active membership created.
+
+101. Signup from invite where user already exists.
+    Expected: `USER_ALREADY_EXISTS`.
+
+102. Invite role is `BUSINESS_OWNER`.
+    Expected: `INVALID_INVITE_ROLE`.
+
+103. Existing removed member is re-invited and accepts.
+    Expected: membership is reactivated, no duplicate `BusinessMember`.
+
+104. Successful acceptance marks invite accepted.
+    Expected: `status = ACCEPTED`, `acceptedAt` set, `acceptedByUserId` set.
+
+105. Successful acceptance emits realtime.
+    Expected: `business.member.joined` and `business.invite.accepted`.
+
+106. Successful acceptance creates audit logs.
+    Expected: `STAFF_INVITE_ACCEPTED`; signup path also logs `STAFF_ACCOUNT_CREATED_FROM_INVITE`.
+
+107. Staff account after invite acceptance calls business creation.
+    Expected: `STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS`.

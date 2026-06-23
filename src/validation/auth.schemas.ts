@@ -41,3 +41,8 @@ export const acceptInvitationSchema = tokenSchema.extend({
   lastName: z.string().trim().min(1).max(60).optional(),
   password: password.optional(),
 });
+
+export const inviteSignupSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  password,
+});

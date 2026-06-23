@@ -2,7 +2,7 @@
 
 ## Sprint Goal
 
-Sprint 7 Modules 1-4 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, and the human review / handoff foundation.
+Sprint 7 Modules 1-5A.1 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, human review / handoff foundation, and account-type rules for owner-capable vs staff-only users.
 
 There is no AI settings UI, AI simulator, advanced routing, AI analytics dashboard, image understanding UI, or Plus/Premium auto-confirm UI in this module.
 
@@ -49,6 +49,169 @@ PROVIDER_ERROR
 ```
 
 Blocked responses return `blocked: true`. Successful replies and booking-request acknowledgements return `blocked: false` with a stored AI message.
+
+## Account Type Rules
+
+Auth user objects now include:
+
+```ts
+type UserAccountType = "OWNER_CAPABLE" | "STAFF_ONLY";
+
+type AuthUser = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  emailVerified: boolean;
+  status: "ACTIVE" | "DISABLED";
+  accountType: UserAccountType;
+  canCreateBusiness: boolean;
+  createdAt: string;
+};
+```
+
+Normal registration creates:
+
+```text
+accountType: OWNER_CAPABLE
+canCreateBusiness: true
+```
+
+Invite-created staff accounts create:
+
+```text
+accountType: STAFF_ONLY
+canCreateBusiness: false
+```
+
+Frontend should hide or disable “Create business” for:
+
+```text
+accountType = STAFF_ONLY
+canCreateBusiness = false
+```
+
+The backend remains the source of truth. If a staff-only user calls business creation anyway, it returns:
+
+```json
+{
+  "error": {
+    "code": "STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS",
+    "message": "This account was created as a staff account. Staff accounts cannot create businesses."
+  }
+}
+```
+
+When inviting staff, owner/manager should handle:
+
+```text
+INVITED_EMAIL_ALREADY_BUSINESS_OWNER
+USER_ALREADY_BUSINESS_MEMBER
+```
+
+`INVITED_EMAIL_ALREADY_BUSINESS_OWNER` means the email belongs to a user with an active owner membership. Show a clear message asking for a staff email instead.
+
+## Team Invite Acceptance
+
+Validate invite link before showing signup/login UI:
+
+```http
+GET /api/invites/:token
+```
+
+Valid response:
+
+```json
+{
+  "valid": true,
+  "inviteId": "invite-id",
+  "business": {
+    "id": "business-id",
+    "name": "Enoch Properties"
+  },
+  "role": "STAFF",
+  "email": "staff@example.com",
+  "status": "PENDING",
+  "expiresAt": "2026-06-30T10:00:00.000Z"
+}
+```
+
+Invalid response:
+
+```json
+{
+  "valid": false,
+  "code": "INVITE_INVALID_OR_EXPIRED",
+  "message": "This invite link is invalid or has expired."
+}
+```
+
+Existing logged-in user accepts invite:
+
+```http
+POST /api/invites/:token/accept
+Authorization: Bearer <accessToken>
+```
+
+No request body is required.
+
+New invitee signs up from invite:
+
+```http
+POST /api/invites/:token/signup
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "Kwame Mensah",
+  "password": "SecurePass123!"
+}
+```
+
+Do not ask for email on invite signup. The backend uses the invite email.
+
+Successful accept/signup response includes:
+
+```json
+{
+  "accepted": true,
+  "business": {
+    "id": "business-id",
+    "name": "Enoch Properties"
+  },
+  "membership": {
+    "id": "business-member-id",
+    "role": "STAFF",
+    "status": "ACTIVE"
+  },
+  "activeBusinessId": "business-id",
+  "activeMembershipId": "business-member-id",
+  "role": "STAFF"
+}
+```
+
+Signup-from-invite also returns `accessToken` and `refreshToken`, so the frontend can enter the invited business immediately.
+
+Invite acceptance errors to handle:
+
+```text
+INVITE_NOT_FOUND
+INVITE_INVALID_OR_EXPIRED
+INVITE_ALREADY_ACCEPTED
+INVITE_CANCELLED
+INVITE_EMAIL_MISMATCH
+INVALID_INVITE_ROLE
+USER_ALREADY_EXISTS
+INVITED_EMAIL_ALREADY_BUSINESS_OWNER
+USER_ALREADY_BUSINESS_MEMBER
+ACCOUNT_NOT_ALLOWED_FOR_STAFF_INVITE
+BUSINESS_NOT_FOUND
+```
+
+`INVITE_EMAIL_MISMATCH` means the logged-in user is not the invited email. Ask them to log in with the invited email.
+
+`USER_ALREADY_EXISTS` on signup means the invited email already has an account; show login + accept flow instead.
 
 ## Automatic Processing
 
@@ -215,6 +378,8 @@ business.ai.human_review.required
 business.conversation.human_takeover.started
 business.conversation.ai_resumed
 business.conversation.updated
+business.member.joined
+business.invite.accepted
 message.created
 message.status.updated
 business.appointment.created
@@ -287,6 +452,18 @@ AI_ALREADY_ENABLED
 AI_ALREADY_DISABLED
 HUMAN_TAKEOVER_FORBIDDEN
 HUMAN_REVIEW_NOT_FOUND
+STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS
+INVITED_EMAIL_ALREADY_BUSINESS_OWNER
+USER_ALREADY_BUSINESS_MEMBER
+INVALID_ACCOUNT_TYPE
+INVITE_NOT_FOUND
+INVITE_INVALID_OR_EXPIRED
+INVITE_ALREADY_ACCEPTED
+INVITE_CANCELLED
+INVITE_EMAIL_MISMATCH
+INVALID_INVITE_ROLE
+USER_ALREADY_EXISTS
+ACCOUNT_NOT_ALLOWED_FOR_STAFF_INVITE
 ```
 
 ## Frontend Notes
@@ -295,6 +472,9 @@ HUMAN_REVIEW_NOT_FOUND
 - Show `HUMAN_HANDLING` as “Human handling” or “Human takeover”.
 - Use the take-over endpoint for the notification action `TAKE_OVER_CONVERSATION`.
 - Use the resume endpoint when a user chooses to turn AI back on.
+- Use `user.accountType` and `user.canCreateBusiness` to conditionally show create-business UI.
+- Use `/api/invites/:token` before rendering invite signup/login screens.
+- After invite acceptance, set active business from `activeBusinessId` and `activeMembershipId`.
 - Show failed AI messages with the existing failed-message UI.
 - Refetch appointments when `business.ai.booking_request.created` or `business.appointment.created` arrives.
 - Do not add an AI simulator button.

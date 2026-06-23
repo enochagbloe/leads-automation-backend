@@ -48,6 +48,8 @@ export type RealtimeEventType =
   | "business.appointment.assigned"
   | "business.appointments.calendar.updated"
   | "business.notification.created"
+  | "business.member.joined"
+  | "business.invite.accepted"
   | "business.ai.reply.started"
   | "business.ai.reply.completed"
   | "business.ai.reply.blocked"

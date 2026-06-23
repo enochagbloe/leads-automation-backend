@@ -9,7 +9,7 @@ declare global {
         businessAccountId: string | null;
         businessId: string | null;
         membershipId: string | null;
-        role: BusinessRole | PlatformRole;
+        role: BusinessRole | PlatformRole | null;
         accessTokenExpiresAt: number;
       };
     }
