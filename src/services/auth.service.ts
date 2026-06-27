@@ -168,9 +168,13 @@ export const authService = {
       },
     });
     if (!user) throw new AppError(401, "Authentication required", "UNAUTHENTICATED");
-    const membership = activeBusinessId
+    const requestedMembership = activeBusinessId
       ? user.memberships.find((item) => item.businessId === activeBusinessId)
-      : user.memberships.find((item) => item.status === MembershipStatus.ACTIVE) ?? user.memberships[0];
+      : undefined;
+    const membership = requestedMembership
+      ?? user.memberships.find((item) => item.status === MembershipStatus.ACTIVE)
+      ?? user.memberships[0];
+    const requestedBusinessUnavailable = Boolean(activeBusinessId && !requestedMembership);
     const role = user.platformRole ?? membership?.role;
     const activeBusiness = membership?.business ?? null;
     const account = activeBusiness?.businessAccount ?? null;
@@ -276,6 +280,8 @@ export const authService = {
       features: subscription ? getPlanFeatures(subscription.plan) : null,
       permissions: permissionList(role),
       permissionFlags: permissionFlags({ role, membershipStatus: membership?.status ?? null, canCreateBusiness: user.canCreateBusiness }),
+      requestedBusinessUnavailable,
+      requestedBusinessId: requestedBusinessUnavailable ? activeBusinessId : null,
     };
   },
 };

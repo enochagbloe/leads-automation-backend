@@ -23,6 +23,7 @@ import { notificationRouter } from "./routes/notification.routes";
 import { aiRouter } from "./routes/ai.routes";
 import { inviteRouter } from "./routes/invite.routes";
 import { businessMemberRouter } from "./routes/business-member.routes";
+import { meRouter } from "./routes/me.routes";
 
 export const app = express();
 
@@ -43,6 +44,7 @@ app.get("/api", (_req, res) => res.json({
   endpoints: {
     health: "/api/health",
     auth: "/api/auth",
+    me: "/api/me/business-memberships",
     invites: "/api/invites/:token",
     businesses: "/api/businesses",
     businessSetupStatus: "/api/business/setup-status",
@@ -81,6 +83,7 @@ app.get("/api/plans", subscriptionController.plans);
 app.use("/api/webhooks/whatsapp", whatsappWebhookRouter);
 app.use("/api/dev/mock-whatsapp", mockWhatsAppRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/me", meRouter);
 app.use("/api/invites", inviteRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/business/whatsapp", whatsappConnectionRouter);
