@@ -398,7 +398,7 @@ export const serviceService = {
         },
       });
       await tx.auditLog.create({
-        data: { ...context, action: AuditAction.BUSINESS_SERVICE_CREATED, businessId: actor.businessId, userId: actor.userId, metadata: asJson({ businessId: actor.businessId, serviceId: created.id, actorUserId: actor.userId, actorMembershipId: actor.membershipId, readinessStatus: created.readinessStatus }) },
+        data: { ...context, action: AuditAction.BUSINESS_SERVICE_CREATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId: created.id, actorUserId: actor.userId, actorMembershipId: actor.membershipId, readinessStatus: created.readinessStatus }) },
       });
       return created;
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
@@ -438,6 +438,7 @@ export const serviceService = {
           action: AuditAction.BUSINESS_SERVICE_UPDATED,
           businessId: actor.businessId,
           userId: actor.userId,
+          actorMembershipId: actor.membershipId,
           metadata: asJson({
             businessId: actor.businessId,
             serviceId,
@@ -470,7 +471,7 @@ export const serviceService = {
         where: { id: serviceId },
         data: { isArchived: true, isActive: false, readinessStatus: ServiceReadinessStatus.ARCHIVED, missingFields: [], archivedAt: new Date(), updatedById: actor.userId },
       });
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_ARCHIVED, businessId: actor.businessId, userId: actor.userId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_ARCHIVED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
       return { service: updated, changed: true };
     }, TRANSACTION_OPTIONS);
     if (!service.changed) return safeService(service.service);
@@ -493,7 +494,7 @@ export const serviceService = {
         where: { id: serviceId },
         data: { isArchived: false, isActive: true, archivedAt: null, ...readiness, updatedById: actor.userId },
       });
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_RESTORED, businessId: actor.businessId, userId: actor.userId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_RESTORED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
       return { service: updated, changed: true };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
     if (!service.changed) return safeService(service.service);
@@ -509,7 +510,7 @@ export const serviceService = {
       const count = await tx.service.count({ where: { businessId: actor.businessId, id: { in: input.items.map((item) => item.id) }, isArchived: false } });
       if (count !== input.items.length) throw new AppError(404, "One or more services were not found", "SERVICE_NOT_FOUND");
       await Promise.all(input.items.map((item) => tx.service.update({ where: { id: item.id }, data: { displayOrder: item.displayOrder, updatedById: actor.userId } })));
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_REORDERED, businessId: actor.businessId, userId: actor.userId, metadata: asJson({ businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId, items: input.items }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_REORDERED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId, items: input.items }) } });
     }, TRANSACTION_OPTIONS);
     await invalidateServiceCaches(actor.businessId);
     publish("business.service.reordered", actor);

@@ -272,7 +272,7 @@ export const policyService = {
           updatedById: actor.userId,
         },
       });
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_CREATED, businessId: actor.businessId, userId: actor.userId, metadata: json({ businessId: actor.businessId, policyId: created.id, actorUserId: actor.userId, actorMembershipId: actor.membershipId, category: created.category }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_CREATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: json({ businessId: actor.businessId, policyId: created.id, actorUserId: actor.userId, actorMembershipId: actor.membershipId, category: created.category }) } });
       return created;
     }, TRANSACTION_OPTIONS);
     await invalidatePolicyCaches(actor.businessId, policy.id);
@@ -298,6 +298,7 @@ export const policyService = {
           action: AuditAction.BUSINESS_POLICY_UPDATED,
           businessId: actor.businessId,
           userId: actor.userId,
+          actorMembershipId: actor.membershipId,
           metadata: json({
             businessId: actor.businessId,
             policyId,
@@ -326,7 +327,7 @@ export const policyService = {
       if (!existing) throw new AppError(404, "Policy not found", "POLICY_NOT_FOUND");
       if (existing.isArchived) return { policy: existing, changed: false };
       const policy = await tx.businessPolicy.update({ where: { id: policyId }, data: { isArchived: true, isActive: false, archivedAt: new Date(), updatedById: actor.userId } });
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_ARCHIVED, businessId: actor.businessId, userId: actor.userId, metadata: json({ businessId: actor.businessId, policyId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_ARCHIVED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: json({ businessId: actor.businessId, policyId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
       return { policy, changed: true };
     }, TRANSACTION_OPTIONS);
     if (!result.changed) return safe(result.policy);
@@ -345,7 +346,7 @@ export const policyService = {
       if (!existing.isArchived) return { policy: existing, changed: false };
       await assertBusinessAndLimit(tx, actor, 1);
       const policy = await tx.businessPolicy.update({ where: { id: policyId }, data: { isArchived: false, isActive: true, archivedAt: null, updatedById: actor.userId } });
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_RESTORED, businessId: actor.businessId, userId: actor.userId, metadata: json({ businessId: actor.businessId, policyId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_RESTORED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: json({ businessId: actor.businessId, policyId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
       return { policy, changed: true };
     }, TRANSACTION_OPTIONS);
     if (!result.changed) return safe(result.policy);
@@ -361,7 +362,7 @@ export const policyService = {
       const count = await tx.businessPolicy.count({ where: { businessId: actor.businessId, isArchived: false, id: { in: input.items.map((item) => item.id) } } });
       if (count !== input.items.length) throw new AppError(404, "One or more policies were not found", "POLICY_NOT_FOUND");
       await Promise.all(input.items.map((item) => tx.businessPolicy.update({ where: { id: item.id }, data: { displayOrder: item.displayOrder, updatedById: actor.userId } })));
-      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_REORDERED, businessId: actor.businessId, userId: actor.userId, metadata: json({ businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId, items: input.items }) } });
+      await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_POLICY_REORDERED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: json({ businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId, items: input.items }) } });
     }, TRANSACTION_OPTIONS);
     await invalidatePolicyCaches(actor.businessId);
     publish("business.policy.reordered", actor);

@@ -54,7 +54,7 @@ function leadAccessWhere(actor: LeadActor): Prisma.LeadWhereInput {
   return {
     businessId: actor.businessId,
     deletedAt: null,
-    ...(actor.role === BusinessRole.STAFF ? { assignedStaffId: actor.membershipId } : {}),
+    ...(actor.role === BusinessRole.STAFF ? { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } : {}),
   };
 }
 
@@ -68,7 +68,7 @@ async function validateAssignee(businessId: string, assignedStaffId: string | nu
       role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER, BusinessRole.STAFF] },
     },
   });
-  if (!member) throw new AppError(422, "Selected assignee is not an active member of this business.", "INVALID_LEAD_ASSIGNEE");
+  if (!member) throw new AppError(422, "This team member cannot receive assigned work.", "INVALID_ASSIGNMENT_TARGET");
 }
 
 async function invalidateLeadCache(businessId: string, leadId?: string) {
@@ -96,6 +96,7 @@ async function logAudit(
     action,
     businessId: actor.businessId,
     userId: actor.userId,
+    actorMembershipId: actor.membershipId,
     metadata: asJson({ leadId, ...metadata }),
   });
 }
@@ -207,12 +208,13 @@ export const leadService = {
     const cached = await cacheService.get<Awaited<ReturnType<typeof loadDetail>>>(key);
     if (cached) {
       if (actor.role === BusinessRole.STAFF && cached.lead.assignedStaffId !== actor.membershipId) {
+        if (cached.lead.assignedStaffId === null) return cached;
         throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
       }
       return cached;
     }
     const result = await loadDetail(actor.businessId, leadId);
-    if (!result || (actor.role === BusinessRole.STAFF && result.lead.assignedStaffId !== actor.membershipId)) {
+    if (!result || (actor.role === BusinessRole.STAFF && result.lead.assignedStaffId !== actor.membershipId && result.lead.assignedStaffId !== null)) {
       throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
     }
     await cacheService.set(key, result, 120);
@@ -282,7 +284,11 @@ export const leadService = {
 
   async assign(actor: LeadActor, leadId: string, assignedStaffId: string | null, context: Omit<AuditInput, "action">) {
     if (actor.role === BusinessRole.STAFF) {
-      throw new AppError(403, "You do not have permission to assign or reassign leads.", "FORBIDDEN");
+      if (assignedStaffId !== actor.membershipId) {
+        await logAudit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, leadId, context, { recordType: "LEAD", recordId: leadId, reason: "staff_assignment_target_not_self" });
+        throw new AppError(403, "You do not have permission to assign or reassign leads.", "CANNOT_REASSIGN_WITHOUT_PERMISSION");
+      }
+      return this.claim(actor, leadId, context);
     }
     const existing = await prisma.lead.findFirst({ where: { id: leadId, businessId: actor.businessId, deletedAt: null } });
     if (!existing) throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
@@ -326,6 +332,76 @@ export const leadService = {
       assignedStaffId: updated.assignedStaffId,
       staffMembershipIds: [existing.assignedStaffId, updated.assignedStaffId],
       payload: { lead: updated, changes: assignmentMetadata },
+    });
+    return updated;
+  },
+
+  async claim(actor: LeadActor, leadId: string, context: Omit<AuditInput, "action">) {
+    const existing = await prisma.lead.findFirst({ where: { id: leadId, businessId: actor.businessId, deletedAt: null } });
+    if (!existing) throw new AppError(404, "Lead not found", "LEAD_NOT_FOUND");
+    if (existing.assignedStaffId && existing.assignedStaffId !== actor.membershipId) {
+      await logAudit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, leadId, context, {
+        recordType: "LEAD",
+        recordId: leadId,
+        previousAssignedStaffId: existing.assignedStaffId,
+        attemptedAssignedStaffId: actor.membershipId,
+      });
+      throw new AppError(409, "This lead is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
+    }
+    if (existing.assignedStaffId === actor.membershipId) return prisma.lead.findUniqueOrThrow({ where: { id: leadId }, include: leadInclude });
+    await validateAssignee(actor.businessId, actor.membershipId);
+    const updated = await prisma.$transaction(async (tx) => {
+      const lead = await tx.lead.update({
+        where: { id: leadId },
+        data: { assignedStaffId: actor.membershipId },
+        include: leadInclude,
+      });
+      await tx.leadActivity.create({
+        data: {
+          businessId: actor.businessId,
+          leadId,
+          actorUserId: actor.userId,
+          action: LeadActivityAction.LEAD_ASSIGNED,
+          metadata: asJson({
+            previousAssignedStaffId: null,
+            newAssignedStaffId: actor.membershipId,
+            assignedByUserId: actor.userId,
+            assignedByMembershipId: actor.membershipId,
+            reason: "CLAIM_UNASSIGNED_WORK",
+          }),
+        },
+      });
+      return lead;
+    });
+    await Promise.all([
+      invalidateLeadCache(actor.businessId, leadId),
+      logAudit(actor, AuditAction.LEAD_CLAIMED_BY_STAFF, leadId, context, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        targetMembershipId: actor.membershipId,
+        recordType: "LEAD",
+        recordId: leadId,
+        previousAssignedStaffId: null,
+        newAssignedStaffId: actor.membershipId,
+        reason: "CLAIM_UNASSIGNED_WORK",
+      }),
+    ]);
+    realtimeService.publish({
+      type: "business.lead.claimed",
+      businessId: actor.businessId,
+      leadId,
+      assignedStaffId: updated.assignedStaffId,
+      staffMembershipIds: [updated.assignedStaffId],
+      payload: { lead: updated, previousAssignedStaffId: null, newAssignedStaffId: updated.assignedStaffId },
+    });
+    realtimeService.publish({
+      type: "lead.updated",
+      businessId: actor.businessId,
+      leadId,
+      assignedStaffId: updated.assignedStaffId,
+      staffMembershipIds: [updated.assignedStaffId],
+      payload: { lead: updated, changes: { assignedStaffId: updated.assignedStaffId } },
     });
     return updated;
   },

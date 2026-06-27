@@ -328,13 +328,16 @@ function withAvailableActionsList<T extends { status: AppointmentStatus; endTime
 function accessWhere(actor: AppointmentActor): Prisma.AppointmentWhereInput {
   return {
     businessId: actor.businessId,
-    ...(actor.role === BusinessRole.STAFF ? { assignedStaffId: actor.membershipId } : {}),
+    ...(actor.role === BusinessRole.STAFF ? { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } : {}),
   };
 }
 
 function assignedStaffFilter(actor: AppointmentActor, requestedAssignedStaffId?: string) {
-  if (actor.role === BusinessRole.STAFF) return { assignedStaffId: actor.membershipId };
-  return requestedAssignedStaffId ? { assignedStaffId: requestedAssignedStaffId } : {};
+  if (actor.role !== BusinessRole.STAFF) return requestedAssignedStaffId ? { assignedStaffId: requestedAssignedStaffId } : {};
+  if (!requestedAssignedStaffId) return {};
+  return requestedAssignedStaffId === actor.membershipId
+    ? { assignedStaffId: actor.membershipId }
+    : { AND: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: requestedAssignedStaffId }] };
 }
 
 async function validateBusiness(actor: AppointmentActor, tx: Prisma.TransactionClient = prisma) {
@@ -388,7 +391,7 @@ async function validateAssignee(businessId: string, assignedStaffId: string | nu
     },
     include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } },
   });
-  if (!member) throw new AppError(404, "The selected staff member is not available for this business.", "INVALID_ASSIGNED_STAFF");
+  if (!member) throw new AppError(404, "This team member cannot receive assigned work.", "INVALID_ASSIGNMENT_TARGET");
   return member;
 }
 
@@ -991,6 +994,7 @@ async function markDueAppointmentsForOutcome(actor: AppointmentActor, appointmen
             action: AuditAction.APPOINTMENT_NOTIFICATION_CREATED,
             businessId: actor.businessId,
             userId: actor.userId,
+            actorMembershipId: actor.membershipId,
             metadata: json({
               appointmentId: record.id,
               notificationId: notification.id,
@@ -1027,6 +1031,7 @@ async function audit(
     action,
     businessId: actor.businessId,
     userId: actor.userId,
+    actorMembershipId: actor.membershipId,
     metadata: json({ businessId: actor.businessId, appointmentId, actorUserId: actor.userId, actorMembershipId: actor.membershipId, ...metadata }),
   });
 }
@@ -1133,6 +1138,7 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
             action: AuditAction.APPOINTMENT_NOTIFICATION_CREATED,
             businessId: actor.businessId,
             userId: actor.userId,
+            actorMembershipId: actor.membershipId,
             metadata: json({
               appointmentId: created.id,
               notificationId: notification.id,
@@ -1156,6 +1162,7 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
           action: AuditAction.APPOINTMENT_STAFF_CONFLICT_DETECTED,
           businessId: actor.businessId,
           userId: actor.userId,
+          actorMembershipId: actor.membershipId,
           metadata: json({
             appointmentId: created.id,
             assignedStaffId: created.assignedStaffId,
@@ -1181,6 +1188,7 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
           action: AuditAction.APPOINTMENT_SAFE_CONFIRMATION_REJECTED,
           businessId: actor.businessId,
           userId: actor.userId,
+          actorMembershipId: actor.membershipId,
           metadata: json({
             appointmentId: created.id,
             businessId: actor.businessId,
@@ -1804,6 +1812,17 @@ export const appointmentService = {
   },
 
   async assign(actor: AppointmentActor, appointmentId: string, assignedStaffId: string | null, context: Omit<AuditInput, "action">) {
+    if (actor.role === BusinessRole.STAFF) {
+      if (assignedStaffId !== actor.membershipId) {
+        await audit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, appointmentId, context, {
+          recordType: "APPOINTMENT",
+          recordId: appointmentId,
+          reason: "staff_assignment_target_not_self",
+        });
+        throw new AppError(403, "You do not have permission to reassign this appointment.", "CANNOT_REASSIGN_WITHOUT_PERMISSION");
+      }
+      return this.claim(actor, appointmentId, context);
+    }
     requireManager(actor);
     const existing = await loadAppointment(actor, appointmentId);
     await validateAssignee(actor.businessId, assignedStaffId);
@@ -1893,6 +1912,77 @@ export const appointmentService = {
       ...(shouldAutoConfirm ? [publishAndInvalidate(actor, "business.appointment.confirmed", updated)] : []),
     ]);
     await publishNotificationEvents(actor, updated, assignmentNotifications);
+    return withAvailableActions(updated);
+  },
+
+  async claim(actor: AppointmentActor, appointmentId: string, context: Omit<AuditInput, "action">) {
+    const existing = await prisma.appointment.findFirst({ where: { id: appointmentId, businessId: actor.businessId }, include: appointmentInclude });
+    if (!existing) throw new AppError(404, "Appointment not found.", "APPOINTMENT_NOT_FOUND");
+    if (existing.assignedStaffId && existing.assignedStaffId !== actor.membershipId) {
+      await audit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, appointmentId, context, {
+        recordType: "APPOINTMENT",
+        recordId: appointmentId,
+        previousAssignedStaffId: existing.assignedStaffId,
+        attemptedAssignedStaffId: actor.membershipId,
+      });
+      throw new AppError(409, "This appointment is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
+    }
+    if (existing.assignedStaffId === actor.membershipId) return withAvailableActions(existing);
+    if (TERMINAL_APPOINTMENT_STATUSES.has(existing.status)) {
+      const code = existing.status === AppointmentStatus.CANCELLED ? "CANNOT_CLAIM_CANCELLED_WORK" : "CANNOT_CLAIM_COMPLETED_WORK";
+      throw new AppError(409, "This appointment can no longer be claimed.", code);
+    }
+    await validateAssignee(actor.businessId, actor.membershipId);
+    const durationMinutes = Math.max(1, Math.round((existing.endTime.getTime() - existing.startTime.getTime()) / 60_000));
+    const availability = await checkSlot({
+      businessId: actor.businessId,
+      serviceId: existing.serviceId ?? undefined,
+      date: dateInTimezone(existing.startTime, existing.timezone),
+      time: timeInTimezone(existing.startTime, existing.timezone),
+      timezone: existing.timezone,
+      assignedStaffId: actor.membershipId,
+      durationMinutes: existing.service?.durationMinutes ?? durationMinutes,
+      excludeAppointmentId: appointmentId,
+    });
+    if (!availability.available && availability.reason === "APPOINTMENT_STAFF_UNAVAILABLE") {
+      throw new AppError(409, "You already have another appointment at this time.", "STAFF_SCHEDULE_CONFLICT", { availability });
+    }
+    if (!availability.available) {
+      throw new AppError(422, availability.message ?? "Appointment slot is unavailable.", availability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE", { availability });
+    }
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.appointment.update({
+        where: { id: appointmentId },
+        data: { assignedStaffId: actor.membershipId, updatedById: actor.userId },
+        include: appointmentInclude,
+      });
+      await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_STAFF_ASSIGNED, "Appointment claimed by staff.", {
+        previousAssignedStaffId: null,
+        newAssignedStaffId: actor.membershipId,
+        reason: "CLAIM_UNASSIGNED_WORK",
+      });
+      await logLeadAppointmentActivity(tx, actor, record.leadId, LeadActivityAction.APPOINTMENT_ASSIGNED, {
+        appointmentId,
+        previousAssignedStaffId: null,
+        newAssignedStaffId: actor.membershipId,
+        reason: "CLAIM_UNASSIGNED_WORK",
+      });
+      return record;
+    }, TRANSACTION_OPTIONS);
+    await Promise.all([
+      audit(actor, AuditAction.APPOINTMENT_CLAIMED_BY_STAFF, updated.id, context, {
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        targetMembershipId: actor.membershipId,
+        recordType: "APPOINTMENT",
+        recordId: appointmentId,
+        previousAssignedStaffId: null,
+        newAssignedStaffId: actor.membershipId,
+        reason: "CLAIM_UNASSIGNED_WORK",
+      }),
+      publishAndInvalidate(actor, "business.appointment.claimed", updated),
+      publishAndInvalidate(actor, "business.appointment.assigned", updated),
+    ]);
     return withAvailableActions(updated);
   },
 

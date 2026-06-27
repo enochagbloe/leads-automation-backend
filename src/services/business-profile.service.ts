@@ -214,6 +214,7 @@ export const businessProfileService = {
             action: AuditAction.BUSINESS_PROFILE_UPDATED,
             businessId: actor.businessId,
             userId: actor.userId,
+            actorMembershipId: actor.membershipId,
             metadata: jsonValue({
               businessId: actor.businessId,
               actorUserId: actor.userId,

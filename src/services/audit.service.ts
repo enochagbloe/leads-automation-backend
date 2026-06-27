@@ -5,6 +5,7 @@ export type AuditInput = {
   action: AuditAction;
   businessId?: string | null;
   userId?: string | null;
+  actorMembershipId?: string | null;
   metadata?: Prisma.InputJsonValue;
   ipAddress?: string;
   userAgent?: string;

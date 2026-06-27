@@ -30,6 +30,7 @@ enum UserAccountType {
 enum MembershipStatus {
   ACTIVE
   INVITED
+  SUSPENDED_BY_PLAN
   DISABLED
   REMOVED
 }
@@ -487,6 +488,20 @@ enum AuditAction {
   STAFF_ACCOUNT_CREATED_FROM_INVITE
   BUSINESS_MEMBER_ACTIVATED_FROM_INVITE
   STAFF_INVITE_ACCEPTANCE_BLOCKED
+  BUSINESS_MEMBER_DISABLED
+  BUSINESS_MEMBER_RESTORED
+  BUSINESS_MEMBER_REMOVED
+  BUSINESS_MEMBER_SUSPENDED_BY_PLAN
+  BUSINESS_MEMBER_RESTORED_AFTER_PLAN_CHANGE
+  BUSINESS_MEMBER_ACCESS_BLOCKED
+  ASSIGNED_RECORDS_UNASSIGNED_DUE_TO_MEMBER_STATUS
+  LEAD_CLAIMED_BY_STAFF
+  CONVERSATION_CLAIMED_BY_STAFF
+  APPOINTMENT_CLAIMED_BY_STAFF
+  AI_HANDOFF_TASK_CLAIMED_BY_STAFF
+  WORK_REASSIGNED_BY_MANAGER
+  WORK_ASSIGNMENT_BLOCKED
+  STAFF_OPERATIONAL_PROFILE_UPDATED
 }
 
 enum DayOfWeek {
@@ -712,15 +727,31 @@ model BusinessPolicy {
 }
 
 model BusinessMember {
-  id          String           @id @default(cuid())
-  businessId  String
-  userId      String
-  role        BusinessRole
-  status      MembershipStatus @default(ACTIVE)
-  joinedAt    DateTime?
-  invitedById String?
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id                         String           @id @default(cuid())
+  businessId                 String
+  userId                     String
+  role                       BusinessRole
+  status                     MembershipStatus @default(ACTIVE)
+  joinedAt                   DateTime?
+  invitedById                String?
+  disabledAt                 DateTime?
+  disabledByMembershipId     String?
+  disabledReason             String?
+  removedAt                  DateTime?
+  removedByMembershipId      String?
+  removedReason              String?
+  suspendedAt                DateTime?
+  suspendedByMembershipId    String?
+  suspendedReason            String?
+  restoredAt                 DateTime?
+  restoredByMembershipId     String?
+  positionTitle              String?
+  specialties                String[]         @default([])
+  serviceTags                String[]         @default([])
+  isAiHandoffEligible        Boolean          @default(true)
+  aiHandoffPriority          Int?
+  createdAt                  DateTime         @default(now())
+  updatedAt                  DateTime         @updatedAt
 
   business                     Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
   user                         User                   @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
@@ -737,6 +768,9 @@ model BusinessMember {
   @@index([userId])
   @@index([businessId, status])
   @@index([invitedById])
+  @@index([disabledByMembershipId])
+  @@index([removedByMembershipId])
+  @@index([suspendedByMembershipId])
 }
 
 model BusinessInvitation {
@@ -878,20 +912,22 @@ model RefreshToken {
 }
 
 model AuditLog {
-  id         String      @id @default(cuid())
-  businessId String?
-  userId     String?
-  action     AuditAction
-  metadata   Json?
-  ipAddress  String?
-  userAgent  String?
-  createdAt  DateTime    @default(now())
+  id                String      @id @default(cuid())
+  businessId        String?
+  userId            String?
+  actorMembershipId String?
+  action            AuditAction
+  metadata          Json?
+  ipAddress         String?
+  userAgent         String?
+  createdAt         DateTime    @default(now())
 
   business Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
   user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([businessId, createdAt])
   @@index([userId, createdAt])
+  @@index([actorMembershipId, createdAt])
 }
 
 model Lead {

@@ -280,6 +280,7 @@ export const availabilityService = {
             action: AuditAction.BUSINESS_AVAILABILITY_UPDATED,
             businessId: actor.businessId,
             userId: actor.userId,
+            actorMembershipId: actor.membershipId,
             metadata: json({
               businessId: actor.businessId,
               actorUserId: actor.userId,

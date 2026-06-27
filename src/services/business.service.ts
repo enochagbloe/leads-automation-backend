@@ -9,6 +9,8 @@ import { emailService } from "./email.service";
 import { canAddStaff, canCreateBusiness, updateStaffUsage } from "../middleware/subscription-guard";
 import { getAccountUsage, getPlanFeatures, getPlanLimits, subscriptionService } from "./subscription.service";
 import { accountPolicyService } from "./account-policy.service";
+import { permissionFlags } from "./permission.service";
+import { cacheService } from "./cache.service";
 
 const INVITATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -115,17 +117,65 @@ export const businessService = {
   },
 
   async listMemberships(userId: string) {
-    return prisma.businessMember.findMany({
-      where: { userId, status: MembershipStatus.ACTIVE },
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { accountType: true, canCreateBusiness: true } });
+    const memberships = await prisma.businessMember.findMany({
+      where: { userId, status: { not: MembershipStatus.REMOVED }, business: { deletedAt: null } },
       orderBy: { joinedAt: "asc" },
       select: {
         id: true,
+        businessId: true,
         role: true,
         status: true,
+        disabledAt: true,
+        disabledReason: true,
+        removedAt: true,
+        removedReason: true,
+        suspendedAt: true,
+        suspendedReason: true,
+        restoredAt: true,
+        positionTitle: true,
+        specialties: true,
+        serviceTags: true,
+        isAiHandoffEligible: true,
+        aiHandoffPriority: true,
         joinedAt: true,
+        user: { select: { id: true, firstName: true, lastName: true, email: true } },
         business: true,
       },
     });
+    return {
+      memberships: memberships.map((membership) => ({
+        membershipId: membership.id,
+        businessId: membership.businessId,
+        businessName: membership.business.name,
+        role: membership.role,
+        status: membership.status,
+        disabledAt: membership.disabledAt,
+        disabledReason: membership.disabledReason,
+        removedAt: membership.removedAt,
+        removedReason: membership.removedReason,
+        suspendedAt: membership.suspendedAt,
+        suspendedReason: membership.suspendedReason,
+        restoredAt: membership.restoredAt,
+        positionTitle: membership.positionTitle,
+        specialties: membership.specialties,
+        serviceTags: membership.serviceTags,
+        isAiHandoffEligible: membership.isAiHandoffEligible,
+        aiHandoffPriority: membership.aiHandoffPriority,
+        userId: membership.user.id,
+        name: `${membership.user.firstName} ${membership.user.lastName}`.trim(),
+        email: membership.user.email,
+        accountType: user?.accountType ?? UserAccountType.OWNER_CAPABLE,
+        canCreateBusiness: user?.canCreateBusiness ?? true,
+        lastAccessedAt: null,
+        business: membership.business,
+        permissions: permissionFlags({
+          role: membership.role,
+          membershipStatus: membership.status,
+          canCreateBusiness: user?.canCreateBusiness ?? true,
+        }),
+      })),
+    };
   },
 
   async inviteMember(
@@ -267,6 +317,11 @@ export const businessService = {
       return member;
     });
     await updateStaffUsage(invitedBusiness.businessAccountId, 1, invitation.businessId);
+    await Promise.all([
+      cacheService.delByPattern(`business:${invitation.businessId}:members:*`),
+      cacheService.delByPattern(`business:${invitation.businessId}:team:*`),
+      cacheService.delByPattern(`user:${user.id}:business-memberships*`),
+    ]);
     await auditService.log({
       ...context,
       action: AuditAction.STAFF_INVITATION_ACCEPTED,

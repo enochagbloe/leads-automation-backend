@@ -30,6 +30,8 @@ The centralized `EmailService` provides verification, password-reset, and welcom
 
 The application adds conservative Prisma pool defaults to `DATABASE_URL` at runtime: `DB_CONNECTION_LIMIT=3`, `DB_POOL_TIMEOUT_SECONDS=30`, and `DB_CONNECT_TIMEOUT_SECONDS=15`. These reduce connection pressure on pooled Neon databases and can be overridden per environment.
 
+Caching uses Redis when `REDIS_URL` is configured. Production deployments with multiple instances or workers should set `REDIS_URL` so setup, inbox, staff, and AI context caches are shared across processes. If configured Redis is unavailable, cache reads return a miss so callers reload from PostgreSQL instead of trusting per-process memory. Without `REDIS_URL`, the API uses a bounded in-memory cache with periodic expiry cleanup; this is fine for local development but is not a shared production cache.
+
 WhatsApp inbound processing defaults to `WHATSAPP_PROVIDER_MODE=mock`. Mock mode does not require Meta credentials and exposes the development simulator outside production. Live mode requires every `META_*` credential at startup and verifies incoming `x-hub-signature-256` signatures. The fallback verification token in mock mode is `bizreplyai-mock-verify-token` when `META_WHATSAPP_VERIFY_TOKEN` is empty.
 
 Live WhatsApp credentials use the dedicated `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`, not either JWT secret. Keep its key ID and key stable. To rotate it, assign a new `WHATSAPP_CREDENTIAL_KEY_ID` and key, then retain previous ID/key pairs in `WHATSAPP_CREDENTIAL_DECRYPTION_KEYS` until credentials have been read and transparently re-encrypted.

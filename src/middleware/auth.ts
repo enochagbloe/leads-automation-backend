@@ -17,20 +17,31 @@ export const authenticate: RequestHandler = async (req, _res, next) => {
       include: {
         memberships: {
           where: {
-            status: MembershipStatus.ACTIVE,
             business: { deletedAt: null },
             ...(requestedBusinessId ? { businessId: requestedBusinessId } : {}),
           },
           orderBy: { joinedAt: "asc" },
-          take: 1,
+          ...(requestedBusinessId ? { take: 1 } : {}),
           include: { business: true },
         },
       },
     });
     if (!user || user.status !== UserStatus.ACTIVE || user.deletedAt) throw new AppError(401, "Authentication required", "UNAUTHENTICATED");
-    const membership = user.memberships[0];
+    const membership = user.memberships.find((item) => item.status === MembershipStatus.ACTIVE) ?? user.memberships[0];
     const role = user.platformRole ?? membership?.role;
-    if (requestedBusinessId && !membership) throw new AppError(403, "You do not have access to this business", "BUSINESS_ACCESS_DENIED");
+    if (requestedBusinessId && !membership) throw new AppError(403, "You do not have access to this business", "BUSINESS_MEMBERSHIP_NOT_FOUND");
+    if (membership?.status === MembershipStatus.INVITED) {
+      throw new AppError(403, "You must accept the invitation before accessing this business.", "MEMBERSHIP_INVITE_NOT_ACCEPTED");
+    }
+    if (membership?.status === MembershipStatus.SUSPENDED_BY_PLAN) {
+      throw new AppError(403, "Your access to this business is currently limited by your organization’s subscription plan. Contact your organization for further information.", "MEMBERSHIP_SUSPENDED_BY_PLAN");
+    }
+    if (membership?.status === MembershipStatus.DISABLED) {
+      throw new AppError(403, "Your access to this business has been disabled. Contact your organization for further information.", "MEMBERSHIP_DISABLED");
+    }
+    if (membership?.status === MembershipStatus.REMOVED) {
+      throw new AppError(403, "You do not have access to this business.", "MEMBERSHIP_REMOVED");
+    }
     if (!role) throw new AppError(403, "No role assigned", "FORBIDDEN");
     req.auth = {
       userId: user.id,

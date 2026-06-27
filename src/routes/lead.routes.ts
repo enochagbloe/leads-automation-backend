@@ -21,5 +21,6 @@ leadRouter.post("/", mutationLimiter, validate(createLeadSchema), leadController
 leadRouter.get("/:id", leadController.detail);
 leadRouter.patch("/:id", mutationLimiter, validate(updateLeadSchema), leadController.update);
 leadRouter.patch("/:id/assign", mutationLimiter, validate(assignLeadSchema), leadController.assign);
+leadRouter.patch("/:id/claim", mutationLimiter, leadController.claim);
 leadRouter.patch("/:id/status", mutationLimiter, validate(updateLeadStatusSchema), leadController.updateStatus);
 leadRouter.delete("/:id", mutationLimiter, leadController.remove);

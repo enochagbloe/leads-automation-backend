@@ -81,6 +81,7 @@ async function audit(actor: NotificationActor, action: AuditAction, notification
     action,
     businessId: actor.businessId,
     userId: actor.userId,
+    actorMembershipId: actor.membershipId,
     metadata: json({
       notificationId: notification.id,
       businessId: actor.businessId,

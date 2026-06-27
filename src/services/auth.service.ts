@@ -6,6 +6,7 @@ import { AppError } from "../utils/errors";
 import { makeBusinessSlug } from "../utils/slug";
 import { auditService, AuditInput } from "./audit.service";
 import { emailService } from "./email.service";
+import { permissionFlags, permissionList } from "./permission.service";
 import { getAccountUsage, getBusinessUsage, getPlanFeatures, getPlanLimits, subscriptionService } from "./subscription.service";
 import { tokenService } from "./token.service";
 
@@ -30,14 +31,6 @@ async function getUserBusinessContext(userId: string) {
     include: { business: true },
   });
   return { business: membership?.business ?? null, membership };
-}
-
-function permissionList(role?: BusinessRole | PlatformRole) {
-  if (role === PlatformRole.PLATFORM_ADMIN) return ["platform:admin"];
-  if (role === BusinessRole.BUSINESS_OWNER) return ["business:manage", "subscription:manage", "members:manage", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
-  if (role === BusinessRole.MANAGER) return ["business:manage", "members:view", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
-  if (role === BusinessRole.STAFF) return ["business:view", "leads:view_assigned", "leads:create", "leads:update_assigned", "conversations:view_assigned", "conversations:create_assigned", "conversations:send_assigned", "conversations:update_status_assigned"];
-  return [];
 }
 
 export const authService = {
@@ -166,7 +159,8 @@ export const authService = {
       include: {
         memberships: {
           where: {
-            status: MembershipStatus.ACTIVE,
+            status: { not: MembershipStatus.REMOVED },
+            business: { deletedAt: null },
           },
           include: { business: { include: { businessAccount: true } } },
           orderBy: { joinedAt: "asc" },
@@ -176,7 +170,7 @@ export const authService = {
     if (!user) throw new AppError(401, "Authentication required", "UNAUTHENTICATED");
     const membership = activeBusinessId
       ? user.memberships.find((item) => item.businessId === activeBusinessId)
-      : user.memberships[0];
+      : user.memberships.find((item) => item.status === MembershipStatus.ACTIVE) ?? user.memberships[0];
     const role = user.platformRole ?? membership?.role;
     const activeBusiness = membership?.business ?? null;
     const account = activeBusiness?.businessAccount ?? null;
@@ -189,16 +183,74 @@ export const authService = {
         .filter((item) => item.business.businessAccountId === account.id)
         .map((item) => item.business)
       : [];
+    const memberships = user.memberships.map((item) => ({
+      membershipId: item.id,
+      businessId: item.businessId,
+      businessName: item.business.name,
+      role: item.role,
+      status: item.status,
+      disabledAt: item.disabledAt,
+      disabledReason: item.disabledReason,
+      removedAt: item.removedAt,
+      removedReason: item.removedReason,
+      suspendedAt: item.suspendedAt,
+      suspendedReason: item.suspendedReason,
+      restoredAt: item.restoredAt,
+      positionTitle: item.positionTitle,
+      specialties: item.specialties,
+      serviceTags: item.serviceTags,
+      isAiHandoffEligible: item.isAiHandoffEligible,
+      aiHandoffPriority: item.aiHandoffPriority,
+      accountType: user.accountType,
+      canCreateBusiness: user.canCreateBusiness,
+      joinedAt: item.joinedAt,
+      lastAccessedAt: null,
+      business: item.business,
+      permissions: permissionFlags({ role: item.role, membershipStatus: item.status, canCreateBusiness: user.canCreateBusiness }),
+    }));
     return {
       user: publicUser(user),
       account,
       businesses,
+      memberships,
       activeBusiness,
       membership: membership ? {
         id: membership.id,
         role: membership.role,
         status: membership.status,
+        disabledAt: membership.disabledAt,
+        removedAt: membership.removedAt,
+        suspendedAt: membership.suspendedAt,
+        positionTitle: membership.positionTitle,
+        specialties: membership.specialties,
+        serviceTags: membership.serviceTags,
+        isAiHandoffEligible: membership.isAiHandoffEligible,
+        aiHandoffPriority: membership.aiHandoffPriority,
         joinedAt: membership.joinedAt,
+      } : null,
+      activeBusinessContext: activeBusiness && membership ? {
+        business: {
+          id: activeBusiness.id,
+          name: activeBusiness.name,
+        },
+        membership: {
+          id: membership.id,
+          role: membership.role,
+          status: membership.status,
+          disabledAt: membership.disabledAt,
+          removedAt: membership.removedAt,
+          suspendedAt: membership.suspendedAt,
+          positionTitle: membership.positionTitle,
+          specialties: membership.specialties,
+          serviceTags: membership.serviceTags,
+          isAiHandoffEligible: membership.isAiHandoffEligible,
+          aiHandoffPriority: membership.aiHandoffPriority,
+        },
+        account: {
+          accountType: user.accountType,
+          canCreateBusiness: user.canCreateBusiness,
+        },
+        permissions: permissionFlags({ role, membershipStatus: membership.status, canCreateBusiness: user.canCreateBusiness }),
       } : null,
       role,
       subscription: subscription ? {
@@ -223,6 +275,7 @@ export const authService = {
       limits: subscription ? getPlanLimits(subscription.plan) : null,
       features: subscription ? getPlanFeatures(subscription.plan) : null,
       permissions: permissionList(role),
+      permissionFlags: permissionFlags({ role, membershipStatus: membership?.status ?? null, canCreateBusiness: user.canCreateBusiness }),
     };
   },
 };
