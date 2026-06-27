@@ -1,7 +1,7 @@
 import { BusinessRole } from "@prisma/client";
 import { Router } from "express";
 import { businessController } from "../controllers/business.controller";
-import { authenticate } from "../middleware/auth";
+import { authenticate, authenticateUser } from "../middleware/auth";
 import { requireBusiness, requireRole } from "../middleware/rbac";
 import { emailLimiter, mutationLimiter } from "../middleware/rate-limit";
 import { validate } from "../middleware/validate";
@@ -10,7 +10,7 @@ import { createBusinessSchema } from "../validation/business.schemas";
 
 export const businessRouter = Router();
 
-businessRouter.get("/", authenticate, businessController.listMine);
+businessRouter.get("/", authenticateUser, businessController.listMine);
 businessRouter.post("/", authenticate, mutationLimiter, validate(createBusinessSchema), businessController.create);
 businessRouter.post("/invitations/accept", emailLimiter, validate(acceptInvitationSchema), businessController.acceptInvitation);
 businessRouter.post(

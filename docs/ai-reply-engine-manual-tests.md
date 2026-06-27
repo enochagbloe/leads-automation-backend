@@ -219,6 +219,147 @@ X-Business-Id: <activeBusinessId>
 66. Resume AI on a closed conversation.
     Expected: rejected; closed conversations do not resume AI.
 
+## Staff Multi-Business Access
+
+- Staff-only user logs in after accepting an invite.
+    Expected: login response includes `accountType = STAFF_ONLY`, `canCreateBusiness = false`, `memberships`, and an active business context.
+
+- Staff-only user calls `GET /api/businesses` without `X-Business-Id`.
+    Expected: response returns `{ memberships: [...] }` with membership IDs, business IDs, roles, statuses, and permission flags.
+
+- User belongs to two businesses and switches `X-Business-Id`.
+    Expected: `/api/auth/me` and business-scoped endpoints return data only for the selected business.
+
+- Staff member calls lead/conversation/appointment list for Business A.
+    Expected: only records assigned to that staff membership in Business A are returned.
+
+- Same staff member calls the same endpoints for Business B.
+    Expected: only records assigned to that staff membership in Business B are returned.
+
+- Staff member tries to access Business B using Business A records or membership IDs.
+    Expected: `BUSINESS_ACCESS_DENIED`, not cross-business data.
+
+- User selects a business where the membership is `INVITED`.
+    Expected: business-scoped request returns `MEMBERSHIP_INVITE_NOT_ACCEPTED`.
+
+- User selects a business where the membership is `SUSPENDED_BY_PLAN`.
+    Expected: business-scoped request returns `MEMBERSHIP_SUSPENDED_BY_PLAN`.
+
+- User selects a business where the membership is `DISABLED`.
+    Expected: business-scoped request returns `MEMBERSHIP_DISABLED`.
+
+- User selects a business where the membership is `REMOVED` or no membership exists.
+    Expected: business-scoped request returns `MEMBERSHIP_REMOVED` or `BUSINESS_MEMBERSHIP_NOT_FOUND`.
+
+- Audit a lead/conversation/appointment/notification action performed by a staff member.
+    Expected: `AuditLog.actorMembershipId` contains the active `BusinessMember.id`.
+
+## Staff Access Lifecycle
+
+- Owner disables a staff member.
+    Expected: membership status becomes `DISABLED`, `disabledAt` and `disabledByMembershipId` are set.
+
+- Manager tries to disable a staff member.
+    Expected: `FORBIDDEN` in V1 because team lifecycle management is owner-only.
+
+- Staff tries to disable/remove/restore a member.
+    Expected: `FORBIDDEN`.
+
+- Owner tries to disable or remove a business owner.
+    Expected: `CANNOT_DISABLE_BUSINESS_OWNER` or `CANNOT_REMOVE_BUSINESS_OWNER`.
+
+- Owner disables a staff member with assigned leads.
+    Expected: active assigned leads become unassigned and lead activity records explain the change.
+
+- Owner removes a staff member with open assigned conversations.
+    Expected: conversations become unassigned; human-handling conversations move to `NEEDS_HUMAN_REVIEW`.
+
+- Owner removes a staff member with future confirmed appointments.
+    Expected: future appointments become unassigned and confirmed appointments move to `NEEDS_HUMAN_CONFIRMATION`.
+
+- Completed, cancelled, no-show, and missed appointments assigned to removed staff.
+    Expected: appointment history is not corrupted.
+
+- Unresolved notifications for disabled or removed staff.
+    Expected: notifications are dismissed and no longer actionable for that staff member.
+
+- Disabled staff selects the business.
+    Expected: business-scoped API returns `MEMBERSHIP_DISABLED` and does not log the user out.
+
+- Removed staff selects the business.
+    Expected: business-scoped API returns `MEMBERSHIP_REMOVED` and does not log the user out.
+
+- Owner restores a disabled staff member within plan limit.
+    Expected: membership status becomes `ACTIVE`, disabled/suspended fields are cleared, and audit log is written.
+
+- Owner restores a disabled staff member while active staff count is already at the plan limit.
+    Expected: `STAFF_LIMIT_EXCEEDED`.
+
+- Plan downgrade suspension helper suspends excess non-owner members.
+    Expected: excess manager/staff memberships become `SUSPENDED_BY_PLAN`; owners remain active.
+
+- Suspended staff selects the business.
+    Expected: `MEMBERSHIP_SUSPENDED_BY_PLAN` with the contact-organization message.
+
+- AI staff eligibility helper checks inactive staff.
+    Expected: `false` for `INVITED`, `SUSPENDED_BY_PLAN`, `DISABLED`, `REMOVED`, or cross-business memberships.
+
+- Audit lifecycle actions.
+    Expected: audit logs contain `actorMembershipId`, `targetMembershipId`, previous/new statuses, reason, and affected record counts.
+
+- Realtime lifecycle events.
+    Expected: `business.member.disabled`, `business.member.restored`, `business.member.removed`, `business.member.suspended_by_plan`, `business.member.access_changed`, and `business.team.updated` emit.
+
+## Operational Staff Queues And Claims
+
+- Staff lists leads with unassigned and self-assigned records.
+    Expected: leads assigned to other staff are not returned.
+
+- Staff claims an unassigned lead.
+    Expected: `assignedStaffId` becomes actor membership id, lead activity is created, audit action `LEAD_CLAIMED_BY_STAFF` is recorded.
+
+- Staff tries to claim a lead assigned to another member.
+    Expected: `WORK_ALREADY_ASSIGNED`.
+
+- Staff lists conversations with unassigned and self-assigned records.
+    Expected: conversations assigned to other staff are not returned.
+
+- Staff claims an unassigned conversation.
+    Expected: conversation is assigned to actor membership id, system message is created, status moves to `HUMAN_HANDLING`.
+
+- Staff tries to claim a conversation assigned to another member.
+    Expected: `WORK_ALREADY_ASSIGNED`.
+
+- Staff lists appointments with unassigned and self-assigned records.
+    Expected: appointments assigned to other staff are not returned.
+
+- Staff claims an unassigned appointment without schedule conflict.
+    Expected: appointment is assigned to actor membership id and appointment activity is created.
+
+- Staff claims an unassigned appointment with a conflicting appointment at the same time.
+    Expected: `STAFF_SCHEDULE_CONFLICT`.
+
+- Staff tries to claim cancelled/completed/no-show/missed appointment.
+    Expected: `CANNOT_CLAIM_CANCELLED_WORK` or `CANNOT_CLAIM_COMPLETED_WORK`.
+
+- Staff tries to assign another member's work to themselves using assign endpoint.
+    Expected: `WORK_ALREADY_ASSIGNED` or `CANNOT_REASSIGN_WITHOUT_PERMISSION`.
+
+- Owner/manager reassigns a lead/conversation/appointment to active member.
+    Expected: succeeds only when target membership belongs to same business and is active.
+
+- Owner/manager assigns work to disabled/removed/suspended/invited member.
+    Expected: `INVALID_ASSIGNMENT_TARGET`.
+
+- Owner updates staff operational profile.
+    Expected: position title, specialties, service tags, AI handoff eligibility, and priority are saved.
+
+- Staff tries to update their own operational profile.
+    Expected: `FORBIDDEN`.
+
+- AI handoff eligibility helper for active eligible staff.
+    Expected: true only for active manager/staff with `isAiHandoffEligible = true`.
+
 67. Staff sends manual message without take-over.
     Expected: message is stored but `humanTakeover` is not automatically set.
 

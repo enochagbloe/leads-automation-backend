@@ -33,4 +33,5 @@ export const appointmentController = {
   noShow: async (req, res) => res.json(await appointmentService.noShow(actor(req), appointmentId(req), req.body.noShowReason, requestMetadata(req))),
   missed: async (req, res) => res.json(await appointmentService.missed(actor(req), appointmentId(req), req.body.missedReason, requestMetadata(req))),
   assign: async (req, res) => res.json(await appointmentService.assign(actor(req), appointmentId(req), req.body.assignedStaffId, requestMetadata(req))),
+  claim: async (req, res) => res.json(await appointmentService.claim(actor(req), appointmentId(req), requestMetadata(req))),
 } satisfies Record<string, RequestHandler>;

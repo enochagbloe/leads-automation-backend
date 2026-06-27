@@ -2,7 +2,7 @@
 
 ## Sprint Goal
 
-Sprint 7 Modules 1-5A.1 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, human review / handoff foundation, and account-type rules for owner-capable vs staff-only users.
+Sprint 7 Modules 1-5A.4 add the OpenRouter AI reply engine, business knowledge context, safe auto-replies, AI-created appointment booking requests, human review / handoff foundation, account-type rules, team invite acceptance, staff-safe multi-business access, and staff access lifecycle controls.
 
 There is no AI settings UI, AI simulator, advanced routing, AI analytics dashboard, image understanding UI, or Plus/Premium auto-confirm UI in this module.
 
@@ -212,6 +212,333 @@ BUSINESS_NOT_FOUND
 `INVITE_EMAIL_MISMATCH` means the logged-in user is not the invited email. Ask them to log in with the invited email.
 
 `USER_ALREADY_EXISTS` on signup means the invited email already has an account; show login + accept flow instead.
+
+## Staff Multi-Business Access
+
+The frontend should use the membership list as the business switcher source. There is no separate switch endpoint.
+
+List accessible businesses:
+
+```http
+GET /api/businesses
+Authorization: Bearer <accessToken>
+```
+
+This endpoint does not require `X-Business-Id`, so staff-only users can load their available businesses before selecting one.
+
+Response:
+
+```ts
+type BusinessMembershipOption = {
+  membershipId: string;
+  businessId: string;
+  businessName: string;
+  role: "BUSINESS_OWNER" | "MANAGER" | "STAFF";
+  status: "ACTIVE" | "INVITED" | "SUSPENDED_BY_PLAN" | "DISABLED" | "REMOVED";
+  disabledAt: string | null;
+  disabledReason: string | null;
+  removedAt: string | null;
+  removedReason: string | null;
+  suspendedAt: string | null;
+  suspendedReason: string | null;
+  restoredAt: string | null;
+  accountType: "OWNER_CAPABLE" | "STAFF_ONLY";
+  canCreateBusiness: boolean;
+  joinedAt: string;
+  lastAccessedAt: string | null;
+  business: Record<string, unknown>;
+  positionTitle: string | null;
+  specialties: string[];
+  serviceTags: string[];
+  isAiHandoffEligible: boolean;
+  aiHandoffPriority: number | null;
+  permissions: {
+    canViewOperationalQueues: boolean;
+    canViewLeads: boolean;
+    canViewAllOperationalLeads: boolean;
+    canClaimUnassignedLeads: boolean;
+    canAssignLeadsToSelf: boolean;
+    canReassignLeadsToOthers: boolean;
+    canManageAllLeads: boolean;
+    canViewConversations: boolean;
+    canViewAllOperationalConversations: boolean;
+    canClaimUnassignedConversations: boolean;
+    canAssignConversationsToSelf: boolean;
+    canReassignConversationsToOthers: boolean;
+    canManageAllConversations: boolean;
+    canViewAppointments: boolean;
+    canViewAllOperationalAppointments: boolean;
+    canClaimUnassignedAppointments: boolean;
+    canAssignAppointmentsToSelf: boolean;
+    canReassignAppointmentsToOthers: boolean;
+    canManageAllAppointments: boolean;
+    canViewAiHandoffTasks: boolean;
+    canClaimUnassignedAiHandoffTasks: boolean;
+    canAssignAiHandoffTasksToSelf: boolean;
+    canReassignAiHandoffTasksToOthers: boolean;
+    canManageBilling: boolean;
+    canManageTeam: boolean;
+    canManageBusinessSettings: boolean;
+    canCreateBusiness: boolean;
+  };
+};
+
+type BusinessMembershipResponse = {
+  memberships: BusinessMembershipOption[];
+};
+```
+
+Switching businesses is done by sending the selected business ID on every business-scoped request:
+
+```http
+X-Business-Id: <selectedBusinessId>
+```
+
+Do not store or send `BusinessMember.id` as `X-Business-Id`. Use `membershipId` for display/state only. Backend permissions and assignee fields still use `BusinessMember.id` where the API specifically asks for an assignee/member ID.
+
+`GET /api/auth/me` also includes:
+
+```ts
+{
+  memberships: BusinessMembershipOption[];
+  activeBusinessContext: {
+    business: { id: string; name: string };
+    membership: {
+      id: string;
+      role: "BUSINESS_OWNER" | "MANAGER" | "STAFF";
+      status: "ACTIVE" | "INVITED" | "SUSPENDED_BY_PLAN" | "DISABLED" | "REMOVED";
+    };
+    account: {
+      accountType: "OWNER_CAPABLE" | "STAFF_ONLY";
+      canCreateBusiness: boolean;
+    };
+    permissions: BusinessMembershipOption["permissions"];
+  } | null;
+  permissionFlags: BusinessMembershipOption["permissions"];
+}
+```
+
+Only `ACTIVE` memberships can access business modules. Non-active memberships are listed for clear UX state, but business-scoped API calls return controlled errors:
+
+```text
+BUSINESS_MEMBERSHIP_NOT_FOUND
+MEMBERSHIP_INVITE_NOT_ACCEPTED
+MEMBERSHIP_SUSPENDED_BY_PLAN
+MEMBERSHIP_DISABLED
+MEMBERSHIP_REMOVED
+BUSINESS_ACCESS_DENIED
+```
+
+Recommended UI behavior:
+
+- `INVITED`: show “Invitation pending” and send the user through invite acceptance.
+- `SUSPENDED_BY_PLAN`: show “Access limited by plan” and ask them to contact the business owner.
+- `DISABLED`: show “Access disabled” and ask them to contact the business owner.
+- `REMOVED`: remove or hide the business from active switcher choices after refetch.
+- `BUSINESS_MEMBERSHIP_NOT_FOUND`: clear the selected business and refetch `/api/businesses`.
+
+Staff users can belong to multiple businesses. A staff member can see assigned and unassigned operational work inside the selected business, but not work already assigned to another staff member. Switching `X-Business-Id` must not leak data from another business.
+
+## Operational Queues And Claiming Work
+
+Staff queue visibility:
+
+- leads: assigned to the staff member or unassigned
+- conversations: assigned to the staff member or unassigned
+- appointments: assigned to the staff member or unassigned
+- AI handoff tasks: use unassigned or self-assigned `NEEDS_HUMAN_REVIEW` conversations for now
+
+Owners and managers can still see all operational work.
+
+Claim endpoints:
+
+```http
+PATCH /api/business/leads/:leadId/claim
+PATCH /api/business/conversations/:conversationId/claim
+PATCH /api/business/appointments/:appointmentId/claim
+```
+
+Legacy aliases also exist:
+
+```http
+PATCH /api/leads/:leadId/claim
+PATCH /api/conversations/:conversationId/claim
+```
+
+All claim requests require:
+
+```http
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+Claim behavior:
+
+- unassigned work becomes assigned to the actor’s `BusinessMember.id`
+- staff cannot claim work already assigned to another member
+- owners/managers should use the existing assignment endpoints for reassignment
+- staff cannot unassign or reassign after claiming
+
+Already-assigned error:
+
+```json
+{
+  "error": {
+    "code": "WORK_ALREADY_ASSIGNED",
+    "message": "This item is already assigned to another team member."
+  }
+}
+```
+
+Appointment claim may also return:
+
+```text
+STAFF_SCHEDULE_CONFLICT
+CANNOT_CLAIM_COMPLETED_WORK
+CANNOT_CLAIM_CANCELLED_WORK
+```
+
+Assignment target validation now returns:
+
+```text
+INVALID_ASSIGNMENT_TARGET
+```
+
+Staff operational profile endpoint:
+
+```http
+PATCH /api/business/members/:memberId/operational-profile
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "positionTitle": "Site Supervisor",
+  "specialties": ["site visit", "construction complaint", "inspection"],
+  "serviceTags": ["construction", "site inspection"],
+  "isAiHandoffEligible": true,
+  "aiHandoffPriority": 1
+}
+```
+
+Owner-only in V1. Use this data later for Plus team-aware AI routing.
+
+## Staff Access Lifecycle
+
+Owner-only V1 endpoints:
+
+```http
+PATCH /api/business/members/:memberId/disable
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "reason": "No longer active on this project"
+}
+```
+
+```http
+PATCH /api/business/members/:memberId/restore
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+```http
+PATCH /api/business/members/:memberId/remove
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+Content-Type: application/json
+```
+
+```json
+{
+  "reason": "Staff no longer works with the business"
+}
+```
+
+`memberId` is the `BusinessMember.id`, not the `User.id`.
+
+Managers and staff cannot use these endpoints in V1. Existing team invite management is owner-only, so lifecycle management follows the same permission rule.
+
+Disabled, removed, or plan-suspended members lose normal business access but their user account and historical membership record remain. The backend also safely unassigns active work:
+
+- active leads assigned to the member become unassigned
+- open conversations assigned to the member become unassigned
+- human-handling conversations move to `NEEDS_HUMAN_REVIEW`
+- future appointments assigned to the member become unassigned
+- confirmed future appointments move to `NEEDS_HUMAN_CONFIRMATION`
+- unresolved notifications for that member are dismissed
+
+Lifecycle response:
+
+```ts
+{
+  member: BusinessMembershipOption;
+  affectedRecords?: {
+    affectedLeads: number;
+    affectedConversations: number;
+    affectedAppointments: number;
+    affectedNotifications: number;
+  };
+}
+```
+
+Restore can fail if the active staff limit would be exceeded:
+
+```json
+{
+  "error": {
+    "code": "STAFF_LIMIT_EXCEEDED",
+    "message": "Your current plan does not allow more active staff members. Upgrade your plan or disable another staff member.",
+    "allowedActiveMembers": 2,
+    "currentActiveMembers": 2
+  }
+}
+```
+
+Lifecycle errors:
+
+```text
+BUSINESS_MEMBER_NOT_FOUND
+BUSINESS_MEMBER_ALREADY_DISABLED
+BUSINESS_MEMBER_ALREADY_REMOVED
+BUSINESS_MEMBER_ALREADY_ACTIVE
+CANNOT_REMOVE_BUSINESS_OWNER
+CANNOT_DISABLE_BUSINESS_OWNER
+STAFF_CANNOT_REMOVE_SELF
+STAFF_LIMIT_EXCEEDED
+FORBIDDEN
+```
+
+Realtime events:
+
+```text
+business.member.disabled
+business.member.restored
+business.member.removed
+business.member.suspended_by_plan
+business.member.access_changed
+business.team.updated
+business.conversation.updated
+business.appointment.updated
+business.lead.updated
+business.lead.claimed
+business.conversation.claimed
+business.appointment.claimed
+business.member.operational_profile_updated
+```
+
+On these events, refetch:
+
+- `/api/businesses`
+- `/api/auth/me`
+- affected lead/conversation/appointment lists
+- notification counts
 
 ## Automatic Processing
 
@@ -453,6 +780,27 @@ AI_ALREADY_DISABLED
 HUMAN_TAKEOVER_FORBIDDEN
 HUMAN_REVIEW_NOT_FOUND
 STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS
+BUSINESS_MEMBERSHIP_NOT_FOUND
+MEMBERSHIP_INVITE_NOT_ACCEPTED
+MEMBERSHIP_SUSPENDED_BY_PLAN
+MEMBERSHIP_DISABLED
+MEMBERSHIP_REMOVED
+BUSINESS_MEMBER_NOT_FOUND
+BUSINESS_MEMBER_ALREADY_DISABLED
+BUSINESS_MEMBER_ALREADY_REMOVED
+BUSINESS_MEMBER_ALREADY_ACTIVE
+CANNOT_REMOVE_BUSINESS_OWNER
+CANNOT_DISABLE_BUSINESS_OWNER
+STAFF_CANNOT_REMOVE_SELF
+STAFF_LIMIT_EXCEEDED
+WORK_ALREADY_ASSIGNED
+INVALID_ASSIGNMENT_TARGET
+STAFF_SCHEDULE_CONFLICT
+CANNOT_CLAIM_COMPLETED_WORK
+CANNOT_CLAIM_CANCELLED_WORK
+CANNOT_REASSIGN_WITHOUT_PERMISSION
+OPERATIONAL_PROFILE_UPDATE_DENIED
+MEMBERSHIP_NOT_ACTIVE
 INVITED_EMAIL_ALREADY_BUSINESS_OWNER
 USER_ALREADY_BUSINESS_MEMBER
 INVALID_ACCOUNT_TYPE
@@ -474,7 +822,18 @@ ACCOUNT_NOT_ALLOWED_FOR_STAFF_INVITE
 - Use the resume endpoint when a user chooses to turn AI back on.
 - Use `user.accountType` and `user.canCreateBusiness` to conditionally show create-business UI.
 - Use `/api/invites/:token` before rendering invite signup/login screens.
+- Use `/api/businesses` or `/api/auth/me` for the logged-in user's own business switcher memberships.
+- Use `GET /api/business/members` for the selected business team list when rendering lead or appointment assignment dropdowns.
 - After invite acceptance, set active business from `activeBusinessId` and `activeMembershipId`.
+- Use `BusinessMember.id` for staff lifecycle actions and staff assignment fields.
+- Do not use `User.id` when disabling/removing/restoring a staff member.
+- Do not use `User.id` for `assignedStaffId`; assignment endpoints expect `BusinessMember.id`.
+- Only show members with `canReceiveAssignedWork: true` as assignable targets.
+- Staff work queues should include unassigned plus self-assigned items.
+- Show “Assign to me” only when the item is unassigned and the relevant `canClaimUnassigned...` permission is true.
+- Hide “Assign to me” for items already assigned to another member.
+- If a lifecycle request returns 403, show the message without logging the user out.
+- After member disable/remove/restore, refetch memberships and active business context.
 - Show failed AI messages with the existing failed-message UI.
 - Refetch appointments when `business.ai.booking_request.created` or `business.appointment.created` arrives.
 - Do not add an AI simulator button.

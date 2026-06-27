@@ -25,6 +25,7 @@ export const leadController = {
   detail: async (req, res) => res.json(await leadService.detail(actor(req), leadId(req))),
   update: async (req, res) => res.json(await leadService.update(actor(req), leadId(req), req.body, requestMetadata(req))),
   assign: async (req, res) => res.json(await leadService.assign(actor(req), leadId(req), req.body.assignedStaffId, requestMetadata(req))),
+  claim: async (req, res) => res.json(await leadService.claim(actor(req), leadId(req), requestMetadata(req))),
   updateStatus: async (req, res) => res.json(await leadService.updateStatus(actor(req), leadId(req), req.body.status, requestMetadata(req))),
   remove: async (req, res) => res.json(await leadService.remove(actor(req), leadId(req), requestMetadata(req))),
 } satisfies Record<string, RequestHandler>;

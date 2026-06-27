@@ -54,6 +54,21 @@ export const createBusinessSchema = z.object({
   phone: input.phone,
 }));
 
+export const memberAccessReasonSchema = z.object({
+  reason: z.string().trim().min(1).max(500).optional(),
+}).strict();
+
+const tagArray = z.array(z.string().trim().min(1).max(80)).max(30)
+  .transform((values) => [...new Set(values)]);
+
+export const memberOperationalProfileSchema = z.object({
+  positionTitle: z.string().trim().min(1).max(120).nullable().optional(),
+  specialties: tagArray.optional(),
+  serviceTags: tagArray.optional(),
+  isAiHandoffEligible: z.boolean().optional(),
+  aiHandoffPriority: z.number().int().min(0).max(100).nullable().optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
+
 export const updateBusinessProfileSchema = z.object({
   name: profileBusinessName.optional(),
   industry: z.string().trim().min(1).max(120).optional(),

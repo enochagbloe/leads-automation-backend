@@ -36,7 +36,7 @@ function accessWhere(actor: ConversationActor): Prisma.ConversationWhereInput {
   return {
     businessId: actor.businessId,
     deletedAt: null,
-    ...(actor.role === BusinessRole.STAFF ? { assignedStaffId: actor.membershipId } : {}),
+    ...(actor.role === BusinessRole.STAFF ? { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } : {}),
   };
 }
 
@@ -79,11 +79,11 @@ async function validateAssignee(businessId: string, assignedStaffId: string | nu
       id: assignedStaffId,
       businessId,
       status: MembershipStatus.ACTIVE,
-      role: { in: [BusinessRole.MANAGER, BusinessRole.STAFF] },
+      role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER, BusinessRole.STAFF] },
     },
     include: { user: { select: { firstName: true, lastName: true } } },
   });
-  if (!member) throw new AppError(422, "Assigned staff member must be active and belong to this business", "INVALID_CONVERSATION_ASSIGNEE");
+  if (!member) throw new AppError(422, "This team member cannot receive assigned work.", "INVALID_ASSIGNMENT_TARGET");
   return member;
 }
 
@@ -93,6 +93,7 @@ async function logAudit(actor: ConversationActor, action: AuditAction, conversat
     action,
     businessId: actor.businessId,
     userId: actor.userId,
+    actorMembershipId: actor.membershipId,
     metadata: { conversationId, leadId, ...metadata } as Prisma.InputJsonValue,
   });
 }
@@ -252,7 +253,20 @@ export const conversationService = {
   },
 
   async assign(actor: ConversationActor, conversationId: string, assignedStaffId: string | null, context: Omit<AuditInput, "action">) {
-    if (actor.role === BusinessRole.STAFF) throw new AppError(403, "Staff cannot assign conversations", "FORBIDDEN");
+    if (actor.role === BusinessRole.STAFF) {
+      if (assignedStaffId !== actor.membershipId) {
+        await auditService.log({
+          ...context,
+          action: AuditAction.WORK_ASSIGNMENT_BLOCKED,
+          businessId: actor.businessId,
+          userId: actor.userId,
+          actorMembershipId: actor.membershipId,
+          metadata: { conversationId, recordType: "CONVERSATION", recordId: conversationId, reason: "staff_assignment_target_not_self" } as Prisma.InputJsonValue,
+        });
+        throw new AppError(403, "You do not have permission to reassign this conversation.", "CANNOT_REASSIGN_WITHOUT_PERMISSION");
+      }
+      return this.claim(actor, conversationId, context);
+    }
     const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, businessId: actor.businessId, deletedAt: null } });
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
     const assignee = await validateAssignee(actor.businessId, assignedStaffId);
@@ -304,6 +318,99 @@ export const conversationService = {
       staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
       payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
     });
+    return updated;
+  },
+
+  async claim(actor: ConversationActor, conversationId: string, context: Omit<AuditInput, "action">) {
+    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, businessId: actor.businessId, deletedAt: null } });
+    if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    if (conversation.assignedStaffId && conversation.assignedStaffId !== actor.membershipId) {
+      await logAudit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, conversationId, conversation.leadId, context, {
+        recordType: "CONVERSATION",
+        recordId: conversationId,
+        previousAssignedStaffId: conversation.assignedStaffId,
+        attemptedAssignedStaffId: actor.membershipId,
+      });
+      throw new AppError(409, "This conversation is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
+    }
+    if (conversation.assignedStaffId === actor.membershipId) {
+      return prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
+    }
+    await validateAssignee(actor.businessId, actor.membershipId);
+    let systemMessageId: string | undefined;
+    const updated = await prisma.$transaction(async (tx) => {
+      const record = await tx.conversation.update({
+        where: { id: conversationId },
+        data: {
+          assignedStaffId: actor.membershipId,
+          ...(conversation.status !== ConversationStatus.CLOSED ? { status: ConversationStatus.HUMAN_HANDLING, humanTakeover: true, aiEnabled: false, needsHumanReview: false } : {}),
+        },
+        include: conversationInclude,
+      });
+      const user = await tx.user.findUnique({ where: { id: actor.userId }, select: { firstName: true, lastName: true } });
+      const name = user ? `${user.firstName} ${user.lastName}`.trim() : "A team member";
+      const systemMessage = await createSystemMessage({
+        businessId: actor.businessId,
+        leadId: conversation.leadId,
+        conversationId,
+        content: `${name} claimed this conversation.`,
+        metadata: { assignedStaffId: actor.membershipId, reason: "CLAIM_UNASSIGNED_WORK" },
+      }, tx);
+      systemMessageId = systemMessage.id;
+      await tx.leadActivity.create({
+        data: {
+          businessId: actor.businessId,
+          leadId: conversation.leadId,
+          actorUserId: actor.userId,
+          action: LeadActivityAction.CONVERSATION_ASSIGNED,
+          metadata: { conversationId, previousAssignedStaffId: null, newAssignedStaffId: actor.membershipId, reason: "CLAIM_UNASSIGNED_WORK" },
+        },
+      });
+      return record;
+    }, { maxWait: 15_000, timeout: 30_000 });
+    await Promise.all([
+      invalidateConversationCache(actor.businessId, conversationId),
+      logAudit(actor, AuditAction.CONVERSATION_CLAIMED_BY_STAFF, conversationId, conversation.leadId, context, {
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        targetMembershipId: actor.membershipId,
+        recordType: "CONVERSATION",
+        recordId: conversationId,
+        previousAssignedStaffId: null,
+        newAssignedStaffId: actor.membershipId,
+        reason: "CLAIM_UNASSIGNED_WORK",
+      }),
+    ]);
+    realtimeService.publish({
+      type: "business.conversation.claimed",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      staffMembershipIds: [updated.assignedStaffId],
+      payload: { conversation: updated, previousAssignedStaffId: null, newAssignedStaffId: updated.assignedStaffId, systemMessageId },
+    });
+    realtimeService.publish({
+      type: "conversation.updated",
+      businessId: actor.businessId,
+      conversationId,
+      leadId: conversation.leadId,
+      assignedStaffId: updated.assignedStaffId,
+      staffMembershipIds: [updated.assignedStaffId],
+      payload: { conversationId, changes: { assignedStaffId: updated.assignedStaffId, status: updated.status, humanTakeover: updated.humanTakeover, aiEnabled: updated.aiEnabled } },
+    });
+    if (systemMessageId) {
+      realtimeService.publish({
+        type: "message.created",
+        businessId: actor.businessId,
+        conversationId,
+        leadId: conversation.leadId,
+        messageId: systemMessageId,
+        assignedStaffId: updated.assignedStaffId,
+        staffMembershipIds: [updated.assignedStaffId],
+        payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+      });
+    }
     return updated;
   },
 

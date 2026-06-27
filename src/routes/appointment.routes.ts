@@ -35,3 +35,4 @@ appointmentRouter.patch("/:appointmentId/complete", mutationLimiter, validate(co
 appointmentRouter.patch("/:appointmentId/no-show", mutationLimiter, validate(noShowAppointmentSchema), appointmentController.noShow);
 appointmentRouter.patch("/:appointmentId/missed", mutationLimiter, validate(missedAppointmentSchema), appointmentController.missed);
 appointmentRouter.patch("/:appointmentId/assign", mutationLimiter, validate(assignAppointmentSchema), appointmentController.assign);
+appointmentRouter.patch("/:appointmentId/claim", mutationLimiter, appointmentController.claim);
