@@ -20,4 +20,4 @@ Use two businesses plus owner, manager, and staff memberships. Send authorizatio
 16. Conversation detail returns a readable `displayId`, activities, priority, pinned state, and message metadata.
 17. Owner/manager updates subject/priority/pinned; staff can only pin an assigned conversation.
 
-The current cache provider is the centralized in-memory `CacheService`; PostgreSQL remains the source of truth.
+The current cache provider is the centralized `CacheService`; it uses Redis when `REDIS_URL` is configured and PostgreSQL remains the source of truth.

@@ -40,7 +40,7 @@ Send `Authorization` and `X-Business-Id` on every request.
 
 ## Cache behavior
 
-The current provider is the centralized in-memory `CacheService`; Redis is not configured yet.
+The current provider is the centralized `CacheService`. It uses Redis when `REDIS_URL` is configured and falls back to bounded in-memory cache for local development.
 
 - List TTL: 60 seconds
 - Detail TTL: 120 seconds
