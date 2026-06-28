@@ -101,6 +101,18 @@ async function logAudit(
   });
 }
 
+function runLeadSideEffects(label: string, tasks: Array<Promise<unknown>>) {
+  void Promise.allSettled(tasks).then((results) => {
+    const failed = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed.length > 0) {
+      console.error("Lead side effects failed", {
+        label,
+        failures: failed.map((failure) => failure.reason),
+      });
+    }
+  });
+}
+
 export const leadService = {
   async create(actor: LeadActor, input: CreateLeadInput, context: Omit<AuditInput, "action">) {
     const resolvedAssignedStaffId = input.assignedStaffId
@@ -147,8 +159,8 @@ export const leadService = {
       }
       throw error;
     });
-    await Promise.all([
-      invalidateLeadCache(actor.businessId, lead.id),
+    await invalidateLeadCache(actor.businessId, lead.id);
+    runLeadSideEffects("lead.created", [
       logAudit(actor, AuditAction.LEAD_CREATED, lead.id, context, {
         assignedStaffId: resolvedAssignedStaffId,
         source: lead.source,
@@ -242,8 +254,14 @@ export const leadService = {
     const statusChanged = input.status !== undefined && input.status !== existing.status;
     const notesChanged = input.notes !== undefined && input.notes !== existing.notes;
     const assignmentChanged = input.assignedStaffId !== undefined && input.assignedStaffId !== existing.assignedStaffId;
-    const updated = await prisma.$transaction(async (tx) => {
-      const lead = await tx.lead.update({
+    const activityData = [
+      { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_UPDATED, metadata: asJson({ fields: Object.keys(input) }) },
+      ...(statusChanged ? [{ businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_STATUS_CHANGED, metadata: asJson({ from: existing.status, to: input.status }) }] : []),
+      ...(notesChanged ? [{ businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_NOTE_UPDATED, metadata: Prisma.DbNull }] : []),
+      ...(assignmentChanged ? [{ businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_ASSIGNED, metadata: asJson({ from: existing.assignedStaffId, to: input.assignedStaffId }) }] : []),
+    ];
+    const [updated] = await prisma.$transaction([
+      prisma.lead.update({
         where: { id: leadId },
         data: {
           ...input,
@@ -251,23 +269,11 @@ export const leadService = {
           ...(statusChanged && input.status !== LeadStatus.NEW ? { lastContactedAt: new Date() } : {}),
         },
         include: leadInclude,
-      });
-      await tx.leadActivity.create({
-        data: { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_UPDATED, metadata: asJson({ fields: Object.keys(input) }) },
-      });
-      if (statusChanged) await tx.leadActivity.create({
-        data: { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_STATUS_CHANGED, metadata: asJson({ from: existing.status, to: input.status }) },
-      });
-      if (notesChanged) await tx.leadActivity.create({
-        data: { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_NOTE_UPDATED },
-      });
-      if (assignmentChanged) await tx.leadActivity.create({
-        data: { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_ASSIGNED, metadata: asJson({ from: existing.assignedStaffId, to: input.assignedStaffId }) },
-      });
-      return lead;
-    });
+      }),
+      prisma.leadActivity.createMany({ data: activityData }),
+    ]);
     await invalidateLeadCache(actor.businessId, leadId);
-    await Promise.all([
+    runLeadSideEffects("lead.updated", [
       logAudit(actor, AuditAction.LEAD_UPDATED, leadId, context, { fields: Object.keys(input) }),
       ...(statusChanged ? [logAudit(actor, AuditAction.LEAD_STATUS_CHANGED, leadId, context, { from: existing.status, to: input.status })] : []),
       ...(assignmentChanged ? [logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, { from: existing.assignedStaffId, to: input.assignedStaffId })] : []),
@@ -303,13 +309,13 @@ export const leadService = {
       assignedByMembershipId: actor.membershipId,
       reason: "manual_reassignment",
     };
-    const updated = await prisma.$transaction(async (tx) => {
-      const lead = await tx.lead.update({
+    const [updated] = await prisma.$transaction([
+      prisma.lead.update({
         where: { id: leadId },
         data: { assignedStaffId },
         include: leadInclude,
-      });
-      await tx.leadActivity.create({
+      }),
+      prisma.leadActivity.create({
         data: {
           businessId: actor.businessId,
           leadId,
@@ -317,14 +323,13 @@ export const leadService = {
           action: LeadActivityAction.LEAD_ASSIGNED,
           metadata: asJson(assignmentMetadata),
         },
-      });
-      return lead;
-    });
+      }),
+    ]);
     await invalidateLeadCache(actor.businessId, leadId);
-    await logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, {
+    runLeadSideEffects("lead.assigned", [logAudit(actor, AuditAction.LEAD_ASSIGNED, leadId, context, {
       ...assignmentMetadata,
       businessId: actor.businessId,
-    });
+    })]);
     realtimeService.publish({
       type: "lead.updated",
       businessId: actor.businessId,
@@ -418,7 +423,8 @@ export const leadService = {
       prisma.lead.update({ where: { id: leadId }, data: { deletedAt: new Date() } }),
       prisma.leadActivity.create({ data: { businessId: actor.businessId, leadId, actorUserId: actor.userId, action: LeadActivityAction.LEAD_DELETED } }),
     ]);
-    await Promise.all([invalidateLeadCache(actor.businessId, leadId), logAudit(actor, AuditAction.LEAD_DELETED, leadId, context)]);
+    await invalidateLeadCache(actor.businessId, leadId);
+    runLeadSideEffects("lead.deleted", [logAudit(actor, AuditAction.LEAD_DELETED, leadId, context)]);
     return { message: "Lead deleted successfully" };
   },
 

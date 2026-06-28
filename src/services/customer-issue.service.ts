@@ -70,10 +70,18 @@ function listKey(actor: CustomerIssueActor, query: CustomerIssueListQuery) {
   return `business:${actor.businessId}:customer-issues:list:${scope}:${JSON.stringify(query)}`;
 }
 
+function detailKey(actor: CustomerIssueActor, issueId: string) {
+  const scope = actor.role === BusinessRole.STAFF ? actor.membershipId : "all";
+  return `business:${actor.businessId}:customer-issues:detail:${issueId}:${scope}`;
+}
+
 async function invalidateIssueCaches(businessId: string, issueId?: string) {
   await Promise.all([
     cacheService.delByPattern(`business:${businessId}:customer-issues:list:*`),
-    ...(issueId ? [cacheService.del(`business:${businessId}:customer-issues:detail:${issueId}`)] : []),
+    ...(issueId ? [
+      cacheService.del(`business:${businessId}:customer-issues:detail:${issueId}`),
+      cacheService.delByPattern(`business:${businessId}:customer-issues:detail:${issueId}:*`),
+    ] : []),
   ]);
 }
 
@@ -408,7 +416,7 @@ export const customerIssueService = {
 
   async detail(actor: CustomerIssueActor, issueId: string) {
     await assertPlusOrPremium(actor.businessAccountId, actor.businessId);
-    const key = `business:${actor.businessId}:customer-issues:detail:${issueId}`;
+    const key = detailKey(actor, issueId);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
     const issue = await prisma.customerIssueLog.findFirst({ where: { id: issueId, ...issueAccessWhere(actor) }, include: issueInclude });

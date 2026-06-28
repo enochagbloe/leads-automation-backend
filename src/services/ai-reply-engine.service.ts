@@ -520,8 +520,8 @@ export const aiReplyEngine = {
             confidence: safety.decision.confidence,
           },
         });
-        if (usage.subscription.plan.code === PlanCode.BASIC && reviewType === HumanReviewType.COMPLAINT) {
-          await customerIssueService.handleBasicSafeHandoff({
+        if (isComplaintDecision(safety.decision)) {
+          await customerIssueService.createFromAiDecision({
             businessId: conversation.businessId,
             businessAccountId: conversation.business.businessAccountId,
             conversationId: conversation.id,
@@ -533,7 +533,7 @@ export const aiReplyEngine = {
             decision: safety.decision,
             accountUsageId: usage.usage.id,
             plan: usage.subscription.plan.code,
-          }).catch((error) => console.error("Basic AI safe handoff side effects failed", error));
+          }).catch((error) => console.error("Blocked complaint issue side effects failed", error));
         }
         await Promise.all([
           logInteraction({
