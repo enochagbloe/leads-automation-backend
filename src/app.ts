@@ -23,6 +23,8 @@ import { notificationRouter } from "./routes/notification.routes";
 import { aiRouter } from "./routes/ai.routes";
 import { inviteRouter } from "./routes/invite.routes";
 import { businessMemberRouter } from "./routes/business-member.routes";
+import { meRouter } from "./routes/me.routes";
+import { customerIssueRouter } from "./routes/customer-issue.routes";
 
 export const app = express();
 
@@ -43,6 +45,7 @@ app.get("/api", (_req, res) => res.json({
   endpoints: {
     health: "/api/health",
     auth: "/api/auth",
+    me: "/api/me/business-memberships",
     invites: "/api/invites/:token",
     businesses: "/api/businesses",
     businessSetupStatus: "/api/business/setup-status",
@@ -54,6 +57,7 @@ app.get("/api", (_req, res) => res.json({
     businessAppointments: "/api/business/appointments",
     businessNotifications: "/api/business/notifications",
     businessMembers: "/api/business/members",
+    businessCustomerIssues: "/api/business/customer-issues",
     businessLeads: "/api/business/leads",
     businessConversations: "/api/business/conversations",
     businessAi: "/api/business/conversations/:conversationId/ai/process-latest",
@@ -81,6 +85,7 @@ app.get("/api/plans", subscriptionController.plans);
 app.use("/api/webhooks/whatsapp", whatsappWebhookRouter);
 app.use("/api/dev/mock-whatsapp", mockWhatsAppRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/me", meRouter);
 app.use("/api/invites", inviteRouter);
 app.use("/api/businesses", businessRouter);
 app.use("/api/business/whatsapp", whatsappConnectionRouter);
@@ -91,6 +96,7 @@ app.use("/api/business/policies", policyRouter);
 app.use("/api/business/appointments", appointmentRouter);
 app.use("/api/business/notifications", notificationRouter);
 app.use("/api/business/members", businessMemberRouter);
+app.use("/api/business/customer-issues", customerIssueRouter);
 app.use("/api/business/leads", leadRouter);
 app.use("/api/business/conversations", conversationRouter);
 app.use("/api/business", aiRouter);

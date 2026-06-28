@@ -66,6 +66,10 @@ export type RealtimeEventType =
   | "business.ai.reply.failed"
   | "business.ai.booking_request.created"
   | "business.ai.human_review.required"
+  | "business.ai.safe_handoff_triggered"
+  | "business.customer_issue.created"
+  | "business.customer_issue.routed"
+  | "business.customer_issue.status_updated"
   | "business.conversation.human_takeover.started"
   | "business.conversation.ai_resumed"
   | "business.conversation.updated";

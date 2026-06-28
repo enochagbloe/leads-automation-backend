@@ -18,6 +18,21 @@ export type AiSuggestedAction =
   | "DETECT_BOOKING_ONLY"
   | "NO_ACTION";
 
+export type AiComplaintCategory =
+  | "DELAY"
+  | "POOR_SERVICE"
+  | "QUALITY_ISSUE"
+  | "STAFF_BEHAVIOR"
+  | "MISCOMMUNICATION"
+  | "PAYMENT_ISSUE"
+  | "APPOINTMENT_ISSUE"
+  | "DELIVERY_OR_SITE_ISSUE"
+  | "MISSING_ITEM_OR_MISSING_WORK"
+  | "FOLLOW_UP_REQUIRED"
+  | "OTHER";
+
+export type AiComplaintSeverity = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+
 export type AiReplyDecision = {
   intent: AiReplyIntent;
   replyText: string | null;
@@ -33,6 +48,15 @@ export type AiReplyDecision = {
     conversationHistory: boolean;
   };
   suggestedAction: AiSuggestedAction;
+  complaint?: {
+    isComplaint: boolean;
+    category?: AiComplaintCategory;
+    subcategory?: string;
+    severity?: AiComplaintSeverity;
+    summary?: string;
+    requiresInternalAction?: boolean;
+    suggestedStaffSpecialtyTags?: string[];
+  };
   appointmentIntent?: {
     serviceName?: string;
     serviceId?: string;
@@ -68,6 +92,22 @@ const ACTIONS = new Set<AiSuggestedAction>([
   "DETECT_BOOKING_ONLY",
   "NO_ACTION",
 ]);
+
+const COMPLAINT_CATEGORIES = new Set<AiComplaintCategory>([
+  "DELAY",
+  "POOR_SERVICE",
+  "QUALITY_ISSUE",
+  "STAFF_BEHAVIOR",
+  "MISCOMMUNICATION",
+  "PAYMENT_ISSUE",
+  "APPOINTMENT_ISSUE",
+  "DELIVERY_OR_SITE_ISSUE",
+  "MISSING_ITEM_OR_MISSING_WORK",
+  "FOLLOW_UP_REQUIRED",
+  "OTHER",
+]);
+
+const COMPLAINT_SEVERITIES = new Set<AiComplaintSeverity>(["LOW", "MEDIUM", "HIGH", "URGENT"]);
 
 export const AI_DECISION_PARSE_FAILURE_REASON = "AI response could not be parsed as structured JSON.";
 
@@ -112,6 +152,31 @@ function booleanRecord(value: unknown) {
   };
 }
 
+function stringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()).slice(0, 12);
+}
+
+function complaintRecord(value: unknown): AiReplyDecision["complaint"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  const category = typeof object.category === "string" && COMPLAINT_CATEGORIES.has(object.category as AiComplaintCategory)
+    ? object.category as AiComplaintCategory
+    : undefined;
+  const severity = typeof object.severity === "string" && COMPLAINT_SEVERITIES.has(object.severity as AiComplaintSeverity)
+    ? object.severity as AiComplaintSeverity
+    : undefined;
+  return {
+    isComplaint: object.isComplaint === true,
+    ...(category ? { category } : {}),
+    ...(typeof object.subcategory === "string" && object.subcategory.trim() ? { subcategory: object.subcategory.trim().slice(0, 120) } : {}),
+    ...(severity ? { severity } : {}),
+    ...(typeof object.summary === "string" && object.summary.trim() ? { summary: object.summary.trim().slice(0, 500) } : {}),
+    requiresInternalAction: object.requiresInternalAction === true,
+    suggestedStaffSpecialtyTags: stringArray(object.suggestedStaffSpecialtyTags),
+  };
+}
+
 export function parseAiDecision(rawText: string): AiReplyDecision {
   try {
     const parsed = JSON.parse(extractJson(rawText)) as Record<string, unknown>;
@@ -127,6 +192,7 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
     const appointmentIntent = parsed.appointmentIntent && typeof parsed.appointmentIntent === "object" && !Array.isArray(parsed.appointmentIntent)
       ? parsed.appointmentIntent as AiReplyDecision["appointmentIntent"]
       : undefined;
+    const complaint = complaintRecord(parsed.complaint);
     return {
       intent,
       replyText: typeof parsed.replyText === "string" && parsed.replyText.trim() ? parsed.replyText.trim() : null,
@@ -136,6 +202,7 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
       reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "No reason provided.",
       usedKnowledge: booleanRecord(parsed.usedKnowledge),
       suggestedAction,
+      ...(complaint ? { complaint } : {}),
       ...(appointmentIntent ? { appointmentIntent } : {}),
     };
   } catch {

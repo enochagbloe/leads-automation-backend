@@ -11,7 +11,7 @@ export const authController = {
   resendVerification: async (req, res) => res.json(await authService.resendVerification(req.body.email, requestMetadata(req))),
   login: async (req, res) => res.json(await authService.login(req.body.email, req.body.password, requestMetadata(req))),
   refresh: async (req, res) => res.json(await tokenService.rotateRefreshToken(req.body.refreshToken)),
-  me: async (req, res) => res.json(await authService.getProfile(req.auth!.userId, req.auth!.businessId)),
+  me: async (req, res) => res.json(await authService.getProfile(req.auth!.userId, req.get("x-business-id"))),
   logout: async (req, res) => {
     await tokenService.revokeRefreshToken(req.body.refreshToken);
     await auditService.log({ ...requestMetadata(req), action: AuditAction.USER_LOGOUT, userId: req.auth!.userId, businessId: req.auth!.businessId });

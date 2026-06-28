@@ -540,6 +540,122 @@ On these events, refetch:
 - affected lead/conversation/appointment lists
 - notification counts
 
+## Plus Customer Issue Routing
+
+Plus and Premium can now turn AI-detected customer complaints into lightweight internal issue records. Basic does not get complaint intelligence; Basic only receives safe human handoff behavior.
+
+Customer-facing behavior:
+
+- AI replies politely and calmly.
+- AI must not mention internal routing, tickets, assignments, staff names, or issue logs.
+- Conversation assignment/client owner is not changed automatically.
+
+Issue endpoints:
+
+```http
+GET /api/business/customer-issues
+GET /api/business/customer-issues/:issueId
+PATCH /api/business/customer-issues/:issueId/status
+Authorization: Bearer <accessToken>
+X-Business-Id: <activeBusinessId>
+```
+
+List query params:
+
+```text
+status
+category
+severity
+responsibleMembershipId
+leadId
+conversationId
+createdFrom
+createdTo
+page
+limit
+```
+
+Status update body:
+
+```json
+{
+  "status": "ACKNOWLEDGED"
+}
+```
+
+Allowed statuses:
+
+```text
+OPEN
+ACKNOWLEDGED
+RESOLVED
+CLOSED
+```
+
+Issue shape:
+
+```ts
+type CustomerIssue = {
+  id: string;
+  businessId: string;
+  leadId: string | null;
+  conversationId: string | null;
+  customerMessageId: string | null;
+  type: "COMPLAINT" | "ISSUE" | "REQUEST_REQUIRES_INTERNAL_ACTION";
+  category:
+    | "DELAY"
+    | "POOR_SERVICE"
+    | "QUALITY_ISSUE"
+    | "STAFF_BEHAVIOR"
+    | "MISCOMMUNICATION"
+    | "PAYMENT_ISSUE"
+    | "APPOINTMENT_ISSUE"
+    | "DELIVERY_OR_SITE_ISSUE"
+    | "MISSING_ITEM_OR_MISSING_WORK"
+    | "FOLLOW_UP_REQUIRED"
+    | "OTHER";
+  severity: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+  summary: string;
+  customerMessageExcerpt: string | null;
+  clientOwnerMembershipId: string | null;
+  conversationAssignedMembershipId: string | null;
+  suggestedResponsibleMembershipId: string | null;
+  responsibleMembershipId: string | null;
+  routingReason: string | null;
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "CLOSED";
+  createdBy: "AI" | "MANUAL";
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+};
+```
+
+Access:
+
+- Basic receives `PLAN_UPGRADE_REQUIRED` on customer issue endpoints.
+- Owner/manager can view all customer issues in the selected business.
+- Staff can view customer issues assigned to them and unassigned issues.
+- Staff can acknowledge or resolve issues assigned to them.
+- Only owner/manager can close an issue.
+
+Realtime events:
+
+```text
+business.ai.safe_handoff_triggered
+business.customer_issue.created
+business.customer_issue.routed
+business.customer_issue.status_updated
+business.notification.created
+business.conversation.updated
+```
+
+Notification actions may include:
+
+```text
+VIEW_CUSTOMER_ISSUE
+VIEW_CONVERSATION
+```
+
 ## Automatic Processing
 
 When an inbound WhatsApp customer message is stored, the backend safely attempts AI processing if:
@@ -779,6 +895,8 @@ AI_ALREADY_ENABLED
 AI_ALREADY_DISABLED
 HUMAN_TAKEOVER_FORBIDDEN
 HUMAN_REVIEW_NOT_FOUND
+CUSTOMER_ISSUE_NOT_FOUND
+PLAN_UPGRADE_REQUIRED
 STAFF_ACCOUNT_CANNOT_CREATE_BUSINESS
 BUSINESS_MEMBERSHIP_NOT_FOUND
 MEMBERSHIP_INVITE_NOT_ACCEPTED
@@ -837,13 +955,13 @@ ACCOUNT_NOT_ALLOWED_FOR_STAFF_INVITE
 - Show failed AI messages with the existing failed-message UI.
 - Refetch appointments when `business.ai.booking_request.created` or `business.appointment.created` arrives.
 - Do not add an AI simulator button.
-- Do not add advanced AI routing or auto-confirm controls yet.
+- Do not add advanced AI routing controls, complaint analytics, task boards, or auto-confirm controls yet.
 
 ## Out Of Scope
 
 - AI settings UI
 - AI playground/simulator
-- Plus team routing
+- Complaint analytics and full task board
 - Premium safe auto-confirm from AI
 - AI-generated reschedule/cancel messages
 - AI analytics dashboard
