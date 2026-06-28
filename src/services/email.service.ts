@@ -6,7 +6,7 @@ type EmailContent = {
   subject: string;
   html: string;
   text: string;
-  type: "email_verification" | "password_reset" | "business_invitation" | "welcome";
+  type: "email_verification" | "password_reset" | "business_invitation" | "welcome" | "customer_attention" | "customer_issue_assigned";
 };
 
 type ActionTemplateInput = {
@@ -82,6 +82,28 @@ function welcomeTemplate(greetingName: string) {
 <h1>Welcome to BizReply AI</h1><p>Hi ${name},</p>
 <p>Your account is ready. We are glad to have you building with BizReply AI.</p></div></body></html>`,
     text: `Welcome to BizReply AI\n\nHi ${greetingName},\n\nYour account is ready. We are glad to have you building with BizReply AI.`,
+  };
+}
+
+function internalNoticeTemplate(input: { title: string; preview: string; rows: Array<{ label: string; value?: string | null }> }) {
+  const rows = input.rows
+    .filter((row) => row.value)
+    .map((row) => `<tr><td style="padding:8px 0;color:#566071;width:150px">${escapeHtml(row.label)}</td><td style="padding:8px 0;color:#172033">${escapeHtml(row.value!)}</td></tr>`)
+    .join("");
+  return {
+    html: `<!doctype html><html lang="en"><body style="margin:0;background:#f4f6f8;font-family:Arial,sans-serif;color:#172033;line-height:1.6">
+<div style="display:none;max-height:0;overflow:hidden">${escapeHtml(input.preview)}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;padding:32px 16px"><tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border:1px solid #e6e9ed;border-radius:12px">
+<tr><td style="padding:32px"><p style="margin:0 0 24px;font-size:18px;font-weight:700">BizReply AI</p>
+<h1 style="margin:0 0 18px;font-size:24px;line-height:1.25">${escapeHtml(input.title)}</h1>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rows}</table>
+</td></tr></table></td></tr></table></body></html>`,
+    text: [
+      input.title,
+      "",
+      ...input.rows.filter((row) => row.value).map((row) => `${row.label}: ${row.value}`),
+    ].join("\n"),
   };
 }
 
@@ -171,6 +193,54 @@ class EmailService {
       expiryNotice: "This invitation expires in 7 days and can only be used once.",
     });
     return this.send({ to, subject: `Join ${businessName} on BizReply AI`, type: "business_invitation", ...template });
+  }
+
+  sendCustomerAttentionEmail(to: string, input: {
+    businessName: string;
+    customerName?: string | null;
+    messageExcerpt?: string | null;
+    conversationUrl?: string | null;
+    receivedAt?: Date | null;
+  }) {
+    const template = internalNoticeTemplate({
+      title: "Customer conversation needs attention",
+      preview: "A customer conversation needs human attention.",
+      rows: [
+        { label: "Business", value: input.businessName },
+        { label: "Customer", value: input.customerName },
+        { label: "Message", value: input.messageExcerpt },
+        { label: "Conversation", value: input.conversationUrl },
+        { label: "Time received", value: input.receivedAt?.toISOString() },
+      ],
+    });
+    return this.send({ to, subject: "Customer conversation needs attention", type: "customer_attention", ...template });
+  }
+
+  sendCustomerIssueAssignedEmail(to: string, input: {
+    businessName: string;
+    customerName?: string | null;
+    category: string;
+    severity: string;
+    summary: string;
+    recommendedAction?: string | null;
+    conversationUrl?: string | null;
+    receivedAt?: Date | null;
+  }) {
+    const template = internalNoticeTemplate({
+      title: "New customer issue assigned to you",
+      preview: "A customer issue has been assigned to you.",
+      rows: [
+        { label: "Business", value: input.businessName },
+        { label: "Customer", value: input.customerName },
+        { label: "Category", value: input.category },
+        { label: "Severity", value: input.severity },
+        { label: "Summary", value: input.summary },
+        { label: "Recommended action", value: input.recommendedAction },
+        { label: "Conversation", value: input.conversationUrl },
+        { label: "Time received", value: input.receivedAt?.toISOString() },
+      ],
+    });
+    return this.send({ to, subject: "New customer issue assigned to you", type: "customer_issue_assigned", ...template });
   }
 }
 

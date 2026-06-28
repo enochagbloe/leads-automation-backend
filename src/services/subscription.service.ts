@@ -72,6 +72,12 @@ export function getAccountUsage(usage?: AccountUsageRecord) {
     aiBlockedUsed: usage?.aiBlockedUsed ?? 0,
     aiHumanReviewsUsed: usage?.aiHumanReviewsUsed ?? 0,
     aiBookingRequestsCreated: usage?.aiBookingRequestsCreated ?? 0,
+    aiSafeHandoffsTriggered: usage?.aiSafeHandoffsTriggered ?? 0,
+    aiSafeHandoffEmailsSent: usage?.aiSafeHandoffEmailsSent ?? 0,
+    aiComplaintsDetected: usage?.aiComplaintsDetected ?? 0,
+    customerIssuesLogged: usage?.customerIssuesLogged ?? 0,
+    customerIssuesRouted: usage?.customerIssuesRouted ?? 0,
+    customerIssueEmailsSent: usage?.customerIssueEmailsSent ?? 0,
     knowledgeItemsCount: usage?.knowledgeItemsCount ?? 0,
   };
 }

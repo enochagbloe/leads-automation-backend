@@ -354,6 +354,9 @@ enum BusinessNotificationType {
   APPOINTMENT_AUTO_CONFIRMED
   AI_HUMAN_REVIEW_REQUIRED
   CONVERSATION_HANDOFF_REQUIRED
+  CUSTOMER_ISSUE_ASSIGNED
+  CUSTOMER_ISSUE_VISIBILITY
+  CUSTOMER_ISSUE_UNROUTED
 }
 
 enum BusinessNotificationPriority {
@@ -376,6 +379,46 @@ enum BusinessNotificationEntityType {
   CONVERSATION
   LEAD
   BUSINESS
+  CUSTOMER_ISSUE
+}
+
+enum CustomerIssueType {
+  COMPLAINT
+  ISSUE
+  REQUEST_REQUIRES_INTERNAL_ACTION
+}
+
+enum CustomerIssueCategory {
+  DELAY
+  POOR_SERVICE
+  QUALITY_ISSUE
+  STAFF_BEHAVIOR
+  MISCOMMUNICATION
+  PAYMENT_ISSUE
+  APPOINTMENT_ISSUE
+  DELIVERY_OR_SITE_ISSUE
+  MISSING_ITEM_OR_MISSING_WORK
+  FOLLOW_UP_REQUIRED
+  OTHER
+}
+
+enum CustomerIssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum CustomerIssueStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  CLOSED
+}
+
+enum CustomerIssueCreatedBy {
+  AI
+  MANUAL
 }
 
 enum PlanCode {
@@ -502,6 +545,14 @@ enum AuditAction {
   WORK_REASSIGNED_BY_MANAGER
   WORK_ASSIGNMENT_BLOCKED
   STAFF_OPERATIONAL_PROFILE_UPDATED
+  AI_SAFE_HANDOFF_TRIGGERED
+  AI_SAFE_HANDOFF_NOTIFICATION_SENT
+  AI_COMPLAINT_DETECTED
+  CUSTOMER_ISSUE_LOG_CREATED
+  CUSTOMER_ISSUE_ROUTED_TO_STAFF
+  CUSTOMER_ISSUE_ROUTING_FALLBACK_TO_MANAGER
+  CUSTOMER_ISSUE_EMAIL_SENT
+  CUSTOMER_ISSUE_STATUS_UPDATED
 }
 
 enum DayOfWeek {
@@ -555,6 +606,7 @@ model User {
   appointmentActivities        AppointmentActivity[]  @relation("AppointmentActivityActorUser")
   businessNotifications        BusinessNotification[] @relation("BusinessNotificationRecipient")
   createdBusinessNotifications BusinessNotification[] @relation("BusinessNotificationCreator")
+  customerIssueLogs            CustomerIssueLog[]     @relation("CustomerIssueActor")
 }
 
 model BusinessAccount {
@@ -623,6 +675,7 @@ model Business {
   appointments          Appointment[]
   appointmentActivities AppointmentActivity[]
   notifications         BusinessNotification[]
+  customerIssueLogs     CustomerIssueLog[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -763,6 +816,10 @@ model BusinessMember {
   outcomeConfirmedAppointments Appointment[]          @relation("AppointmentOutcomeConfirmer")
   appointmentActivities        AppointmentActivity[]  @relation("AppointmentActivityActorMembership")
   notifications                BusinessNotification[]
+  responsibleCustomerIssues    CustomerIssueLog[]     @relation("CustomerIssueResponsible")
+  suggestedCustomerIssues      CustomerIssueLog[]     @relation("CustomerIssueSuggestedResponsible")
+  clientOwnedCustomerIssues    CustomerIssueLog[]     @relation("CustomerIssueClientOwner")
+  conversationAssignedCustomerIssues CustomerIssueLog[] @relation("CustomerIssueConversationAssignee")
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -850,6 +907,12 @@ model AccountUsageRecord {
   aiBlockedUsed       Int      @default(0)
   aiHumanReviewsUsed  Int      @default(0)
   aiBookingRequestsCreated Int @default(0)
+  aiSafeHandoffsTriggered Int @default(0)
+  aiSafeHandoffEmailsSent Int @default(0)
+  aiComplaintsDetected Int @default(0)
+  customerIssuesLogged Int @default(0)
+  customerIssuesRouted Int @default(0)
+  customerIssueEmailsSent Int @default(0)
   staffCount          Int      @default(1)
   servicesCount       Int      @default(0)
   appointmentsUsed    Int      @default(0)
@@ -955,6 +1018,7 @@ model Lead {
   conversations Conversation[]
   messages      Message[]
   appointments  Appointment[]
+  customerIssueLogs CustomerIssueLog[]
 
   @@index([businessId])
   @@index([businessId, phone])
@@ -1015,6 +1079,7 @@ model Conversation {
   assignedStaff BusinessMember? @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
   messages      Message[]
   appointments  Appointment[]
+  customerIssueLogs CustomerIssueLog[]
   aiInteractionLogs AiInteractionLog[]
 
   @@index([businessId])
@@ -1055,6 +1120,7 @@ model Message {
   senderUser   User?        @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
   sourceAiLogs AiInteractionLog[] @relation("AiInteractionSourceMessage")
   replyAiLogs  AiInteractionLog[] @relation("AiInteractionReplyMessage")
+  customerIssueLogs CustomerIssueLog[]
 
   @@index([businessId])
   @@index([conversationId])
@@ -1064,6 +1130,50 @@ model Message {
   @@index([senderType])
   @@index([deliveryStatus])
   @@index([businessId, provider, providerMessageId])
+}
+
+model CustomerIssueLog {
+  id                               String                 @id @default(cuid())
+  businessId                       String
+  leadId                           String?
+  conversationId                   String?
+  customerMessageId                String?
+  type                             CustomerIssueType
+  category                         CustomerIssueCategory
+  subcategory                      String?
+  severity                         CustomerIssueSeverity
+  summary                          String
+  customerMessageExcerpt           String?
+  clientOwnerMembershipId          String?
+  conversationAssignedMembershipId String?
+  suggestedResponsibleMembershipId String?
+  responsibleMembershipId          String?
+  routingReason                    String?
+  status                           CustomerIssueStatus    @default(OPEN)
+  createdBy                        CustomerIssueCreatedBy @default(AI)
+  createdByUserId                  String?
+  metadata                         Json?
+  createdAt                        DateTime               @default(now())
+  updatedAt                        DateTime               @updatedAt
+  resolvedAt                       DateTime?
+
+  business                   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead                       Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation               Conversation?   @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customerMessage            Message?        @relation(fields: [customerMessageId], references: [id], onDelete: SetNull)
+  clientOwner                BusinessMember? @relation("CustomerIssueClientOwner", fields: [clientOwnerMembershipId], references: [id], onDelete: SetNull)
+  conversationAssignedMember BusinessMember? @relation("CustomerIssueConversationAssignee", fields: [conversationAssignedMembershipId], references: [id], onDelete: SetNull)
+  suggestedResponsibleMember BusinessMember? @relation("CustomerIssueSuggestedResponsible", fields: [suggestedResponsibleMembershipId], references: [id], onDelete: SetNull)
+  responsibleMember          BusinessMember? @relation("CustomerIssueResponsible", fields: [responsibleMembershipId], references: [id], onDelete: SetNull)
+  createdByUser              User?           @relation("CustomerIssueActor", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, status, createdAt])
+  @@index([businessId, category, createdAt])
+  @@index([businessId, severity, createdAt])
+  @@index([businessId, responsibleMembershipId, createdAt])
+  @@index([businessId, leadId, createdAt])
+  @@index([businessId, conversationId, createdAt])
+  @@index([customerMessageId])
 }
 
 model AiInteractionLog {

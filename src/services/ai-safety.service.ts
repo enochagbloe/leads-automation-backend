@@ -16,7 +16,6 @@ export type AiSafetyResult = {
 };
 
 const HIGH_RISK_INTENTS = new Set([
-  "COMPLAINT",
   "PAYMENT_QUESTION",
   "HUMAN_REQUEST",
   "UNKNOWN",
@@ -36,6 +35,9 @@ export const aiSafetyService = {
     }
     if (decision.confidence < (input.minConfidence ?? env.AI_MIN_CONFIDENCE)) {
       return { allowed: false, decision, blockedReason: "AI confidence is below the configured threshold.", status: "BLOCKED_LOW_CONFIDENCE" };
+    }
+    if (decision.intent === "COMPLAINT" && decision.shouldReply && decision.replyText?.trim()) {
+      return { allowed: true, decision, status: "SUCCESS" };
     }
     if (decision.requiresHumanReview || HIGH_RISK_INTENTS.has(decision.intent)) {
       return { allowed: false, decision, blockedReason: decision.reason || "AI requested human review.", status: "BLOCKED_POLICY" };

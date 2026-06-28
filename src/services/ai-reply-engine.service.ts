@@ -26,6 +26,7 @@ import { realtimeService } from "./realtime.service";
 import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.service";
 import { appointmentInternalService } from "./appointment.service";
 import { aiHumanReviewService, humanReviewTypeForBlockedAi } from "./ai-human-review.service";
+import { customerIssueService } from "./customer-issue.service";
 
 export type AiReplyActor = {
   userId: string;
@@ -71,6 +72,10 @@ function isManager(actor: AiReplyActor) {
 function safeProviderError(error: unknown) {
   if (error instanceof AppError) return error.code;
   return "AI_PROVIDER_ERROR";
+}
+
+function isComplaintDecision(decision: { intent?: string | null; complaint?: { isComplaint?: boolean } } | undefined) {
+  return decision?.intent === "COMPLAINT" || decision?.complaint?.isComplaint === true;
 }
 
 async function invalidateConversationCaches(businessId: string, conversationId: string, leadId: string) {
@@ -306,7 +311,7 @@ export const aiReplyEngine = {
             aiMinConfidence: true,
           },
         },
-        lead: { select: { id: true, phone: true } },
+        lead: { select: { id: true, phone: true, assignedStaffId: true } },
       },
     });
     if (!conversation || conversation.business.deletedAt) {
@@ -494,6 +499,11 @@ export const aiReplyEngine = {
       });
       if (!safety.allowed) {
         const reviewReason = safety.blockedReason ?? safety.decision.reason;
+        const reviewType = humanReviewTypeForBlockedAi({
+          status: safety.status,
+          intent: safety.decision.intent,
+          reason: reviewReason,
+        });
         const notifications = await markConversationNeedsHumanReview({
           businessId: conversation.businessId,
           businessAccountId: conversation.business.businessAccountId,
@@ -503,17 +513,28 @@ export const aiReplyEngine = {
           accountUsageId: usage.usage.id,
           reason: reviewReason,
           messageId: message.id,
-          reviewType: humanReviewTypeForBlockedAi({
-            status: safety.status,
-            intent: safety.decision.intent,
-            reason: reviewReason,
-          }),
+          reviewType,
           source: "AI_SAFETY",
           metadata: {
             intent: safety.decision.intent,
             confidence: safety.decision.confidence,
           },
         });
+        if (usage.subscription.plan.code === PlanCode.BASIC && reviewType === HumanReviewType.COMPLAINT) {
+          await customerIssueService.handleBasicSafeHandoff({
+            businessId: conversation.businessId,
+            businessAccountId: conversation.business.businessAccountId,
+            conversationId: conversation.id,
+            leadId: conversation.leadId,
+            customerMessageId: message.id,
+            customerMessageContent: message.content,
+            conversationAssignedMembershipId: conversation.assignedStaffId,
+            clientOwnerMembershipId: conversation.lead.assignedStaffId,
+            decision: safety.decision,
+            accountUsageId: usage.usage.id,
+            plan: usage.subscription.plan.code,
+          }).catch((error) => console.error("Basic AI safe handoff side effects failed", error));
+        }
         await Promise.all([
           logInteraction({
             businessId: conversation.businessId,
@@ -739,6 +760,30 @@ export const aiReplyEngine = {
         },
       });
 
+      const customerIssueResult = isComplaintDecision(safety.decision)
+        ? await customerIssueService.createFromAiDecision({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          customerMessageId: message.id,
+          customerMessageContent: message.content,
+          conversationAssignedMembershipId: conversation.assignedStaffId,
+          clientOwnerMembershipId: conversation.lead.assignedStaffId,
+          decision: safety.decision,
+          accountUsageId: usage.usage.id,
+          plan: usage.subscription.plan.code,
+        }).catch((error) => {
+          console.error("Customer issue side effects failed", {
+            businessId: conversation.businessId,
+            conversationId: conversation.id,
+            messageId: message.id,
+            error,
+          });
+          return null;
+        })
+        : null;
+
       const finalStatus: AiExecutionStatus = deliveryStatus === MessageDeliveryStatus.FAILED ? "WHATSAPP_SEND_FAILED" : successStatus;
       await Promise.all([
         aiUsageService.trackReply({ accountUsageId: usage.usage.id, businessUsageId: businessUsage?.id }),
@@ -791,9 +836,10 @@ export const aiReplyEngine = {
           status: finalStatus,
           bookingRequestCreated,
           appointmentId: bookingAppointment?.id ?? null,
+          customerIssueCreated: Boolean(customerIssueResult && "issue" in customerIssueResult),
         },
       });
-      return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision };
+      return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision, customerIssue: customerIssueResult };
     } catch (error) {
       const errorCode = safeProviderError(error);
       await logInteraction({

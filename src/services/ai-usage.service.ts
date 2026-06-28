@@ -81,4 +81,26 @@ export const aiUsageService = {
       data: { aiBookingRequestsCreated: { increment: 1 } },
     });
   },
+
+  async trackSafeHandoff(input: { accountUsageId: string; emailSent?: boolean }) {
+    return prisma.accountUsageRecord.update({
+      where: { id: input.accountUsageId },
+      data: {
+        aiSafeHandoffsTriggered: { increment: 1 },
+        ...(input.emailSent ? { aiSafeHandoffEmailsSent: { increment: 1 } } : {}),
+      },
+    });
+  },
+
+  async trackCustomerIssue(input: { accountUsageId: string; routed?: boolean; emailSent?: boolean }) {
+    return prisma.accountUsageRecord.update({
+      where: { id: input.accountUsageId },
+      data: {
+        aiComplaintsDetected: { increment: 1 },
+        customerIssuesLogged: { increment: 1 },
+        ...(input.routed ? { customerIssuesRouted: { increment: 1 } } : {}),
+        ...(input.emailSent ? { customerIssueEmailsSent: { increment: 1 } } : {}),
+      },
+    });
+  },
 };
