@@ -581,6 +581,9 @@ export const conversationService = {
   },
 
   async updateStatus(actor: ConversationActor, conversationId: string, status: ConversationStatus, context: Omit<AuditInput, "action">) {
+    if (status === ConversationStatus.PLAN_LIMIT_BLOCKED) {
+      throw new AppError(422, "PLAN_LIMIT_BLOCKED is an internal status and cannot be set manually.", "VALIDATION_ERROR");
+    }
     if (actor.role === BusinessRole.STAFF && status === ConversationStatus.AI_HANDLING) {
       throw new AppError(403, "Only an owner or manager can move a conversation back to AI handling.", "FORBIDDEN");
     }
