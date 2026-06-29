@@ -23,6 +23,11 @@ const serviceFields = {
   bufferMinutes: z.number().int().min(0).max(1440).optional(),
   requiresPayment: z.boolean().optional(),
   paymentRequiredBeforeBooking: z.boolean().optional(),
+  autoConfirmEligible: z.boolean().optional(),
+  requiresManualApproval: z.boolean().optional(),
+  requiresDepositBeforeConfirmation: z.boolean().optional(),
+  requiresLocationBeforeConfirmation: z.boolean().optional(),
+  requiresStaffAssignment: z.boolean().optional(),
   isBookable: z.boolean().optional(),
   isActive: z.boolean().optional(),
 };

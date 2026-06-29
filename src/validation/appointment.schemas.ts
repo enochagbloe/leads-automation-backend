@@ -69,6 +69,10 @@ export const appointmentSettingsSchema = z.object({
   appointmentConfirmationMode: z.nativeEnum(AppointmentConfirmationMode),
 });
 
+export const appointmentAutoConfirmSettingsSchema = z.object({
+  aiAutoConfirmAppointmentsEnabled: z.boolean(),
+}).strict();
+
 export const createAppointmentSchema = z.object({
   leadId: z.string().cuid().nullable().optional(),
   conversationId: z.string().cuid().nullable().optional(),
@@ -87,8 +91,7 @@ export const createAppointmentSchema = z.object({
   durationMinutes,
   locationType: z.nativeEnum(AppointmentLocationType).default(AppointmentLocationType.TO_BE_CONFIRMED),
   location: nullableText(500),
-  source: z.nativeEnum(AppointmentSource).default(AppointmentSource.MANUAL),
-}).superRefine((input, context) => {
+}).strict().superRefine((input, context) => {
   if (!input.leadId && !input.conversationId && !input.customerPhone) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["customerPhone"], message: "customerPhone is required when no lead or conversation is provided" });
   }
@@ -158,6 +161,7 @@ export type AppointmentListQuery = z.infer<typeof appointmentListQuerySchema>;
 export type AppointmentCalendarQuery = z.infer<typeof appointmentCalendarQuerySchema>;
 export type CheckAppointmentAvailabilityInput = z.infer<typeof checkAppointmentAvailabilitySchema>;
 export type AppointmentSettingsInput = z.infer<typeof appointmentSettingsSchema>;
+export type AppointmentAutoConfirmSettingsInput = z.infer<typeof appointmentAutoConfirmSettingsSchema>;
 export type CreateAppointmentInput = z.infer<typeof createAppointmentSchema>;
 export type RescheduleAppointmentInput = z.infer<typeof rescheduleAppointmentSchema>;
 export type CancelAppointmentInput = z.infer<typeof cancelAppointmentSchema>;

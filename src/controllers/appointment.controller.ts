@@ -22,6 +22,8 @@ function appointmentId(req: Request) {
 export const appointmentController = {
   list: async (req, res) => res.json(await appointmentService.list(actor(req), res.locals.validatedQuery as AppointmentListQuery)),
   calendar: async (req, res) => res.json(await appointmentService.calendar(actor(req), res.locals.validatedQuery as AppointmentCalendarQuery)),
+  getAutoConfirmSettings: async (req, res) => res.json(await appointmentService.getAutoConfirmSettings(actor(req))),
+  updateAutoConfirmSettings: async (req, res) => res.json(await appointmentService.updateAutoConfirmSettings(actor(req), req.body, requestMetadata(req))),
   updateSettings: async (req, res) => res.json(await appointmentService.updateSettings(actor(req), req.body, requestMetadata(req))),
   checkAvailability: async (req, res) => res.json(await appointmentService.checkAvailability(actor(req), req.body)),
   create: async (req, res) => res.status(201).json(await appointmentService.create(actor(req), req.body, requestMetadata(req))),

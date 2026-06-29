@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import {
   AppointmentActivityType,
   AppointmentConfirmationMode,
+  AppointmentConfirmationSource,
   AppointmentHumanConfirmationReason,
   AppointmentLocationStatus,
   AppointmentLocationType,
@@ -22,9 +23,11 @@ import {
   SubscriptionStatus,
 } from "@prisma/client";
 import { prisma } from "../config/prisma";
+import { env } from "../config/env";
 import { AppError } from "../utils/errors";
 import {
   AppointmentCalendarQuery,
+  AppointmentAutoConfirmSettingsInput,
   AppointmentSettingsInput,
   AppointmentListQuery,
   CheckAppointmentAvailabilityInput,
@@ -39,6 +42,7 @@ import { invalidateConversationCache } from "./conversation.service";
 import { createSystemMessage } from "./message.service";
 import { realtimeService, RealtimeEventType } from "./realtime.service";
 import { notificationService } from "./notification.service";
+import { evaluatePremiumAppointmentAutoConfirmation } from "./premium-appointment-auto-confirm.service";
 
 export type AppointmentActor = {
   userId: string;
@@ -46,6 +50,26 @@ export type AppointmentActor = {
   businessId: string;
   membershipId: string;
   role: BusinessRole;
+};
+
+type AppointmentAiDecisionContext = {
+  confidence?: number | null;
+  intent?: string | null;
+  reason?: string | null;
+  requiresHumanReview?: boolean | null;
+  suggestedAction?: string | null;
+};
+
+type InternalCreateAppointmentInput = CreateAppointmentInput & {
+  source: AppointmentSource;
+  aiDecision?: AppointmentAiDecisionContext | null;
+};
+
+type CreationConfirmation = {
+  status: AppointmentStatus;
+  locationStatus: AppointmentLocationStatus;
+  humanConfirmationRequired: boolean;
+  humanConfirmationReason: AppointmentHumanConfirmationReason | null;
 };
 
 const ACTIVE_APPOINTMENT_STATUSES = [
@@ -104,6 +128,13 @@ const appointmentInclude = {
       durationMinutes: true,
       bufferMinutes: true,
       isBookable: true,
+      autoConfirmEligible: true,
+      requiresManualApproval: true,
+      requiresPayment: true,
+      paymentRequiredBeforeBooking: true,
+      requiresDepositBeforeConfirmation: true,
+      requiresLocationBeforeConfirmation: true,
+      requiresStaffAssignment: true,
       isActive: true,
       isArchived: true,
       readinessStatus: true,
@@ -343,7 +374,14 @@ function assignedStaffFilter(actor: AppointmentActor, requestedAssignedStaffId?:
 async function validateBusiness(actor: AppointmentActor, tx: Prisma.TransactionClient = prisma) {
   const business = await tx.business.findFirst({
     where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
-    select: { id: true, businessAccountId: true, timezone: true, defaultCurrency: true, appointmentConfirmationMode: true },
+    select: {
+      id: true,
+      businessAccountId: true,
+      timezone: true,
+      defaultCurrency: true,
+      appointmentConfirmationMode: true,
+      aiAutoConfirmAppointmentsEnabled: true,
+    },
   });
   if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
   return business;
@@ -468,7 +506,7 @@ function confirmationForCreation(
   location: ReturnType<typeof statusForLocation>,
   assignedStaffId: string | null,
   availability: { available: boolean; reason: string | null },
-) {
+): CreationConfirmation {
   const businessConfirmationSource = source !== AppointmentSource.MANUAL;
   if (planCode === PlanCode.BASIC && source === AppointmentSource.AI_CONVERSATION) {
     return {
@@ -597,6 +635,7 @@ async function createConfirmationNotifications(tx: Prisma.TransactionClient, act
   const isReview = appointment.status === AppointmentStatus.NEEDS_HUMAN_CONFIRMATION;
   const notifications = [];
   for (const recipient of uniqueRecipients) {
+    const canManageAppointment = recipient.role === BusinessRole.BUSINESS_OWNER || recipient.role === BusinessRole.MANAGER;
     notifications.push(await notificationService.createNotification({
       businessId: actor.businessId,
       businessAccountId: actor.businessAccountId,
@@ -608,7 +647,9 @@ async function createConfirmationNotifications(tx: Prisma.TransactionClient, act
       message,
       entityType: BusinessNotificationEntityType.APPOINTMENT,
       entityId: appointment.id,
-      actions: isReview ? [...APPOINTMENT_REVIEW_ACTIONS] : [...APPOINTMENT_CONFIRMATION_ACTIONS],
+      actions: canManageAppointment
+        ? isReview ? [...APPOINTMENT_REVIEW_ACTIONS] : [...APPOINTMENT_CONFIRMATION_ACTIONS]
+        : [...APPOINTMENT_ASSIGNED_ACTIONS],
       deferSideEffects: true,
       metadata: {
         appointmentId: appointment.id,
@@ -695,15 +736,15 @@ async function createStaffAssignmentNotifications(
   return notifications;
 }
 
-async function checkSlot(input: CheckAppointmentAvailabilityInput & { businessId: string }) {
-  const { service, durationMinutes } = await validateService(input.businessId, input.serviceId, input.durationMinutes);
-  const assignee = await validateAssignee(input.businessId, input.assignedStaffId);
+async function checkSlot(input: CheckAppointmentAvailabilityInput & { businessId: string }, tx: Prisma.TransactionClient = prisma) {
+  const { service, durationMinutes } = await validateService(input.businessId, input.serviceId, input.durationMinutes, tx);
+  const assignee = await validateAssignee(input.businessId, input.assignedStaffId, tx);
   const startTime = zonedDateTimeToUtc(input.date, input.time, input.timezone);
   const endTime = new Date(startTime.getTime() + durationMinutes * 60_000);
   const { totalMinutes: startMinutes } = parseTime(input.time);
   const endMinutes = startMinutes + durationMinutes;
   const day = dayOfWeekFor(startTime, input.timezone);
-  const rule = await prisma.businessAvailability.findFirst({
+  const rule = await tx.businessAvailability.findFirst({
     where: { businessId: input.businessId, dayOfWeek: day, isActive: true },
   });
   if (!rule || !rule.isOpen || !rule.openTime || !rule.closeTime) {
@@ -722,7 +763,7 @@ async function checkSlot(input: CheckAppointmentAvailabilityInput & { businessId
     }
   }
   if (assignee) {
-    const conflict = await prisma.appointment.findFirst({
+    const conflict = await tx.appointment.findFirst({
       where: {
         businessId: input.businessId,
         assignedStaffId: assignee.id,
@@ -746,6 +787,19 @@ async function checkSlot(input: CheckAppointmentAvailabilityInput & { businessId
     durationMinutes,
     warnings: service ? [] as string[] : ["No service selected; using manual duration."],
   };
+}
+
+async function lockAppointmentAvailabilityScope(
+  tx: Prisma.TransactionClient,
+  input: Pick<CheckAppointmentAvailabilityInput, "assignedStaffId" | "date"> & { businessId: string },
+) {
+  if (!input.assignedStaffId) return;
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${input.businessId}),
+      hashtext(${`${input.assignedStaffId}:${input.date}`})
+    )
+  `;
 }
 
 function appointmentLimitError(plan: { code: PlanCode; name: string; maxAppointmentsPerMonth: number | null }, current: number) {
@@ -1036,6 +1090,31 @@ async function audit(
   });
 }
 
+async function updateAppointmentIfUnchanged(
+  tx: Prisma.TransactionClient,
+  actor: AppointmentActor,
+  existing: { id: string; status: AppointmentStatus; updatedAt: Date },
+  data: Prisma.AppointmentUncheckedUpdateInput,
+) {
+  const changed = await tx.appointment.updateMany({
+    where: {
+      id: existing.id,
+      businessId: actor.businessId,
+      status: existing.status,
+      updatedAt: existing.updatedAt,
+    },
+    data: { updatedAt: new Date() },
+  });
+  if (changed.count !== 1) {
+    throw new AppError(409, "Appointment changed. Refresh and try again.", "APPOINTMENT_STATE_CHANGED");
+  }
+  return tx.appointment.update({
+    where: { id: existing.id },
+    data,
+    include: appointmentInclude,
+  });
+}
+
 async function loadAppointment(actor: AppointmentActor, appointmentId: string) {
   const appointment = await prisma.appointment.findFirst({
     where: { id: appointmentId, ...accessWhere(actor) },
@@ -1045,13 +1124,14 @@ async function loadAppointment(actor: AppointmentActor, appointmentId: string) {
   return withAvailableActions(appointment);
 }
 
-async function createAppointmentFromValidatedInput(actor: AppointmentActor, input: CreateAppointmentInput, context: Omit<AuditInput, "action">) {
+async function createAppointmentFromValidatedInput(actor: AppointmentActor, input: InternalCreateAppointmentInput, context: Omit<AuditInput, "action">) {
   requireManager(actor);
   const business = await validateBusiness(actor);
   const subscription = await activeSubscription(actor);
   const linked = await resolveLinkedRecords(actor, input);
   const assignedStaffId = input.assignedStaffId ?? linked.lead?.assignedStaffId ?? null;
   await validateAssignee(actor.businessId, assignedStaffId);
+  const serviceValidation = await validateService(actor.businessId, input.serviceId ?? null, input.durationMinutes);
   const availability = await checkSlot({
     businessId: actor.businessId,
     serviceId: input.serviceId ?? undefined,
@@ -1082,8 +1162,65 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
   let assignmentNotifications: Array<{ id: string; recipientMembershipId: string; recipientUserId: string; type: BusinessNotificationType; priority: BusinessNotificationPriority; status: BusinessNotificationStatus; title: string; message: string; createdAt: Date }> = [];
   const appointment = await prisma.$transaction(async (tx) => {
     await validateBusiness(actor, tx);
+    await lockAppointmentAvailabilityScope(tx, { businessId: actor.businessId, assignedStaffId, date: input.date });
+    const transactionAvailability = await checkSlot({
+      businessId: actor.businessId,
+      serviceId: input.serviceId ?? undefined,
+      date: input.date,
+      time: input.time,
+      timezone: input.timezone,
+      assignedStaffId,
+      durationMinutes: input.durationMinutes,
+    }, tx);
+    const canDeferTransactionStaffConflict = (
+      (
+        (subscription.plan.code !== PlanCode.BASIC && business.appointmentConfirmationMode === AppointmentConfirmationMode.AUTO_CONFIRM_WHEN_STAFF_ASSIGNED)
+        || (subscription.plan.code === PlanCode.PREMIUM && business.appointmentConfirmationMode === AppointmentConfirmationMode.AUTO_CONFIRM_SAFE_BOOKINGS)
+      )
+      && input.source !== AppointmentSource.MANUAL
+      && transactionAvailability.reason === "APPOINTMENT_STAFF_UNAVAILABLE"
+      && Boolean(assignedStaffId)
+    );
+    if (!transactionAvailability.available && !canDeferTransactionStaffConflict) {
+      throw new AppError(
+        422,
+        transactionAvailability.message ?? "Appointment slot is unavailable.",
+        transactionAvailability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE",
+        { availability: transactionAvailability },
+      );
+    }
     await incrementAppointmentUsage(tx, actor);
-    const confirmation = confirmationForCreation(subscription.plan.code, business.appointmentConfirmationMode, input.source, location, assignedStaffId, availability);
+    const autoConfirmDecision = evaluatePremiumAppointmentAutoConfirmation({
+      planCode: subscription.plan.code,
+      appointmentConfirmationMode: business.appointmentConfirmationMode,
+      aiAutoConfirmAppointmentsEnabled: business.aiAutoConfirmAppointmentsEnabled,
+      source: input.source,
+      service: serviceValidation.service,
+      customerName,
+      customerPhone,
+      assignedStaffId,
+      locationStatus: location.locationStatus,
+      availability: transactionAvailability,
+      aiDecision: input.aiDecision,
+    });
+    let confirmation = confirmationForCreation(subscription.plan.code, business.appointmentConfirmationMode, input.source, location, assignedStaffId, transactionAvailability);
+    if (input.source === AppointmentSource.AI_CONVERSATION) {
+      confirmation = autoConfirmDecision.shouldAutoConfirm
+        ? {
+          status: AppointmentStatus.CONFIRMED,
+          locationStatus: location.locationStatus,
+          humanConfirmationRequired: false,
+          humanConfirmationReason: null,
+        }
+        : {
+          status: transactionAvailability.available ? AppointmentStatus.PENDING_BUSINESS_CONFIRMATION : AppointmentStatus.NEEDS_HUMAN_CONFIRMATION,
+          locationStatus: location.locationStatus,
+          humanConfirmationRequired: true,
+          humanConfirmationReason: transactionAvailability.available
+            ? location.humanConfirmationReason ?? AppointmentHumanConfirmationReason.BUSINESS_CONFIRMATION_REQUIRED
+            : AppointmentHumanConfirmationReason.AVAILABILITY_CONFLICT,
+        };
+    }
     const created = await tx.appointment.create({
       data: {
         businessId: actor.businessId,
@@ -1099,17 +1236,25 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
         description: input.description,
         notes: input.notes,
         appointmentDate: appointmentDateUtc(input.date),
-        startTime: availability.startTime,
-        endTime: availability.endTime,
+        startTime: transactionAvailability.startTime,
+        endTime: transactionAvailability.endTime,
         timezone: input.timezone,
         status: confirmation.status,
         source: input.source,
         locationType: input.locationType,
         location: input.location,
         locationStatus: confirmation.locationStatus,
+        confirmationSource: input.source === AppointmentSource.AI_CONVERSATION
+          ? autoConfirmDecision.shouldAutoConfirm ? AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM : AppointmentConfirmationSource.AI_REQUEST
+          : AppointmentConfirmationSource.MANUAL,
+        autoConfirmedAt: autoConfirmDecision.shouldAutoConfirm ? new Date() : null,
+        autoConfirmDecisionReason: autoConfirmDecision.evaluated ? autoConfirmDecision.decisionReason : null,
+        autoConfirmFailedReason: autoConfirmDecision.failedReason,
+        autoConfirmConfidence: autoConfirmDecision.confidence,
         humanConfirmationRequired: confirmation.humanConfirmationRequired,
         humanConfirmationReason: confirmation.humanConfirmationReason,
         createdById: actor.userId,
+        confirmedAt: autoConfirmDecision.shouldAutoConfirm ? new Date() : null,
       },
       include: appointmentInclude,
     });
@@ -1119,6 +1264,86 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
       conversationId: created.conversationId,
       assignedStaffId: created.assignedStaffId,
     });
+    if (autoConfirmDecision.evaluated) {
+      await tx.auditLog.create({
+        data: {
+          action: AuditAction.AI_APPOINTMENT_AUTO_CONFIRM_EVALUATED,
+          businessId: actor.businessId,
+          userId: actor.userId,
+          actorMembershipId: actor.membershipId,
+          metadata: json({
+            appointmentId: created.id,
+            confirmationSource: created.confirmationSource,
+            confidence: autoConfirmDecision.confidence,
+            shouldAutoConfirm: autoConfirmDecision.shouldAutoConfirm,
+            failedReasons: autoConfirmDecision.failedReasons,
+          }),
+        },
+      });
+      if (autoConfirmDecision.shouldAutoConfirm) {
+        await logAppointmentActivity(tx, actor, created.id, AppointmentActivityType.APPOINTMENT_AUTO_CONFIRMED_BY_AI, "Premium AI auto-confirmed this safe appointment booking.", {
+          confirmationSource: created.confirmationSource,
+          confidence: autoConfirmDecision.confidence,
+          reason: autoConfirmDecision.decisionReason,
+        });
+        await tx.auditLog.create({
+          data: {
+            action: AuditAction.AI_APPOINTMENT_AUTO_CONFIRMED,
+            businessId: actor.businessId,
+            userId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            metadata: json({
+              appointmentId: created.id,
+              oldStatus: null,
+              newStatus: created.status,
+              confirmationSource: created.confirmationSource,
+              confidence: autoConfirmDecision.confidence,
+            }),
+          },
+        });
+      } else {
+        await logAppointmentActivity(tx, actor, created.id, AppointmentActivityType.APPOINTMENT_AUTO_CONFIRM_SKIPPED, "AI auto-confirmation was skipped; business confirmation is required.", {
+          confirmationSource: created.confirmationSource,
+          confidence: autoConfirmDecision.confidence,
+          failedReasons: autoConfirmDecision.failedReasons,
+        });
+        await logAppointmentActivity(tx, actor, created.id, AppointmentActivityType.APPOINTMENT_PENDING_CONFIRMATION_CREATED_BY_AI, "AI created a pending appointment request for business confirmation.", {
+          confirmationSource: created.confirmationSource,
+          failedReason: autoConfirmDecision.failedReason,
+        });
+        await tx.auditLog.create({
+          data: {
+            action: AuditAction.AI_APPOINTMENT_AUTO_CONFIRM_BLOCKED,
+            businessId: actor.businessId,
+            userId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            metadata: json({
+              appointmentId: created.id,
+              oldStatus: null,
+              newStatus: created.status,
+              confirmationSource: created.confirmationSource,
+              confidence: autoConfirmDecision.confidence,
+              failedReasons: autoConfirmDecision.failedReasons,
+            }),
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: AuditAction.AI_APPOINTMENT_AUTO_CONFIRM_FALLBACK_PENDING,
+            businessId: actor.businessId,
+            userId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            metadata: json({
+              appointmentId: created.id,
+              oldStatus: null,
+              newStatus: created.status,
+              confirmationSource: created.confirmationSource,
+              failedReason: autoConfirmDecision.failedReason,
+            }),
+          },
+        });
+      }
+    }
     if (created.humanConfirmationRequired) {
       await logAppointmentActivity(tx, actor, created.id, AppointmentActivityType.HUMAN_CONFIRMATION_REQUIRED, "Human confirmation is required before this appointment is fully confirmed.", {
         reason: created.humanConfirmationReason,
@@ -1283,6 +1508,9 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
     ] : []),
     publishAndInvalidate(actor, "business.appointment.created", appointment),
     ...(assignmentNotifications.length > 0 ? [publishAndInvalidate(actor, "business.appointment.confirmed", appointment)] : []),
+    ...(appointment.confirmationSource === AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM ? [
+      publishAndInvalidate(actor, "business.appointment.auto_confirmed", appointment),
+    ] : []),
   ]);
   await publishNotificationEvents(actor, appointment, confirmationNotifications);
   await publishNotificationEvents(actor, appointment, assignmentNotifications);
@@ -1349,9 +1577,7 @@ async function rescheduleAppointmentFromValidatedInput(actor: AppointmentActor, 
     throw new AppError(422, availability.message ?? "Appointment slot is unavailable.", availability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE", { availability });
   }
   const updated = await prisma.$transaction(async (tx) => {
-    const record = await tx.appointment.update({
-      where: { id: appointmentId },
-      data: {
+    const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
         appointmentDate: appointmentDateUtc(input.date),
         startTime: availability.startTime,
         endTime: availability.endTime,
@@ -1365,9 +1591,7 @@ async function rescheduleAppointmentFromValidatedInput(actor: AppointmentActor, 
         lastRescheduledById: actor.membershipId,
         outcomeRequiredAt: null,
         updatedById: actor.userId,
-      },
-      include: appointmentInclude,
-    });
+      });
     await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_RESCHEDULED, appointmentMessage(AppointmentActivityType.APPOINTMENT_RESCHEDULED, record), {
       oldDate: existing.appointmentDate,
       oldStartTime: existing.startTime,
@@ -1411,6 +1635,83 @@ async function rescheduleAppointmentFromValidatedInput(actor: AppointmentActor, 
 }
 
 export const appointmentService = {
+  async getAutoConfirmSettings(actor: AppointmentActor) {
+    const [business, subscription] = await Promise.all([
+      validateBusiness(actor),
+      activeSubscription(actor),
+    ]);
+    return {
+      settings: {
+        aiAutoConfirmAppointmentsEnabled: business.aiAutoConfirmAppointmentsEnabled,
+        appointmentConfirmationMode: business.appointmentConfirmationMode,
+        minConfidence: env.AI_AUTO_CONFIRM_MIN_CONFIDENCE,
+        currentPlan: subscription.plan.code,
+        canEnable: subscription.plan.code === PlanCode.PREMIUM,
+      },
+    };
+  },
+
+  async updateAutoConfirmSettings(actor: AppointmentActor, input: AppointmentAutoConfirmSettingsInput, context: Omit<AuditInput, "action">) {
+    requireManager(actor);
+    const [business, subscription] = await Promise.all([
+      validateBusiness(actor),
+      activeSubscription(actor),
+    ]);
+    if (input.aiAutoConfirmAppointmentsEnabled && subscription.plan.code !== PlanCode.PREMIUM) {
+      throw new AppError(403, "Upgrade to Premium to enable AI appointment auto-confirmation.", "PLAN_UPGRADE_REQUIRED", {
+        currentPlan: subscription.plan.code,
+        recommendedPlan: PlanCode.PREMIUM,
+        featureKey: "aiAutoConfirmAppointmentsEnabled",
+      });
+    }
+    const updated = await prisma.business.update({
+      where: { id: actor.businessId },
+      data: { aiAutoConfirmAppointmentsEnabled: input.aiAutoConfirmAppointmentsEnabled },
+      select: {
+        id: true,
+        appointmentConfirmationMode: true,
+        aiAutoConfirmAppointmentsEnabled: true,
+        updatedAt: true,
+      },
+    });
+    await Promise.all([
+      invalidateAppointmentCaches(actor.businessId),
+      auditService.log({
+        ...context,
+        action: AuditAction.APPOINTMENT_CONFIRMATION_MODE_UPDATED,
+        businessId: actor.businessId,
+        userId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        metadata: json({
+          businessId: actor.businessId,
+          field: "aiAutoConfirmAppointmentsEnabled",
+          oldValue: business.aiAutoConfirmAppointmentsEnabled,
+          newValue: updated.aiAutoConfirmAppointmentsEnabled,
+          currentPlan: subscription.plan.code,
+        }),
+      }),
+    ]);
+    realtimeService.publish({
+      type: "business.appointment.updated",
+      businessId: actor.businessId,
+      payload: {
+        businessId: actor.businessId,
+        aiAutoConfirmAppointmentsEnabled: updated.aiAutoConfirmAppointmentsEnabled,
+        appointmentConfirmationMode: updated.appointmentConfirmationMode,
+        updatedAt: updated.updatedAt.toISOString(),
+      },
+    });
+    return {
+      settings: {
+        aiAutoConfirmAppointmentsEnabled: updated.aiAutoConfirmAppointmentsEnabled,
+        appointmentConfirmationMode: updated.appointmentConfirmationMode,
+        minConfidence: env.AI_AUTO_CONFIRM_MIN_CONFIDENCE,
+        currentPlan: subscription.plan.code,
+        canEnable: subscription.plan.code === PlanCode.PREMIUM,
+      },
+    };
+  },
+
   async updateSettings(actor: AppointmentActor, input: AppointmentSettingsInput, context: Omit<AuditInput, "action">) {
     requireManager(actor);
     const subscription = await activeSubscription(actor);
@@ -1471,15 +1772,16 @@ export const appointmentService = {
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
     const dateRange = rangeFromDates(query.dateFrom, query.dateTo);
-    const where: Prisma.AppointmentWhereInput = {
-      ...accessWhere(actor),
-      ...(query.status ? { status: query.status } : {}),
-      ...(query.source ? { source: query.source } : {}),
-      ...(query.serviceId ? { serviceId: query.serviceId } : {}),
-      ...assignedStaffFilter(actor, query.assignedStaffId),
-      ...(query.leadId ? { leadId: query.leadId } : {}),
-      ...(query.conversationId ? { conversationId: query.conversationId } : {}),
-      ...(query.search ? {
+    const filters: Prisma.AppointmentWhereInput[] = [accessWhere(actor)];
+    if (query.status) filters.push({ status: query.status });
+    if (query.source) filters.push({ source: query.source });
+    if (query.serviceId) filters.push({ serviceId: query.serviceId });
+    const assignedFilter = assignedStaffFilter(actor, query.assignedStaffId);
+    if (Object.keys(assignedFilter).length > 0) filters.push(assignedFilter);
+    if (query.leadId) filters.push({ leadId: query.leadId });
+    if (query.conversationId) filters.push({ conversationId: query.conversationId });
+    if (query.search) {
+      filters.push({
         OR: [
           { title: { contains: query.search, mode: "insensitive" } },
           { description: { contains: query.search, mode: "insensitive" } },
@@ -1492,9 +1794,10 @@ export const appointmentService = {
           { lead: { email: { contains: query.search, mode: "insensitive" } } },
           { service: { name: { contains: query.search, mode: "insensitive" } } },
         ],
-      } : {}),
-      ...(dateRange ? { startTime: dateRange } : {}),
-    };
+      });
+    }
+    if (dateRange) filters.push({ startTime: dateRange });
+    const where: Prisma.AppointmentWhereInput = { AND: filters };
     const [data, total, grouped] = await prisma.$transaction([
       prisma.appointment.findMany({
         where,
@@ -1592,7 +1895,7 @@ export const appointmentService = {
   },
 
   async create(actor: AppointmentActor, input: CreateAppointmentInput, context: Omit<AuditInput, "action">) {
-    return createAppointmentFromValidatedInput(actor, input, context);
+    return createAppointmentFromValidatedInput(actor, { ...input, source: AppointmentSource.MANUAL }, context);
   },
 
   async reschedule(actor: AppointmentActor, appointmentId: string, input: RescheduleAppointmentInput, context: Omit<AuditInput, "action">) {
@@ -1606,18 +1909,40 @@ export const appointmentService = {
       throw new AppError(422, "This appointment cannot be confirmed.", "APPOINTMENT_CANNOT_CONFIRM");
     }
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: {
+      const localDate = dateInTimezone(existing.startTime, existing.timezone);
+      const localTime = timeInTimezone(existing.startTime, existing.timezone);
+      const durationMinutes = Math.max(1, Math.round((existing.endTime.getTime() - existing.startTime.getTime()) / 60_000));
+      await lockAppointmentAvailabilityScope(tx, {
+        businessId: actor.businessId,
+        assignedStaffId: existing.assignedStaffId,
+        date: localDate,
+      });
+      const availability = await checkSlot({
+        businessId: actor.businessId,
+        serviceId: existing.serviceId ?? undefined,
+        date: localDate,
+        time: localTime,
+        timezone: existing.timezone,
+        assignedStaffId: existing.assignedStaffId,
+        durationMinutes: existing.service?.durationMinutes ?? durationMinutes,
+        excludeAppointmentId: appointmentId,
+      }, tx);
+      if (!availability.available) {
+        throw new AppError(
+          422,
+          availability.message ?? "Appointment slot is unavailable.",
+          availability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE",
+          { availability },
+        );
+      }
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
           status: AppointmentStatus.CONFIRMED,
           confirmedAt: new Date(),
           confirmedById: actor.userId,
           humanConfirmationRequired: false,
           humanConfirmationReason: null,
           updatedById: actor.userId,
-        },
-        include: appointmentInclude,
-      });
+        });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_CONFIRMED, "Appointment confirmed.", {
         previousStatus: existing.status,
         newStatus: record.status,
@@ -1664,10 +1989,12 @@ export const appointmentService = {
       throw new AppError(422, "Appointments with a recorded outcome cannot be cancelled.", "APPOINTMENT_OUTCOME_ALREADY_RECORDED");
     }
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: { status: AppointmentStatus.CANCELLED, cancellationReason, cancelledAt: new Date(), cancelledById: actor.userId, updatedById: actor.userId },
-        include: appointmentInclude,
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
+        status: AppointmentStatus.CANCELLED,
+        cancellationReason,
+        cancelledAt: new Date(),
+        cancelledById: actor.userId,
+        updatedById: actor.userId,
       });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_CANCELLED, appointmentMessage(AppointmentActivityType.APPOINTMENT_CANCELLED, record, cancellationReason), { reasonProvided: true, previousStatus: existing.status });
       await logLeadAppointmentActivity(tx, actor, record.leadId, LeadActivityAction.APPOINTMENT_CANCELLED, { appointmentId, conversationId: record.conversationId, reasonProvided: true });
@@ -1701,9 +2028,7 @@ export const appointmentService = {
     assertAppointmentEndedForOutcome(existing, "complete");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: {
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
           status: AppointmentStatus.COMPLETED,
           completedAt: now,
           completedById: actor.userId,
@@ -1712,9 +2037,7 @@ export const appointmentService = {
           outcomeNote: completedNote?.trim() || null,
           completedNote: completedNote?.trim() || null,
           updatedById: actor.userId,
-        },
-        include: appointmentInclude,
-      });
+        });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_COMPLETED, appointmentMessage(AppointmentActivityType.APPOINTMENT_COMPLETED, record), {
         oldStatus: existing.status,
         newStatus: record.status,
@@ -1743,18 +2066,14 @@ export const appointmentService = {
     assertAppointmentEndedForOutcome(existing, "no-show");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: {
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
           status: AppointmentStatus.NO_SHOW,
           outcomeConfirmedAt: now,
           outcomeConfirmedById: actor.membershipId,
           outcomeNote: noShowReason?.trim() || null,
           noShowReason: noShowReason?.trim() || null,
           updatedById: actor.userId,
-        },
-        include: appointmentInclude,
-      });
+        });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_NO_SHOW, appointmentMessage(AppointmentActivityType.APPOINTMENT_NO_SHOW, record), {
         oldStatus: existing.status,
         newStatus: record.status,
@@ -1783,18 +2102,14 @@ export const appointmentService = {
     assertAppointmentEndedForOutcome(existing, "missed");
     const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: {
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
           status: AppointmentStatus.MISSED,
           outcomeConfirmedAt: now,
           outcomeConfirmedById: actor.membershipId,
           outcomeNote: missedReason?.trim() || null,
           missedReason: missedReason?.trim() || null,
           updatedById: actor.userId,
-        },
-        include: appointmentInclude,
-      });
+        });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_MISSED, "Appointment marked missed.", {
         oldStatus: existing.status,
         newStatus: record.status,
@@ -1852,9 +2167,7 @@ export const appointmentService = {
     }
     let assignmentNotifications: Array<{ id: string; recipientMembershipId: string; recipientUserId: string; type: BusinessNotificationType; priority: BusinessNotificationPriority; status: BusinessNotificationStatus; title: string; message: string; createdAt: Date }> = [];
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: {
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
           assignedStaffId,
           ...(shouldAutoConfirm ? {
             status: AppointmentStatus.CONFIRMED,
@@ -1864,8 +2177,6 @@ export const appointmentService = {
             humanConfirmationReason: null,
           } : {}),
           updatedById: actor.userId,
-        },
-        include: appointmentInclude,
       });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_STAFF_ASSIGNED, "Appointment staff assignment updated.", {
         previousAssignedStaffId: existing.assignedStaffId,
@@ -1951,10 +2262,9 @@ export const appointmentService = {
       throw new AppError(422, availability.message ?? "Appointment slot is unavailable.", availability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE", { availability });
     }
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.appointment.update({
-        where: { id: appointmentId },
-        data: { assignedStaffId: actor.membershipId, updatedById: actor.userId },
-        include: appointmentInclude,
+      const record = await updateAppointmentIfUnchanged(tx, actor, existing, {
+        assignedStaffId: actor.membershipId,
+        updatedById: actor.userId,
       });
       await logAppointmentActivity(tx, actor, appointmentId, AppointmentActivityType.APPOINTMENT_STAFF_ASSIGNED, "Appointment claimed by staff.", {
         previousAssignedStaffId: null,

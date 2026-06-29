@@ -3,8 +3,10 @@ import {
   ConversationChannel,
   ConversationStatus,
   LeadActivityAction,
+  AppointmentConfirmationSource,
   AppointmentLocationType,
   AppointmentSource,
+  AppointmentStatus,
   HumanReviewType,
   MessageDeliveryStatus,
   MessageDirection,
@@ -64,6 +66,57 @@ type AiExecutionStatus =
 function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
+
+const aiBookingAppointmentInclude = {
+  service: {
+    select: {
+      id: true,
+      name: true,
+      durationMinutes: true,
+      bufferMinutes: true,
+      isBookable: true,
+      autoConfirmEligible: true,
+      requiresManualApproval: true,
+      requiresPayment: true,
+      paymentRequiredBeforeBooking: true,
+      requiresDepositBeforeConfirmation: true,
+      requiresLocationBeforeConfirmation: true,
+      requiresStaffAssignment: true,
+      isActive: true,
+      isArchived: true,
+      readinessStatus: true,
+    },
+  },
+  lead: { select: { id: true, fullName: true, phone: true, email: true, status: true } },
+  conversation: { select: { id: true, displayId: true, channel: true, status: true, subject: true } },
+  assignedStaff: {
+    select: {
+      id: true,
+      role: true,
+      status: true,
+      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+    },
+  },
+  createdBy: { select: { id: true, firstName: true, lastName: true } },
+  updatedBy: { select: { id: true, firstName: true, lastName: true } },
+  confirmedBy: { select: { id: true, firstName: true, lastName: true } },
+  lastRescheduledBy: {
+    select: {
+      id: true,
+      role: true,
+      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+    },
+  },
+  outcomeConfirmedBy: {
+    select: {
+      id: true,
+      role: true,
+      user: { select: { id: true, firstName: true, lastName: true, email: true } },
+    },
+  },
+} satisfies Prisma.AppointmentInclude;
+
+type AiBookingAppointment = Prisma.AppointmentGetPayload<{ include: typeof aiBookingAppointmentInclude }>;
 
 function isManager(actor: AiReplyActor) {
   return actor.role === BusinessRole.BUSINESS_OWNER || actor.role === BusinessRole.MANAGER;
@@ -162,13 +215,94 @@ function validTime(value?: string) {
   return Boolean(value && /^([01]\d|2[0-3]):[0-5]\d$/.test(value));
 }
 
+function confirmedAppointmentReply(appointment: { service?: { name: string } | null; title: string; startTime: Date; timezone: string }) {
+  const when = new Intl.DateTimeFormat("en-US", {
+    timeZone: appointment.timezone,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(appointment.startTime);
+  const serviceName = appointment.service?.name ?? appointment.title;
+  return `Your ${serviceName} appointment is confirmed for ${when}. We’ll see you then.`;
+}
+
+function bookingIdempotencyKey(input: { businessId: string; conversationId: string; messageId: string }) {
+  return `ai_booking:${input.businessId}:${input.conversationId}:${input.messageId}:CREATE_BOOKING_REQUEST`;
+}
+
+async function appointmentFromBookingLog(appointmentId: string, businessId: string) {
+  return prisma.appointment.findFirst({
+    where: { id: appointmentId, businessId },
+    include: aiBookingAppointmentInclude,
+  });
+}
+
+async function waitForExistingBookingAppointment(input: { key: string; businessId: string }) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const existing = await prisma.aiInteractionLog.findUnique({
+      where: { bookingIdempotencyKey: input.key },
+      select: { appointmentId: true },
+    });
+    if (existing?.appointmentId) {
+      const appointment = await appointmentFromBookingLog(existing.appointmentId, input.businessId);
+      if (appointment) return appointment;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return null;
+}
+
 async function createAiBookingRequest(input: {
   context: AiBusinessContext;
   businessAccountId: string;
   conversationId: string;
   leadId: string;
+  messageId: string;
   decision: NonNullable<AiSafetyResult["decision"]>;
-}) {
+}): Promise<AiBookingAppointment> {
+  const key = bookingIdempotencyKey({
+    businessId: input.context.business.id,
+    conversationId: input.conversationId,
+    messageId: input.messageId,
+  });
+  const previous = await prisma.aiInteractionLog.findUnique({
+    where: { bookingIdempotencyKey: key },
+    select: { appointmentId: true },
+  });
+  if (previous?.appointmentId) {
+    const appointment = await appointmentFromBookingLog(previous.appointmentId, input.context.business.id);
+    if (appointment) return appointment;
+  }
+  try {
+    await prisma.aiInteractionLog.create({
+      data: {
+        businessId: input.context.business.id,
+        businessAccountId: input.businessAccountId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        provider: "OPENROUTER",
+        model: env.OPENROUTER_DEFAULT_MODEL ?? "unknown",
+        suggestedAction: "CREATE_BOOKING_REQUEST",
+        shouldReply: false,
+        requiresHumanReview: false,
+        bookingRequestCreated: false,
+        bookingIdempotencyKey: key,
+        latencyMs: 0,
+        status: "BOOKING_REQUEST_IN_PROGRESS",
+      },
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const appointment = await waitForExistingBookingAppointment({ key, businessId: input.context.business.id });
+      if (appointment) return appointment;
+      throw new AppError(409, "AI booking request is already being processed for this message.", "AI_BOOKING_REQUEST_IN_PROGRESS");
+    }
+    throw error;
+  }
+
   const intent = input.decision.appointmentIntent;
   const missing = new Set(intent?.missingFields ?? []);
   if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
@@ -203,7 +337,28 @@ async function createAiBookingRequest(input: {
     locationType: AppointmentLocationType.TO_BE_CONFIRMED,
     location: null,
     source: AppointmentSource.AI_CONVERSATION,
+    aiDecision: {
+      confidence: input.decision.confidence,
+      intent: input.decision.intent,
+      reason: input.decision.reason,
+      requiresHumanReview: input.decision.requiresHumanReview,
+      suggestedAction: input.decision.suggestedAction,
+    },
   }, { ipAddress: undefined, userAgent: undefined });
+  await prisma.aiInteractionLog.update({
+    where: { bookingIdempotencyKey: key },
+    data: {
+      bookingRequestCreated: true,
+      appointmentId: appointment.id,
+      intent: input.decision.intent,
+      confidence: input.decision.confidence,
+      suggestedAction: input.decision.suggestedAction,
+      shouldReply: input.decision.shouldReply,
+      requiresHumanReview: input.decision.requiresHumanReview,
+      blockedReason: null,
+      status: "BOOKING_REQUEST_CREATED",
+    },
+  });
   return appointment;
 }
 
@@ -553,7 +708,7 @@ export const aiReplyEngine = {
         return { status: safety.status, blocked: true, decision: safety.decision };
       }
 
-      let bookingAppointment: Awaited<ReturnType<typeof appointmentInternalService.createAppointmentFromValidatedInput>> | null = null;
+      let bookingAppointment: AiBookingAppointment | null = null;
       let bookingRequestCreated = false;
       let bookingBlockedReason: string | null = null;
       let replyText = safety.decision.replyText ?? "";
@@ -565,11 +720,15 @@ export const aiReplyEngine = {
             businessAccountId: conversation.business.businessAccountId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
+            messageId: message.id,
             decision: safety.decision,
           });
           bookingRequestCreated = true;
           successStatus = "SUCCESS_BOOKING_REQUEST_CREATED";
-          replyText = "Thanks. I’ve sent your appointment request to the business team for confirmation. They’ll confirm the final appointment shortly.";
+          replyText = bookingAppointment.status === AppointmentStatus.CONFIRMED
+            && bookingAppointment.confirmationSource === AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM
+            ? confirmedAppointmentReply(bookingAppointment)
+            : "Thanks. I’ve sent your appointment request to the business team for confirmation. They’ll confirm the final appointment shortly.";
           await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id });
           realtimeService.publish({
             type: "business.ai.booking_request.created",

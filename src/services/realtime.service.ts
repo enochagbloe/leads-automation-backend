@@ -40,6 +40,7 @@ export type RealtimeEventType =
   | "business.appointment.confirmation_required"
   | "business.appointment.needs_confirmation"
   | "business.appointment.confirmed"
+  | "business.appointment.auto_confirmed"
   | "business.appointment.outcome_required"
   | "business.appointment.completed"
   | "business.appointment.no_show"

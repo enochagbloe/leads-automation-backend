@@ -1,0 +1,29 @@
+-- Premium AI appointment auto-confirmation settings and decision metadata.
+
+CREATE TYPE "AppointmentConfirmationSource" AS ENUM ('MANUAL', 'AI_REQUEST', 'AI_PREMIUM_AUTO_CONFIRM', 'SYSTEM');
+
+ALTER TYPE "AppointmentActivityType" ADD VALUE IF NOT EXISTS 'APPOINTMENT_AUTO_CONFIRMED_BY_AI';
+ALTER TYPE "AppointmentActivityType" ADD VALUE IF NOT EXISTS 'APPOINTMENT_AUTO_CONFIRM_SKIPPED';
+ALTER TYPE "AppointmentActivityType" ADD VALUE IF NOT EXISTS 'APPOINTMENT_PENDING_CONFIRMATION_CREATED_BY_AI';
+
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'AI_APPOINTMENT_AUTO_CONFIRM_EVALUATED';
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'AI_APPOINTMENT_AUTO_CONFIRMED';
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'AI_APPOINTMENT_AUTO_CONFIRM_BLOCKED';
+ALTER TYPE "AuditAction" ADD VALUE IF NOT EXISTS 'AI_APPOINTMENT_AUTO_CONFIRM_FALLBACK_PENDING';
+
+ALTER TABLE "Business"
+  ADD COLUMN "aiAutoConfirmAppointmentsEnabled" BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE "Service"
+  ADD COLUMN "autoConfirmEligible" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "requiresManualApproval" BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN "requiresDepositBeforeConfirmation" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "requiresLocationBeforeConfirmation" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "requiresStaffAssignment" BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE "Appointment"
+  ADD COLUMN "confirmationSource" "AppointmentConfirmationSource" NOT NULL DEFAULT 'MANUAL',
+  ADD COLUMN "autoConfirmedAt" TIMESTAMP(3),
+  ADD COLUMN "autoConfirmDecisionReason" TEXT,
+  ADD COLUMN "autoConfirmFailedReason" TEXT,
+  ADD COLUMN "autoConfirmConfidence" DOUBLE PRECISION;
