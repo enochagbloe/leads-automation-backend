@@ -106,10 +106,6 @@ type ConversationAccessDecision =
 
 const blockedConversationPreview = "Locked customer message. Restore payment or wait for quota reset to unlock.";
 
-function isConversationBlockReason(value: unknown): value is ConversationBlockReason {
-  return value === "CONVERSATION_QUOTA_EXCEEDED" || value === "PAYMENT_FAILED" || value === "SUBSCRIPTION_INACTIVE";
-}
-
 function normalizePhone(phone: string) {
   return phone.trim().replace(/[\s()-]/g, "");
 }
@@ -298,13 +294,7 @@ async function persistInbound(
       const needsConversationSlot = !existingConversation
         || existingConversation.status === ConversationStatus.CLOSED
         || existingConversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED;
-      const accessDecision: ConversationAccessDecision = alreadyBlocked
-        ? {
-          blocked: true,
-          reason: isConversationBlockReason(existingConversation.lastAiBlockedReason) ? existingConversation.lastAiBlockedReason : "CONVERSATION_QUOTA_EXCEEDED",
-          message: "This conversation is locked until payment is restored or quota is available.",
-        }
-        : await getConversationAccessDecision(tx, business.businessAccountId, business.id, needsConversationSlot);
+      const accessDecision = await getConversationAccessDecision(tx, business.businessAccountId, business.id, needsConversationSlot);
       const blockedMetadata = accessDecision.blocked
         ? { accessBlocked: true, blockReason: accessDecision.reason, blockMessage: accessDecision.message }
         : {};
@@ -337,6 +327,35 @@ async function persistInbound(
           },
         });
         conversation = blocked;
+      } else if (alreadyBlocked) {
+        const unlocked = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: inboundConversationState.status,
+            closedAt: null,
+            aiEnabled: inboundConversationState.aiEnabled,
+            humanTakeover: inboundConversationState.humanTakeover,
+            needsHumanReview: inboundConversationState.needsHumanReview,
+            lastAiBlockedReason: null,
+          },
+        });
+        await tx.leadActivity.create({
+          data: {
+            businessId: business.id,
+            leadId: lead.id,
+            action: LeadActivityAction.CONVERSATION_REOPENED,
+            metadata: {
+              conversationId: conversation.id,
+              providerMessageId: input.providerMessageId,
+              reason: "BLOCKED_CONVERSATION_ACCESS_RESTORED",
+              previousStatus: ConversationStatus.PLAN_LIMIT_BLOCKED,
+              newStatus: unlocked.status,
+            },
+          },
+        });
+        conversation = unlocked;
+        didReopen = true;
+        didBlock = false;
       } else if (conversation.status === ConversationStatus.CLOSED) {
         const reopen = await reopenConversationFromMessageActivity(tx, {
           businessId: business.id,

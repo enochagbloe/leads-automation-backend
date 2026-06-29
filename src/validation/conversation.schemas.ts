@@ -40,7 +40,12 @@ export const assignConversationSchema = z.object({ assignedStaffId: z.string().c
 export const conversationHandoffReasonSchema = z.object({
   reason: z.string().trim().min(1).max(500).nullable().optional(),
 }).default({});
-export const updateConversationStatusSchema = z.object({ status: z.nativeEnum(ConversationStatus) });
+export const updateConversationStatusSchema = z.object({
+  status: z.nativeEnum(ConversationStatus).refine(
+    (status) => status !== ConversationStatus.PLAN_LIMIT_BLOCKED,
+    "PLAN_LIMIT_BLOCKED is an internal status and cannot be set manually",
+  ),
+});
 export const updateConversationWorkspaceSchema = z.object({
   subject: z.string().trim().min(1).max(240).nullable().optional(),
   priority: z.nativeEnum(ConversationPriority).optional(),
