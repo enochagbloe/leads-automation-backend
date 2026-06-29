@@ -1,16 +1,22 @@
 import crypto from "node:crypto";
 import {
   AuditAction,
+  BusinessNotificationEntityType,
+  BusinessNotificationPriority,
+  BusinessNotificationType,
+  BusinessRole,
   ConversationChannel,
   ConversationStatus,
   LeadActivityAction,
   LeadSource,
   LeadStatus,
+  MembershipStatus,
   MessageDeliveryStatus,
   MessageDirection,
   MessageSenderType,
   MessageType,
   Prisma,
+  SubscriptionStatus,
   WebhookEventType,
   WebhookProcessingStatus,
   WebhookProvider,
@@ -22,11 +28,11 @@ import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
-import { createSystemMessage } from "./message.service";
-import { subscriptionService } from "./subscription.service";
 import { realtimeService } from "./realtime.service";
 import { aiReplyEngine } from "./ai-reply-engine.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
+import { reopenConversationFromMessageActivity } from "./conversation-lifecycle.service";
+import { notificationService } from "./notification.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
 const MOCK_VERIFY_TOKEN = "bizreplyai-mock-verify-token";
@@ -63,19 +69,46 @@ type PersistedInbound = {
     lastMessageAt: Date | null;
     unreadCount: number;
     aiEnabled: boolean;
+    humanTakeover: boolean;
+    needsHumanReview: boolean;
+    closedAt: Date | null;
   };
   message: { id: string; providerMessageId: string | null };
   leadCreated: boolean;
   conversationCreated: boolean;
   conversationReopened: boolean;
+  conversationBlocked: boolean;
+  blockReason?: ConversationBlockReason;
   duplicate: boolean;
+};
+
+type ResolvedWhatsAppBusiness = {
+  id: string;
+  businessAccountId: string;
+  name: string;
+  aiRepliesEnabled: boolean;
+  aiAutoReplyEnabled: boolean;
+  integrationStatus: WhatsAppIntegrationStatus;
 };
 
 type ConversationCapacity = {
   accountUsageId: string;
   businessUsageId: string;
   maximum: number | null;
+  current: number;
 };
+
+type ConversationBlockReason = "CONVERSATION_QUOTA_EXCEEDED" | "PAYMENT_FAILED" | "SUBSCRIPTION_INACTIVE";
+
+type ConversationAccessDecision =
+  | { blocked: false; capacity?: ConversationCapacity }
+  | { blocked: true; reason: ConversationBlockReason; message: string; capacity?: ConversationCapacity };
+
+const blockedConversationPreview = "Locked customer message. Restore payment or wait for quota reset to unlock.";
+
+function isConversationBlockReason(value: unknown): value is ConversationBlockReason {
+  return value === "CONVERSATION_QUOTA_EXCEEDED" || value === "PAYMENT_FAILED" || value === "SUBSCRIPTION_INACTIVE";
+}
 
 function normalizePhone(phone: string) {
   return phone.trim().replace(/[\s()-]/g, "");
@@ -107,7 +140,7 @@ async function resolveBusiness(input: WhatsAppInboundText) {
   if (input.businessId) {
     const business = await prisma.business.findFirst({
       where: { id: input.businessId, deletedAt: null },
-      select: { id: true, businessAccountId: true, name: true },
+      select: { id: true, businessAccountId: true, name: true, aiRepliesEnabled: true, aiAutoReplyEnabled: true },
     });
     if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
     const integration = await prisma.whatsAppIntegration.findFirst({
@@ -121,7 +154,7 @@ async function resolveBusiness(input: WhatsAppInboundText) {
   const integration = await prisma.whatsAppIntegration.findFirst({
     where: { phoneNumberId: input.phoneNumberId },
     orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
-    include: { business: { select: { id: true, businessAccountId: true, name: true, deletedAt: true } } },
+    include: { business: { select: { id: true, businessAccountId: true, name: true, deletedAt: true, aiRepliesEnabled: true, aiAutoReplyEnabled: true } } },
   });
   const acceptedStatuses: WhatsAppIntegrationStatus[] = env.WHATSAPP_PROVIDER_MODE === "live"
     ? [WhatsAppIntegrationStatus.CONNECTED, WhatsAppIntegrationStatus.DEACTIVATED, WhatsAppIntegrationStatus.DISCONNECTED]
@@ -132,16 +165,73 @@ async function resolveBusiness(input: WhatsAppInboundText) {
   return { ...integration.business, integrationStatus: integration.status };
 }
 
-async function getConversationCapacity(businessAccountId: string, businessId: string): Promise<ConversationCapacity> {
-  const subscription = await subscriptionService.getCurrentRecord(businessAccountId);
+function canAutoReplyAfterInbound(business: ResolvedWhatsAppBusiness) {
+  return env.AI_REPLY_ENABLED
+    && business.aiRepliesEnabled
+    && business.aiAutoReplyEnabled
+    && business.integrationStatus !== WhatsAppIntegrationStatus.DEACTIVATED
+    && business.integrationStatus !== WhatsAppIntegrationStatus.DISCONNECTED;
+}
+
+async function getConversationAccessDecision(
+  client: Prisma.TransactionClient,
+  businessAccountId: string,
+  businessId: string,
+  requiresConversationSlot: boolean,
+): Promise<ConversationAccessDecision> {
+  const subscription = await client.subscription.findFirst({
+    where: { businessAccountId },
+    orderBy: { createdAt: "desc" },
+    include: {
+      plan: true,
+      usageRecords: { orderBy: { periodStart: "desc" }, take: 1 },
+    },
+  });
+  if (!subscription || subscription.status === SubscriptionStatus.CANCELLED || subscription.status === SubscriptionStatus.EXPIRED) {
+    return {
+      blocked: true,
+      reason: "SUBSCRIPTION_INACTIVE",
+      message: "Your subscription is inactive. Restore your subscription to unlock blocked customer messages.",
+    };
+  }
+  if (subscription.status === SubscriptionStatus.PAST_DUE) {
+    return {
+      blocked: true,
+      reason: "PAYMENT_FAILED",
+      message: "Your payment could not be processed. Restore payment to unlock blocked customer messages.",
+    };
+  }
+  if (subscription.status !== SubscriptionStatus.TRIALING && subscription.status !== SubscriptionStatus.ACTIVE) {
+    return {
+      blocked: true,
+      reason: "SUBSCRIPTION_INACTIVE",
+      message: "Your subscription is inactive. Restore your subscription to unlock blocked customer messages.",
+    };
+  }
+  if (!requiresConversationSlot) return { blocked: false };
+
   const accountUsage = subscription.usageRecords[0];
-  const businessUsage = await prisma.businessUsageRecord.findFirst({ where: { businessId }, orderBy: { periodStart: "desc" } });
+  const businessUsage = await client.businessUsageRecord.findFirst({ where: { businessId }, orderBy: { periodStart: "desc" } });
   if (!accountUsage || !businessUsage) throw new AppError(500, "Current usage records are unavailable");
-  return { accountUsageId: accountUsage.id, businessUsageId: businessUsage.id, maximum: subscription.plan.maxConversationsPerMonth };
+  const capacity = {
+    accountUsageId: accountUsage.id,
+    businessUsageId: businessUsage.id,
+    maximum: subscription.plan.maxConversationsPerMonth,
+    current: accountUsage.conversationsUsed,
+  };
+  if (capacity.maximum !== null && capacity.current >= capacity.maximum) {
+    return {
+      blocked: true,
+      reason: "CONVERSATION_QUOTA_EXCEEDED",
+      message: "Your account has reached the monthly conversation limit for the current plan.",
+      capacity,
+    };
+  }
+  return { blocked: false, capacity };
 }
 
 async function persistInbound(
-  business: { id: string; businessAccountId: string; integrationStatus: WhatsAppIntegrationStatus },
+  business: ResolvedWhatsAppBusiness,
   input: WhatsAppInboundText,
   attempt = 0,
 ): Promise<PersistedInbound> {
@@ -151,7 +241,7 @@ async function persistInbound(
     include: { lead: true, conversation: true },
   });
   if (duplicate) {
-    return { lead: duplicate.lead, conversation: duplicate.conversation, message: duplicate, leadCreated: false, conversationCreated: false, conversationReopened: false, duplicate: true };
+    return { lead: duplicate.lead, conversation: duplicate.conversation, message: duplicate, leadCreated: false, conversationCreated: false, conversationReopened: false, conversationBlocked: false, duplicate: true };
   }
 
   const existingLead = await prisma.lead.findFirst({ where: { businessId: business.id, phone: customerPhone, deletedAt: null } });
@@ -163,6 +253,7 @@ async function persistInbound(
       status: { not: ConversationStatus.CLOSED },
       deletedAt: null,
     },
+    orderBy: [{ lastMessageAt: "desc" }, { updatedAt: "desc" }, { createdAt: "desc" }],
   }) : null;
   const closedConversation = existingLead && !activeConversation ? await prisma.conversation.findFirst({
     where: {
@@ -175,21 +266,13 @@ async function persistInbound(
     orderBy: { updatedAt: "desc" },
   }) : null;
   const existingConversation = activeConversation ?? closedConversation;
-  const conversationReopened = Boolean(closedConversation);
-  const capacity = existingConversation ? null : await getConversationCapacity(business.businessAccountId, business.id);
+  const autoReplyEnabled = canAutoReplyAfterInbound(business);
+  const inboundConversationState = autoReplyEnabled
+    ? { status: ConversationStatus.AI_HANDLING, aiEnabled: true, humanTakeover: false, needsHumanReview: false }
+    : { status: ConversationStatus.OPEN, aiEnabled: false, humanTakeover: false, needsHumanReview: false };
 
   try {
     return await prisma.$transaction(async (tx) => {
-      if (capacity) {
-        await tx.$queryRaw`SELECT "id" FROM "AccountUsageRecord" WHERE "id" = ${capacity.accountUsageId} FOR UPDATE`;
-        const usage = await tx.accountUsageRecord.findUniqueOrThrow({ where: { id: capacity.accountUsageId } });
-        if (capacity.maximum !== null && usage.conversationsUsed >= capacity.maximum) {
-          throw new AppError(403, "Your account has reached the monthly conversation limit for the current plan.", "PLAN_LIMIT_REACHED", {
-            limit: capacity.maximum,
-            current: usage.conversationsUsed,
-          });
-        }
-      }
       const lead = existingLead ?? await tx.lead.create({
         data: {
           businessId: business.id,
@@ -211,49 +294,63 @@ async function persistInbound(
         });
       }
 
+      const alreadyBlocked = existingConversation?.status === ConversationStatus.PLAN_LIMIT_BLOCKED;
+      const needsConversationSlot = !existingConversation
+        || existingConversation.status === ConversationStatus.CLOSED
+        || existingConversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED;
+      const accessDecision: ConversationAccessDecision = alreadyBlocked
+        ? {
+          blocked: true,
+          reason: isConversationBlockReason(existingConversation.lastAiBlockedReason) ? existingConversation.lastAiBlockedReason : "CONVERSATION_QUOTA_EXCEEDED",
+          message: "This conversation is locked until payment is restored or quota is available.",
+        }
+        : await getConversationAccessDecision(tx, business.businessAccountId, business.id, needsConversationSlot);
+      const blockedMetadata = accessDecision.blocked
+        ? { accessBlocked: true, blockReason: accessDecision.reason, blockMessage: accessDecision.message }
+        : {};
+
       let conversation = existingConversation ?? await tx.conversation.create({
-        data: {
-          businessId: business.id,
-          leadId: lead.id,
-          channel: ConversationChannel.WHATSAPP,
-          status: ConversationStatus.OPEN,
-          assignedStaffId: null,
-          aiEnabled: false,
-          humanTakeover: false,
-        },
-      });
-      let didReopen = false;
-      if (conversationReopened) {
-        const claimed = await tx.conversation.updateMany({
-          where: { id: conversation.id, status: ConversationStatus.CLOSED },
-          data: { status: ConversationStatus.OPEN, closedAt: null, humanTakeover: false },
-        });
-        conversation = await tx.conversation.findUniqueOrThrow({ where: { id: conversation.id } });
-        didReopen = claimed.count === 1;
-        if (didReopen) {
-          await createSystemMessage({
+          data: {
             businessId: business.id,
             leadId: lead.id,
-            conversationId: conversation.id,
-            content: "Conversation reopened because the customer replied.",
-            metadata: { reason: "CUSTOMER_REPLY", providerMessageId: input.providerMessageId },
-          }, tx);
-          await tx.leadActivity.create({
-            data: {
-              businessId: business.id,
-              leadId: lead.id,
-              action: LeadActivityAction.CONVERSATION_REOPENED,
-              metadata: {
-                reason: "CUSTOMER_REPLY",
-                previousStatus: ConversationStatus.CLOSED,
-                newStatus: ConversationStatus.OPEN,
-                leadId: lead.id,
-                conversationId: conversation.id,
-                providerMessageId: input.providerMessageId,
-              },
-            },
-          });
-        }
+            channel: ConversationChannel.WHATSAPP,
+            status: accessDecision.blocked ? ConversationStatus.PLAN_LIMIT_BLOCKED : inboundConversationState.status,
+            assignedStaffId: null,
+            aiEnabled: accessDecision.blocked ? false : inboundConversationState.aiEnabled,
+            humanTakeover: accessDecision.blocked ? false : inboundConversationState.humanTakeover,
+            needsHumanReview: accessDecision.blocked ? false : inboundConversationState.needsHumanReview,
+            lastAiBlockedReason: accessDecision.blocked ? accessDecision.reason : null,
+          },
+        });
+      let didReopen = false;
+      let didBlock = accessDecision.blocked;
+      if (accessDecision.blocked && existingConversation) {
+        const blocked = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: ConversationStatus.PLAN_LIMIT_BLOCKED,
+            closedAt: null,
+            aiEnabled: false,
+            humanTakeover: false,
+            needsHumanReview: false,
+            lastAiBlockedReason: accessDecision.reason,
+          },
+        });
+        conversation = blocked;
+      } else if (conversation.status === ConversationStatus.CLOSED) {
+        const reopen = await reopenConversationFromMessageActivity(tx, {
+          businessId: business.id,
+          leadId: lead.id,
+          conversationId: conversation.id,
+          source: "CUSTOMER_INBOUND",
+          reopenAs: inboundConversationState,
+          metadata: {
+            providerMessageId: input.providerMessageId,
+            customerPhone,
+          },
+        });
+        conversation = await tx.conversation.findUniqueOrThrow({ where: { id: conversation.id } });
+        didReopen = reopen.reopened;
       }
       if (!existingConversation) {
         await tx.leadActivity.create({
@@ -285,6 +382,7 @@ async function persistInbound(
             customerName: input.customerName ?? null,
             rawWebhookEventId: input.rawWebhookEventId ?? null,
             reopenedConversation: didReopen,
+            ...blockedMetadata,
             integrationStatus: business.integrationStatus,
             automationSkipped: business.integrationStatus === WhatsAppIntegrationStatus.DEACTIVATED
               || business.integrationStatus === WhatsAppIntegrationStatus.DISCONNECTED,
@@ -295,7 +393,7 @@ async function persistInbound(
       const updatedConversation = await tx.conversation.update({
         where: { id: conversation.id },
         data: {
-          lastMessagePreview: input.text.slice(0, 240),
+          lastMessagePreview: didBlock ? blockedConversationPreview : input.text.slice(0, 240),
           lastMessageAt: message.createdAt,
           unreadCount: { increment: 1 },
         },
@@ -312,10 +410,22 @@ async function persistInbound(
             senderType: MessageSenderType.CUSTOMER,
             direction: MessageDirection.INBOUND,
             providerMessageId: input.providerMessageId,
+            ...blockedMetadata,
           },
         },
       });
-      if (!existingConversation && capacity) {
+      const shouldIncrementConversationUsage = !existingConversation || didReopen;
+      if (!didBlock && shouldIncrementConversationUsage) {
+        const capacity = accessDecision.blocked ? undefined : accessDecision.capacity;
+        if (!capacity) throw new AppError(500, "Current usage records are unavailable");
+        await tx.$queryRaw`SELECT "id" FROM "AccountUsageRecord" WHERE "id" = ${capacity.accountUsageId} FOR UPDATE`;
+        const usage = await tx.accountUsageRecord.findUniqueOrThrow({ where: { id: capacity.accountUsageId } });
+        if (capacity.maximum !== null && usage.conversationsUsed >= capacity.maximum) {
+          throw new AppError(403, "Your account has reached the monthly conversation limit for the current plan.", "PLAN_LIMIT_REACHED", {
+            limit: capacity.maximum,
+            current: usage.conversationsUsed,
+          });
+        }
         await tx.accountUsageRecord.update({ where: { id: capacity.accountUsageId }, data: { conversationsUsed: { increment: 1 } } });
         await tx.businessUsageRecord.update({ where: { id: capacity.businessUsageId }, data: { conversationsUsed: { increment: 1 } } });
       }
@@ -326,6 +436,8 @@ async function persistInbound(
         leadCreated: !existingLead,
         conversationCreated: !existingConversation,
         conversationReopened: didReopen,
+        conversationBlocked: didBlock,
+        blockReason: accessDecision.blocked ? accessDecision.reason : undefined,
         duplicate: false,
       };
     }, { maxWait: 15_000, timeout: 30_000 });
@@ -336,7 +448,7 @@ async function persistInbound(
         include: { lead: true, conversation: true },
       });
       if (duplicateMessage) {
-        return { lead: duplicateMessage.lead, conversation: duplicateMessage.conversation, message: duplicateMessage, leadCreated: false, conversationCreated: false, conversationReopened: false, duplicate: true };
+        return { lead: duplicateMessage.lead, conversation: duplicateMessage.conversation, message: duplicateMessage, leadCreated: false, conversationCreated: false, conversationReopened: false, conversationBlocked: false, duplicate: true };
       }
       if (attempt === 0) return persistInbound(business, input, 1);
     }
@@ -356,6 +468,8 @@ async function logSystemActions(result: PersistedInbound, input: WhatsAppInbound
         providerMessageId: input.providerMessageId,
         messageId: result.message.id,
         conversationId: result.conversation.id,
+        accessBlocked: result.conversationBlocked,
+        blockReason: result.blockReason ?? null,
       },
     }),
   ];
@@ -370,27 +484,63 @@ async function logSystemActions(result: PersistedInbound, input: WhatsAppInbound
       businessId: result.lead.businessId,
       metadata: { source: LeadSource.WHATSAPP, createdBy: "SYSTEM", leadId: result.lead.id, conversationId: result.conversation.id },
     }));
+  }
+  if (result.conversationCreated || result.conversationReopened) {
     logs.push(auditService.log({
       action: AuditAction.USAGE_RECORD_UPDATED,
       businessId: result.lead.businessId,
-      metadata: { usageKey: "conversationsUsed", delta: 1, source: "WHATSAPP", conversationId: result.conversation.id },
+      metadata: {
+        usageKey: "conversationsUsed",
+        delta: 1,
+        source: "WHATSAPP",
+        reason: result.conversationReopened ? "CONVERSATION_REOPENED" : "CONVERSATION_CREATED",
+        conversationId: result.conversation.id,
+      },
     }));
   }
-  if (result.conversationReopened) {
+  if (result.conversationBlocked) {
     logs.push(auditService.log({
-      action: AuditAction.CONVERSATION_REOPENED,
+      action: result.blockReason === "CONVERSATION_QUOTA_EXCEEDED" ? AuditAction.PLAN_LIMIT_REACHED : AuditAction.PLAN_UPGRADE_REQUIRED,
       businessId: result.lead.businessId,
       metadata: {
-        businessId: result.lead.businessId,
-        leadId: result.lead.id,
+        source: "WHATSAPP",
+        reason: result.blockReason,
         conversationId: result.conversation.id,
-        reason: "CUSTOMER_REPLY",
-        triggeredBy: "SYSTEM",
+        messageId: result.message.id,
+        leadId: result.lead.id,
         providerMessageId: input.providerMessageId,
       },
     }));
   }
   await Promise.all(logs);
+}
+
+async function notifyBlockedCustomerMessage(result: PersistedInbound) {
+  if (!result.conversationBlocked) return;
+  const recipients = await prisma.businessMember.findMany({
+    where: {
+      businessId: result.lead.businessId,
+      status: MembershipStatus.ACTIVE,
+      role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER] },
+    },
+    select: { id: true },
+  });
+  if (recipients.length === 0) return;
+  await notificationService.createNotificationsForRecipients({
+    businessId: result.lead.businessId,
+    recipientMembershipIds: recipients.map((recipient) => recipient.id),
+    type: BusinessNotificationType.INFO,
+    priority: BusinessNotificationPriority.HIGH,
+    title: "Blocked customer messages",
+    message: "You have blocked customer messages. Restore payment or wait for quota reset to unlock.",
+    entityType: BusinessNotificationEntityType.CONVERSATION,
+    entityId: result.conversation.id,
+    metadata: {
+      reason: result.blockReason,
+      conversationId: result.conversation.id,
+      leadId: result.lead.id,
+    },
+  });
 }
 
 export function parseMetaWebhook(payload: unknown): WhatsAppInboundText[] {
@@ -461,6 +611,20 @@ function mapProviderStatus(status: string) {
 function mergeMetadata(metadata: Prisma.JsonValue | null, values: Record<string, Prisma.JsonValue>): Prisma.InputJsonValue {
   const current = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {};
   return { ...current, ...values };
+}
+
+async function resolvedBusinessForUnlock(businessId: string): Promise<ResolvedWhatsAppBusiness> {
+  const business = await prisma.business.findFirst({
+    where: { id: businessId, deletedAt: null },
+    select: { id: true, businessAccountId: true, name: true, aiRepliesEnabled: true, aiAutoReplyEnabled: true },
+  });
+  if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+  const integration = await prisma.whatsAppIntegration.findFirst({
+    where: { businessId },
+    orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
+    select: { status: true },
+  });
+  return { ...business, integrationStatus: integration?.status ?? WhatsAppIntegrationStatus.NOT_CONNECTED };
 }
 
 export const whatsappService = {
@@ -536,6 +700,7 @@ export const whatsappService = {
         await Promise.all([
           logSystemActions(result, input),
           invalidateCaches(business.id, result.lead.id, result.conversation.id),
+          notifyBlockedCustomerMessage(result),
         ]);
         if (result.leadCreated) {
           realtimeService.publish({
@@ -564,8 +729,16 @@ export const whatsappService = {
             assignedStaffId: result.conversation.assignedStaffId,
             payload: {
               conversationId: result.conversation.id,
-              status: ConversationStatus.OPEN,
-              closedAt: null,
+              changes: {
+                status: result.conversation.status,
+                closedAt: result.conversation.closedAt,
+                aiEnabled: result.conversation.aiEnabled,
+                humanTakeover: result.conversation.humanTakeover,
+                needsHumanReview: result.conversation.needsHumanReview,
+                lastMessagePreview: result.conversation.lastMessagePreview,
+                lastMessageAt: result.conversation.lastMessageAt,
+                unreadCount: result.conversation.unreadCount,
+              },
               reason: "CUSTOMER_REPLY",
               messageId: result.message.id,
             },
@@ -593,6 +766,10 @@ export const whatsappService = {
               lastMessageAt: result.conversation.lastMessageAt,
               unreadCount: result.conversation.unreadCount,
               status: result.conversation.status,
+              closedAt: result.conversation.closedAt,
+              aiEnabled: result.conversation.aiEnabled,
+              humanTakeover: result.conversation.humanTakeover,
+              needsHumanReview: result.conversation.needsHumanReview,
             },
           },
         });
@@ -604,7 +781,12 @@ export const whatsappService = {
           assignedStaffId: result.conversation.assignedStaffId,
           payload: { conversationId: result.conversation.id, unreadCount: result.conversation.unreadCount },
         });
-        if (env.AI_REPLY_ENABLED && result.conversation.aiEnabled && result.conversation.status !== ConversationStatus.CLOSED) {
+        if (
+          env.AI_REPLY_ENABLED
+          && result.conversation.aiEnabled
+          && result.conversation.status !== ConversationStatus.CLOSED
+          && result.conversation.status !== ConversationStatus.PLAN_LIMIT_BLOCKED
+        ) {
           aiReplyEngine.processInboundMessageForAiSafely({
             businessId: business.id,
             conversationId: result.conversation.id,
@@ -737,5 +919,122 @@ export const whatsappService = {
       }).catch((logError) => console.error("Status webhook failure could not be logged", logError));
       throw new AppError(500, "WhatsApp status update failed", "WHATSAPP_STATUS_UPDATE_FAILED");
     }
+  },
+
+  async unlockBlockedConversations(
+    businessId: string,
+    reason: "PAYMENT_RESTORED" | "QUOTA_RESET",
+  ) {
+    const business = await resolvedBusinessForUnlock(businessId);
+    const autoReplyEnabled = canAutoReplyAfterInbound(business);
+    const unlockState = autoReplyEnabled
+      ? { status: ConversationStatus.AI_HANDLING, aiEnabled: true, humanTakeover: false, needsHumanReview: false }
+      : { status: ConversationStatus.OPEN, aiEnabled: false, humanTakeover: false, needsHumanReview: false };
+    const unlocked = await prisma.$transaction(async (tx) => {
+      const blocked = await tx.conversation.findMany({
+        where: {
+          businessId,
+          channel: ConversationChannel.WHATSAPP,
+          status: ConversationStatus.PLAN_LIMIT_BLOCKED,
+          deletedAt: null,
+        },
+        orderBy: [{ lastMessageAt: "asc" }, { createdAt: "asc" }],
+        select: { id: true, leadId: true },
+      });
+      const records: Array<{
+        id: string;
+        leadId: string;
+        assignedStaffId: string | null;
+        status: ConversationStatus;
+        closedAt: Date | null;
+        aiEnabled: boolean;
+        humanTakeover: boolean;
+        needsHumanReview: boolean;
+        lastMessagePreview: string | null;
+        lastMessageAt: Date | null;
+        unreadCount: number;
+      }> = [];
+      for (const conversation of blocked) {
+        const access = await getConversationAccessDecision(tx, business.businessAccountId, businessId, true);
+        if (access.blocked) break;
+        if (!access.capacity) throw new AppError(500, "Current usage records are unavailable");
+        await tx.$queryRaw`SELECT "id" FROM "AccountUsageRecord" WHERE "id" = ${access.capacity.accountUsageId} FOR UPDATE`;
+        const usage = await tx.accountUsageRecord.findUniqueOrThrow({ where: { id: access.capacity.accountUsageId } });
+        if (access.capacity.maximum !== null && usage.conversationsUsed >= access.capacity.maximum) break;
+        const latestMessage = await tx.message.findFirst({
+          where: { businessId, conversationId: conversation.id, deletedAt: null },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { content: true, createdAt: true },
+        });
+        const updated = await tx.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            ...unlockState,
+            closedAt: null,
+            lastAiBlockedReason: null,
+            lastMessagePreview: latestMessage ? latestMessage.content.slice(0, 240) : null,
+            lastMessageAt: latestMessage?.createdAt ?? undefined,
+          },
+          select: {
+            id: true,
+            leadId: true,
+            assignedStaffId: true,
+            status: true,
+            closedAt: true,
+            aiEnabled: true,
+            humanTakeover: true,
+            needsHumanReview: true,
+            lastMessagePreview: true,
+            lastMessageAt: true,
+            unreadCount: true,
+          },
+        });
+        await tx.accountUsageRecord.update({ where: { id: access.capacity.accountUsageId }, data: { conversationsUsed: { increment: 1 } } });
+        await tx.businessUsageRecord.update({ where: { id: access.capacity.businessUsageId }, data: { conversationsUsed: { increment: 1 } } });
+        await tx.leadActivity.create({
+          data: {
+            businessId,
+            leadId: conversation.leadId,
+            action: LeadActivityAction.CONVERSATION_REOPENED,
+            metadata: { conversationId: conversation.id, reason, previousStatus: ConversationStatus.PLAN_LIMIT_BLOCKED, newStatus: updated.status },
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: AuditAction.CONVERSATION_REOPENED,
+            businessId,
+            metadata: { conversationId: conversation.id, leadId: conversation.leadId, reason, previousStatus: ConversationStatus.PLAN_LIMIT_BLOCKED, newStatus: updated.status },
+          },
+        });
+        records.push(updated);
+      }
+      return records;
+    }, { maxWait: 15_000, timeout: 30_000 });
+
+    await Promise.all(unlocked.map((conversation) => invalidateCaches(businessId, conversation.leadId, conversation.id)));
+    for (const conversation of unlocked) {
+      realtimeService.publish({
+        type: "conversation.updated",
+        businessId,
+        conversationId: conversation.id,
+        leadId: conversation.leadId,
+        assignedStaffId: conversation.assignedStaffId,
+        payload: {
+          conversationId: conversation.id,
+          changes: {
+            status: conversation.status,
+            closedAt: conversation.closedAt,
+            aiEnabled: conversation.aiEnabled,
+            humanTakeover: conversation.humanTakeover,
+            needsHumanReview: conversation.needsHumanReview,
+            lastMessagePreview: conversation.lastMessagePreview,
+            lastMessageAt: conversation.lastMessageAt,
+            unreadCount: conversation.unreadCount,
+          },
+          reason,
+        },
+      });
+    }
+    return { unlockedCount: unlocked.length, conversations: unlocked };
   },
 };
