@@ -47,6 +47,8 @@ const schema = z.object({
   OPENROUTER_APP_URL: optionalString,
   AI_REPLY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
+  AI_AUTO_CONFIRM_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.85),
+  PREMIUM_APPOINTMENT_AUTO_CONFIRM_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   AI_MAX_CONTEXT_MESSAGES: z.coerce.number().int().positive().max(50).default(12),
   AI_MAX_BUSINESS_CONTEXT_TOKENS: z.coerce.number().int().positive().default(6000),
 }).superRefine((value, context) => {
