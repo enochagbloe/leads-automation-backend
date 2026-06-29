@@ -27,6 +27,7 @@ type NotificationAction = {
   label: string;
   action: string;
   variant: "default" | "secondary" | "destructive";
+  href?: string;
 };
 
 type NotificationInput = {
@@ -52,6 +53,16 @@ const unresolvedStatuses = [BusinessNotificationStatus.UNREAD, BusinessNotificat
 
 function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function normalizeNotificationActions(actions?: NotificationAction[]) {
+  if (!actions) return undefined;
+  return actions.map((entry) => ({
+    label: entry.label,
+    action: entry.action,
+    variant: entry.variant,
+    ...(entry.href ? { href: entry.href } : {}),
+  }));
 }
 
 function listKey(actor: NotificationActor, query: NotificationListQuery) {
@@ -117,6 +128,7 @@ async function loadForActor(actor: NotificationActor, notificationId: string) {
 export const notificationService = {
   async createNotification(input: NotificationInput, tx: NotificationTx = prisma) {
     const recipient = await validateRecipient(tx, input.businessId, input.recipientMembershipId);
+    const actions = normalizeNotificationActions(input.actions);
     const existing = input.entityType && input.entityId
       ? await tx.businessNotification.findFirst({
         where: {
@@ -143,7 +155,7 @@ export const notificationService = {
         message: input.message,
         entityType: input.entityType ?? null,
         entityId: input.entityId ?? null,
-        actions: input.actions ? json(input.actions) : undefined,
+        actions: actions ? json(actions) : undefined,
         metadata: input.metadata ? json(input.metadata) : undefined,
         expiresAt: input.expiresAt ?? null,
       },
