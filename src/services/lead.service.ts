@@ -356,11 +356,19 @@ export const leadService = {
     if (existing.assignedStaffId === actor.membershipId) return prisma.lead.findUniqueOrThrow({ where: { id: leadId }, include: leadInclude });
     await validateAssignee(actor.businessId, actor.membershipId);
     const updated = await prisma.$transaction(async (tx) => {
-      const lead = await tx.lead.update({
-        where: { id: leadId },
+      const claimed = await tx.lead.updateMany({
+        where: {
+          id: leadId,
+          businessId: actor.businessId,
+          deletedAt: null,
+          assignedStaffId: null,
+        },
         data: { assignedStaffId: actor.membershipId },
-        include: leadInclude,
       });
+      if (claimed.count !== 1) {
+        throw new AppError(409, "This lead is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
+      }
+      const lead = await tx.lead.findUniqueOrThrow({ where: { id: leadId }, include: leadInclude });
       await tx.leadActivity.create({
         data: {
           businessId: actor.businessId,
