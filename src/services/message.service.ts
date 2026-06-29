@@ -18,6 +18,7 @@ import { cacheService } from "./cache.service";
 import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./whatsapp-provider.service";
 import { realtimeService } from "./realtime.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
+import { reopenConversationFromMessageActivity, type ReopenState } from "./conversation-lifecycle.service";
 
 export type ConversationActor = {
   userId: string;
@@ -33,10 +34,29 @@ type SystemMessageInput = {
   conversationId: string;
   content: string;
   metadata?: Prisma.InputJsonValue;
+  reopenAs?: Partial<ReopenState>;
+  reopenClosedConversation?: {
+    source: "FOLLOW_UP_AUTOMATION" | "AI_MESSAGE" | "SYSTEM_MESSAGE";
+    actorUserId?: string | null;
+    actorMembershipId?: string | null;
+    reopenAs?: Partial<ReopenState>;
+  };
 };
 
 export async function createSystemMessage(input: SystemMessageInput, tx: Prisma.TransactionClient = prisma) {
   const now = new Date();
+  const reopen = input.reopenClosedConversation
+    ? await reopenConversationFromMessageActivity(tx, {
+      businessId: input.businessId,
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      source: input.reopenClosedConversation.source,
+      actorUserId: input.reopenClosedConversation.actorUserId,
+      actorMembershipId: input.reopenClosedConversation.actorMembershipId,
+      metadata: input.metadata,
+      reopenAs: input.reopenClosedConversation.reopenAs,
+    })
+    : { reopened: false };
   const message = await tx.message.create({
     data: {
       businessId: input.businessId,
@@ -63,7 +83,7 @@ export async function createSystemMessage(input: SystemMessageInput, tx: Prisma.
       metadata: { conversationId: input.conversationId, messageId: message.id, senderType: MessageSenderType.SYSTEM },
     },
   });
-  return message;
+  return Object.assign(message, { reopen });
 }
 
 async function invalidateMessageCaches(businessId: string, conversationId: string) {
@@ -100,6 +120,9 @@ async function accessibleConversation(actor: ConversationActor, conversationId: 
   if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
   if (actor.role === BusinessRole.STAFF && conversation.assignedStaffId !== actor.membershipId) {
     throw new AppError(403, "You do not have access to this conversation", "FORBIDDEN");
+  }
+  if (conversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED) {
+    throw new AppError(423, "This conversation is locked because billing or conversation quota needs attention.", "CONVERSATION_ACCESS_BLOCKED");
   }
   return conversation;
 }
@@ -235,6 +258,14 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
   });
   if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
   const message = await prisma.$transaction(async (tx) => {
+    const reopen = await reopenConversationFromMessageActivity(tx, {
+      businessId: input.businessId,
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      source: "CUSTOMER_INBOUND",
+      metadata: input.metadata,
+      reopenAs: input.reopenAs,
+    });
     const created = await tx.message.create({
       data: {
         businessId: input.businessId,
@@ -254,6 +285,7 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
         lastMessagePreview: input.content.slice(0, 240),
         lastMessageAt: created.createdAt,
         unreadCount: { increment: 1 },
+        ...(reopen.changes ?? {}),
       },
     });
     await tx.leadActivity.create({

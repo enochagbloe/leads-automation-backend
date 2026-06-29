@@ -2,11 +2,11 @@ import crypto from "node:crypto";
 import {
   AuditAction,
   BusinessRole,
-  ConversationChannel,
   ConversationPriority,
   ConversationStatus,
   LeadActivityAction,
   MembershipStatus,
+  MessageDeliveryStatus,
   MessageSenderType,
   Prisma,
 } from "@prisma/client";
@@ -32,7 +32,15 @@ const conversationInclude = {
   },
 } satisfies Prisma.ConversationInclude;
 
-function accessWhere(actor: ConversationActor): Prisma.ConversationWhereInput {
+function assignedOnlyAccessWhere(actor: ConversationActor): Prisma.ConversationWhereInput {
+  return {
+    businessId: actor.businessId,
+    deletedAt: null,
+    ...(actor.role === BusinessRole.STAFF ? { assignedStaffId: actor.membershipId } : {}),
+  };
+}
+
+function listAccessWhere(actor: ConversationActor): Prisma.ConversationWhereInput {
   return {
     businessId: actor.businessId,
     deletedAt: null,
@@ -60,6 +68,16 @@ function statsKey(actor: ConversationActor) {
 function unreadKey(actor: ConversationActor) {
   const scope = actor.role === BusinessRole.STAFF ? actor.membershipId : "all";
   return `business:${actor.businessId}:conversations:unread:${scope}`;
+}
+
+function assertConversationUnlocked(conversation: { status: ConversationStatus }) {
+  if (conversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED) {
+    throw new AppError(
+      423,
+      "This conversation is locked because billing or conversation quota needs attention.",
+      "CONVERSATION_ACCESS_BLOCKED",
+    );
+  }
 }
 
 export async function invalidateConversationCache(businessId: string, conversationId?: string) {
@@ -121,6 +139,12 @@ export const conversationService = {
           channel: input.channel,
           subject: input.subject,
           priority: input.priority,
+          ...(assignedStaffId ? {
+            status: ConversationStatus.HUMAN_HANDLING,
+            humanTakeover: true,
+            aiEnabled: false,
+            needsHumanReview: false,
+          } : {}),
         },
         include: conversationInclude,
       });
@@ -162,9 +186,8 @@ export const conversationService = {
     const key = listKey(actor, query);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
-    const where: Prisma.ConversationWhereInput = {
-      ...accessWhere(actor),
-      ...(query.search ? {
+    const filters: Prisma.ConversationWhereInput[] = [listAccessWhere(actor)];
+    if (query.search) filters.push({
         OR: [
           { subject: { contains: query.search, mode: "insensitive" } },
           { lastMessagePreview: { contains: query.search, mode: "insensitive" } },
@@ -172,17 +195,19 @@ export const conversationService = {
           { lead: { phone: { contains: query.search } } },
           { lead: { email: { contains: query.search, mode: "insensitive" } } },
         ],
-      } : {}),
-      ...(query.status ? { status: query.status } : {}),
-      ...(query.channel ? { channel: query.channel } : {}),
-      ...(query.priority ? { priority: query.priority } : {}),
-      ...(query.pinned !== undefined ? { pinned: query.pinned } : {}),
-      ...(query.assignedStaffId ? { assignedStaffId: query.assignedStaffId } : {}),
-      ...(query.leadId ? { leadId: query.leadId } : {}),
-      ...((query.dateFrom || query.dateTo) ? {
+      });
+    if (query.status) filters.push({ status: query.status });
+    if (query.channel) filters.push({ channel: query.channel });
+    if (query.priority) filters.push({ priority: query.priority });
+    if (query.pinned !== undefined) filters.push({ pinned: query.pinned });
+    if (query.assignedStaffId) filters.push({ assignedStaffId: query.assignedStaffId });
+    if (query.leadId) filters.push({ leadId: query.leadId });
+    if (query.dateFrom || query.dateTo) {
+      filters.push({
         createdAt: { ...(query.dateFrom ? { gte: query.dateFrom } : {}), ...(query.dateTo ? { lte: query.dateTo } : {}) },
-      } : {}),
-    };
+      });
+    }
+    const where: Prisma.ConversationWhereInput = { AND: filters };
     const [data, total] = await prisma.$transaction([
       prisma.conversation.findMany({
         where,
@@ -200,16 +225,23 @@ export const conversationService = {
 
   async detail(actor: ConversationActor, conversationId: string, query: ConversationDetailQuery) {
     const key = detailKey(actor, conversationId, query);
+    const authorized = await prisma.conversation.findFirst({
+      where: { id: conversationId, ...assignedOnlyAccessWhere(actor) },
+      select: { id: true, status: true },
+    });
+    if (!authorized) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    assertConversationUnlocked(authorized);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
-    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) }, include: conversationInclude });
+    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...assignedOnlyAccessWhere(actor) }, include: conversationInclude });
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    assertConversationUnlocked(conversation);
 
-    let before: { createdAt: Date } | null = null;
+    let before: { id: string; createdAt: Date } | null = null;
     if (query.beforeMessageId) {
       before = await prisma.message.findFirst({
         where: { id: query.beforeMessageId, businessId: actor.businessId, conversationId, deletedAt: null },
-        select: { createdAt: true },
+        select: { id: true, createdAt: true },
       });
       if (!before) throw new AppError(404, "Message cursor not found", "MESSAGE_NOT_FOUND");
     }
@@ -218,10 +250,15 @@ export const conversationService = {
         businessId: actor.businessId,
         conversationId,
         deletedAt: null,
-        ...(before ? { createdAt: { lt: before.createdAt } } : {}),
+        ...(before ? {
+          OR: [
+            { createdAt: { lt: before.createdAt } },
+            { createdAt: before.createdAt, id: { lt: before.id } },
+          ],
+        } : {}),
       },
       include: { senderUser: { select: { id: true, firstName: true, lastName: true } } },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: query.messageLimit + 1,
     });
     const hasMore = rows.length > query.messageLimit;
@@ -265,38 +302,85 @@ export const conversationService = {
         });
         throw new AppError(403, "You do not have permission to reassign this conversation.", "CANNOT_REASSIGN_WITHOUT_PERMISSION");
       }
-      return this.claim(actor, conversationId, context);
+      return conversationService.claim(actor, conversationId, context);
     }
     const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, businessId: actor.businessId, deletedAt: null } });
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    if (conversation.status === ConversationStatus.CLOSED) {
+      throw new AppError(409, "Cannot assign a closed conversation.", "CONVERSATION_CLOSED");
+    }
+    assertConversationUnlocked(conversation);
+    if (conversation.assignedStaffId === assignedStaffId) {
+      return prisma.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
+    }
     const assignee = await validateAssignee(actor.businessId, assignedStaffId);
     const label = assignee ? `${assignee.user.firstName} ${assignee.user.lastName}` : "Unassigned";
-    let systemMessageId: string | undefined;
-    const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.conversation.update({ where: { id: conversationId }, data: { assignedStaffId }, include: conversationInclude });
+    const now = new Date();
+    const assignmentState = assignedStaffId
+      ? {
+        assignedStaffId,
+        status: ConversationStatus.HUMAN_HANDLING,
+        humanTakeover: true,
+        aiEnabled: false,
+        needsHumanReview: false,
+        humanReviewResolvedAt: now,
+        humanReviewResolvedByMembershipId: actor.membershipId,
+      }
+      : {
+        assignedStaffId: null,
+        status: ConversationStatus.OPEN,
+        humanTakeover: false,
+        needsHumanReview: false,
+        humanReviewResolvedAt: now,
+        humanReviewResolvedByMembershipId: actor.membershipId,
+      };
+    const result = await prisma.$transaction(async (tx) => {
+      const changed = await tx.conversation.updateMany({
+        where: {
+          id: conversationId,
+          businessId: actor.businessId,
+          deletedAt: null,
+          status: conversation.status,
+          assignedStaffId: conversation.assignedStaffId,
+        },
+        data: assignmentState,
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, "Conversation assignment changed. Refresh and try again.", "CONVERSATION_ASSIGNMENT_CHANGED");
+      }
+      const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
       const systemMessage = await createSystemMessage({ businessId: actor.businessId, leadId: conversation.leadId, conversationId, content: `Conversation assigned to ${label}.`, metadata: { assignedStaffId } }, tx);
-      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_ASSIGNED, metadata: { conversationId, assignedStaffId } },
       });
-      return record;
+      return { updated: record, systemMessageId: systemMessage.id };
     }, { maxWait: 15_000, timeout: 30_000 });
+    const updated = result.updated;
     await Promise.all([
       invalidateConversationCache(actor.businessId, conversationId),
       logAudit(actor, AuditAction.CONVERSATION_ASSIGNED, conversationId, conversation.leadId, context, { assignedStaffId }),
     ]);
+    const staffMembershipIds = [conversation.assignedStaffId, assignedStaffId].filter((id): id is string => Boolean(id));
     realtimeService.publish({
       type: "conversation.assigned",
       businessId: actor.businessId,
       conversationId,
       leadId: conversation.leadId,
       assignedStaffId,
-      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
+      staffMembershipIds,
       payload: {
+        conversation: updated,
         conversationId,
         previousAssignedStaffId: conversation.assignedStaffId,
-        newAssignedStaffId: assignedStaffId,
+        newAssignedStaffId: updated.assignedStaffId,
         assignedByUserId: actor.userId,
+        changes: {
+          assignedStaffId: updated.assignedStaffId,
+          status: updated.status,
+          aiEnabled: updated.aiEnabled,
+          humanTakeover: updated.humanTakeover,
+          needsHumanReview: updated.needsHumanReview,
+        },
       },
     });
     realtimeService.publish({
@@ -305,18 +389,27 @@ export const conversationService = {
       conversationId,
       leadId: conversation.leadId,
       assignedStaffId,
-      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
-      payload: { conversationId, changes: { assignedStaffId } },
+      staffMembershipIds,
+      payload: {
+        conversationId,
+        changes: {
+          assignedStaffId: updated.assignedStaffId,
+          status: updated.status,
+          aiEnabled: updated.aiEnabled,
+          humanTakeover: updated.humanTakeover,
+          needsHumanReview: updated.needsHumanReview,
+        },
+      },
     });
     realtimeService.publish({
       type: "message.created",
       businessId: actor.businessId,
       conversationId,
       leadId: conversation.leadId,
-      messageId: systemMessageId,
+      messageId: result.systemMessageId,
       assignedStaffId,
-      staffMembershipIds: [conversation.assignedStaffId, assignedStaffId],
-      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+      staffMembershipIds,
+      payload: { messageId: result.systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
     });
     return updated;
   },
@@ -324,6 +417,10 @@ export const conversationService = {
   async claim(actor: ConversationActor, conversationId: string, context: Omit<AuditInput, "action">) {
     const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, businessId: actor.businessId, deletedAt: null } });
     if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+    if (conversation.status === ConversationStatus.CLOSED) {
+      throw new AppError(409, "Cannot claim a closed conversation.", "CONVERSATION_CLOSED");
+    }
+    assertConversationUnlocked(conversation);
     if (conversation.assignedStaffId && conversation.assignedStaffId !== actor.membershipId) {
       await logAudit(actor, AuditAction.WORK_ASSIGNMENT_BLOCKED, conversationId, conversation.leadId, context, {
         recordType: "CONVERSATION",
@@ -338,17 +435,43 @@ export const conversationService = {
     }
     await validateAssignee(actor.businessId, actor.membershipId);
     let systemMessageId: string | undefined;
+    const user = await prisma.user.findUnique({ where: { id: actor.userId }, select: { firstName: true, lastName: true } });
+    const name = user ? `${user.firstName} ${user.lastName}`.trim() : "A team member";
+    const now = new Date();
     const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.conversation.update({
-        where: { id: conversationId },
+      const claimed = await tx.conversation.updateMany({
+        where: {
+          id: conversationId,
+          businessId: actor.businessId,
+          deletedAt: null,
+          assignedStaffId: null,
+          status: { not: ConversationStatus.CLOSED },
+        },
         data: {
           assignedStaffId: actor.membershipId,
-          ...(conversation.status !== ConversationStatus.CLOSED ? { status: ConversationStatus.HUMAN_HANDLING, humanTakeover: true, aiEnabled: false, needsHumanReview: false } : {}),
+          status: ConversationStatus.HUMAN_HANDLING,
+          humanTakeover: true,
+          aiEnabled: false,
+          needsHumanReview: false,
+          humanReviewResolvedAt: now,
+          humanReviewResolvedByMembershipId: actor.membershipId,
         },
+      });
+      if (claimed.count !== 1) {
+        const current = await tx.conversation.findFirst({
+          where: { id: conversationId, businessId: actor.businessId, deletedAt: null },
+          select: { status: true },
+        });
+        if (!current) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+        if (current.status === ConversationStatus.CLOSED) {
+          throw new AppError(409, "Cannot claim a closed conversation.", "CONVERSATION_CLOSED");
+        }
+        throw new AppError(409, "This conversation is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
+      }
+      const record = await tx.conversation.findUniqueOrThrow({
+        where: { id: conversationId },
         include: conversationInclude,
       });
-      const user = await tx.user.findUnique({ where: { id: actor.userId }, select: { firstName: true, lastName: true } });
-      const name = user ? `${user.firstName} ${user.lastName}`.trim() : "A team member";
       const systemMessage = await createSystemMessage({
         businessId: actor.businessId,
         leadId: conversation.leadId,
@@ -381,13 +504,14 @@ export const conversationService = {
         reason: "CLAIM_UNASSIGNED_WORK",
       }),
     ]);
+    const staffMembershipIds = [updated.assignedStaffId].filter((id): id is string => Boolean(id));
     realtimeService.publish({
       type: "business.conversation.claimed",
       businessId: actor.businessId,
       conversationId,
       leadId: conversation.leadId,
       assignedStaffId: updated.assignedStaffId,
-      staffMembershipIds: [updated.assignedStaffId],
+      staffMembershipIds,
       payload: { conversation: updated, previousAssignedStaffId: null, newAssignedStaffId: updated.assignedStaffId, systemMessageId },
     });
     realtimeService.publish({
@@ -396,8 +520,17 @@ export const conversationService = {
       conversationId,
       leadId: conversation.leadId,
       assignedStaffId: updated.assignedStaffId,
-      staffMembershipIds: [updated.assignedStaffId],
-      payload: { conversationId, changes: { assignedStaffId: updated.assignedStaffId, status: updated.status, humanTakeover: updated.humanTakeover, aiEnabled: updated.aiEnabled } },
+      staffMembershipIds,
+      payload: {
+        conversationId,
+        changes: {
+          assignedStaffId: updated.assignedStaffId,
+          status: updated.status,
+          humanTakeover: updated.humanTakeover,
+          aiEnabled: updated.aiEnabled,
+          needsHumanReview: updated.needsHumanReview,
+        },
+      },
     });
     if (systemMessageId) {
       realtimeService.publish({
@@ -407,7 +540,7 @@ export const conversationService = {
         leadId: conversation.leadId,
         messageId: systemMessageId,
         assignedStaffId: updated.assignedStaffId,
-        staffMembershipIds: [updated.assignedStaffId],
+        staffMembershipIds,
         payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
       });
     }
@@ -419,18 +552,28 @@ export const conversationService = {
     conversationId: string,
     input: { subject?: string | null; priority?: ConversationPriority; pinned?: boolean },
   ) {
-    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
-    if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
     if (actor.role === BusinessRole.STAFF && Object.keys(input).some((field) => field !== "pinned")) {
       throw new AppError(403, "Staff can only pin assigned conversations", "FORBIDDEN");
     }
-    const updated = await prisma.conversation.update({ where: { id: conversationId }, data: input, include: conversationInclude });
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.conversation.updateMany({
+        where: { id: conversationId, ...assignedOnlyAccessWhere(actor), status: { not: ConversationStatus.PLAN_LIMIT_BLOCKED } },
+        data: input,
+      });
+      if (changed.count !== 1) {
+        const current = await tx.conversation.findFirst({ where: { id: conversationId, ...assignedOnlyAccessWhere(actor) }, select: { status: true } });
+        if (current?.status === ConversationStatus.PLAN_LIMIT_BLOCKED) assertConversationUnlocked(current);
+        throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+      }
+      const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
+      return record;
+    });
     await invalidateConversationCache(actor.businessId, conversationId);
     realtimeService.publish({
       type: "conversation.updated",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
+      leadId: updated.leadId,
       assignedStaffId: updated.assignedStaffId,
       payload: { conversationId, changes: input },
     });
@@ -438,22 +581,43 @@ export const conversationService = {
   },
 
   async updateStatus(actor: ConversationActor, conversationId: string, status: ConversationStatus, context: Omit<AuditInput, "action">) {
-    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
-    if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
-    if (conversation.status === status) return conversation;
-    let systemMessageId: string | undefined;
-    const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.conversation.update({
-        where: { id: conversationId },
+    if (actor.role === BusinessRole.STAFF && status === ConversationStatus.AI_HANDLING) {
+      throw new AppError(403, "Only an owner or manager can move a conversation back to AI handling.", "FORBIDDEN");
+    }
+    const result = await prisma.$transaction(async (tx) => {
+      const conversation = await tx.conversation.findFirst({ where: { id: conversationId, ...assignedOnlyAccessWhere(actor) } });
+      if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+      assertConversationUnlocked(conversation);
+      if (conversation.status === ConversationStatus.CLOSED && status !== ConversationStatus.CLOSED) {
+        throw new AppError(
+          409,
+          "Closed conversations can only reopen when a new message is received or an automation sends a follow-up.",
+          "REOPEN_REQUIRES_MESSAGE_ACTIVITY",
+        );
+      }
+      if (conversation.status === status) {
+        const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
+        return { updated: record, previousStatus: conversation.status, systemMessageId: undefined, changed: false };
+      }
+      const now = new Date();
+      const changed = await tx.conversation.updateMany({
+        where: { id: conversationId, ...assignedOnlyAccessWhere(actor), status: conversation.status },
         data: {
           status,
-          closedAt: status === ConversationStatus.CLOSED ? new Date() : null,
+          ...(status === ConversationStatus.CLOSED ? {
+            closedAt: now,
+            aiEnabled: false,
+            humanTakeover: false,
+            needsHumanReview: false,
+            humanReviewResolvedAt: now,
+            humanReviewResolvedByMembershipId: actor.membershipId,
+          } : { closedAt: null }),
           ...(status === ConversationStatus.NEEDS_HUMAN_REVIEW ? {
             aiEnabled: false,
             humanTakeover: false,
             needsHumanReview: true,
             humanReviewReason: conversation.humanReviewReason ?? "Conversation manually moved to human review.",
-            humanReviewCreatedAt: conversation.needsHumanReview ? undefined : new Date(),
+            humanReviewCreatedAt: conversation.needsHumanReview ? undefined : now,
             humanReviewResolvedAt: null,
             humanReviewResolvedByMembershipId: null,
           } : {}),
@@ -461,20 +625,28 @@ export const conversationService = {
             aiEnabled: false,
             humanTakeover: true,
             needsHumanReview: false,
-            humanReviewResolvedAt: new Date(),
+            humanReviewResolvedAt: now,
             humanReviewResolvedByMembershipId: actor.membershipId,
           } : {}),
           ...(status === ConversationStatus.AI_HANDLING ? {
             aiEnabled: true,
             humanTakeover: false,
             needsHumanReview: false,
-            humanReviewResolvedAt: new Date(),
+            humanReviewResolvedAt: now,
             humanReviewResolvedByMembershipId: actor.membershipId,
           } : {}),
-          ...(status === ConversationStatus.OPEN ? { humanTakeover: false } : {}),
+          ...(status === ConversationStatus.OPEN ? {
+            humanTakeover: false,
+            needsHumanReview: false,
+            humanReviewResolvedAt: now,
+            humanReviewResolvedByMembershipId: actor.membershipId,
+          } : {}),
         },
-        include: conversationInclude,
       });
+      if (changed.count !== 1) {
+        throw new AppError(409, "Conversation status changed. Refresh and try again.", "CONVERSATION_STATUS_CHANGED");
+      }
+      const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
       const systemMessage = await createSystemMessage({
         businessId: actor.businessId,
         leadId: conversation.leadId,
@@ -482,26 +654,27 @@ export const conversationService = {
         content: `Conversation status changed from ${conversation.status} to ${status}.`,
         metadata: { from: conversation.status, to: status },
       }, tx);
-      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_STATUS_CHANGED, metadata: { conversationId, from: conversation.status, to: status } },
       });
-      return record;
+      return { updated: record, previousStatus: conversation.status, systemMessageId: systemMessage.id, changed: true };
     }).catch((error: unknown) => {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         throw new AppError(409, "Another active conversation already exists for this lead and channel", "CONVERSATION_ALREADY_EXISTS");
       }
       throw error;
     });
+    if (!result.changed) return result.updated;
+    const updated = result.updated;
     await Promise.all([
       invalidateConversationCache(actor.businessId, conversationId),
-      logAudit(actor, AuditAction.CONVERSATION_STATUS_CHANGED, conversationId, conversation.leadId, context, { from: conversation.status, to: status }),
+      logAudit(actor, AuditAction.CONVERSATION_STATUS_CHANGED, conversationId, updated.leadId, context, { from: result.previousStatus, to: status }),
     ]);
     realtimeService.publish({
       type: "conversation.updated",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
+      leadId: updated.leadId,
       assignedStaffId: updated.assignedStaffId,
       payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: updated.aiEnabled, humanTakeover: updated.humanTakeover, needsHumanReview: updated.needsHumanReview } },
     });
@@ -509,37 +682,42 @@ export const conversationService = {
       type: "message.created",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
-      messageId: systemMessageId,
+      leadId: updated.leadId,
+      messageId: result.systemMessageId,
       assignedStaffId: updated.assignedStaffId,
-      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+      payload: { messageId: result.systemMessageId, senderType: "SYSTEM", conversationId, leadId: updated.leadId },
     });
     return updated;
   },
 
   async end(actor: ConversationActor, conversationId: string, context: Omit<AuditInput, "action">) {
-    const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
-    if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
-    if (conversation.status === ConversationStatus.CLOSED) {
-      throw new AppError(409, "Conversation is already closed.", "CONVERSATION_ALREADY_CLOSED");
-    }
     const user = await prisma.user.findUnique({
       where: { id: actor.userId },
       select: { firstName: true, lastName: true },
     });
     const staffName = user ? `${user.firstName} ${user.lastName}`.trim() : "a team member";
-    let systemMessageId: string | undefined;
-    const updated = await prisma.$transaction(async (tx) => {
-      const record = await tx.conversation.update({
-        where: { id: conversationId },
+    const result = await prisma.$transaction(async (tx) => {
+      const conversation = await tx.conversation.findFirst({ where: { id: conversationId, ...assignedOnlyAccessWhere(actor) } });
+      if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+      assertConversationUnlocked(conversation);
+      if (conversation.status === ConversationStatus.CLOSED) {
+        throw new AppError(409, "Conversation is already closed.", "CONVERSATION_ALREADY_CLOSED");
+      }
+      const now = new Date();
+      const closed = await tx.conversation.updateMany({
+        where: { id: conversationId, ...assignedOnlyAccessWhere(actor), status: { not: ConversationStatus.CLOSED } },
         data: {
           status: ConversationStatus.CLOSED,
-          closedAt: new Date(),
+          closedAt: now,
           aiEnabled: false,
           humanTakeover: false,
+          needsHumanReview: false,
+          humanReviewResolvedAt: now,
+          humanReviewResolvedByMembershipId: actor.membershipId,
         },
-        include: conversationInclude,
       });
+      if (closed.count !== 1) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+      const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
       const systemMessage = await createSystemMessage({
         businessId: actor.businessId,
         leadId: conversation.leadId,
@@ -547,7 +725,6 @@ export const conversationService = {
         content: `Conversation ended by ${staffName}.`,
         metadata: { endedByUserId: actor.userId, endedByMembershipId: actor.membershipId },
       }, tx);
-      systemMessageId = systemMessage.id;
       await tx.leadActivity.create({
         data: {
           businessId: actor.businessId,
@@ -557,13 +734,14 @@ export const conversationService = {
           metadata: { conversationId, previousStatus: conversation.status, newStatus: ConversationStatus.CLOSED },
         },
       });
-      return record;
+      return { updated: record, previousStatus: conversation.status, systemMessageId: systemMessage.id };
     }, { maxWait: 15_000, timeout: 30_000 });
+    const updated = result.updated;
     await Promise.all([
       invalidateConversationCache(actor.businessId, conversationId),
-      cacheService.delByPattern(`business:${actor.businessId}:leads:detail:${conversation.leadId}*`),
-      logAudit(actor, AuditAction.CONVERSATION_ENDED, conversationId, conversation.leadId, context, {
-        previousStatus: conversation.status,
+      cacheService.delByPattern(`business:${actor.businessId}:leads:detail:${updated.leadId}*`),
+      logAudit(actor, AuditAction.CONVERSATION_ENDED, conversationId, updated.leadId, context, {
+        previousStatus: result.previousStatus,
         newStatus: ConversationStatus.CLOSED,
       }),
     ]);
@@ -571,41 +749,47 @@ export const conversationService = {
       type: "conversation.closed",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
+      leadId: updated.leadId,
       assignedStaffId: updated.assignedStaffId,
-      payload: { conversationId, status: updated.status, closedAt: updated.closedAt, closedByUserId: actor.userId, systemMessageId },
+      payload: { conversationId, status: updated.status, closedAt: updated.closedAt, closedByUserId: actor.userId, systemMessageId: result.systemMessageId },
     });
     realtimeService.publish({
       type: "message.created",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
-      messageId: systemMessageId,
+      leadId: updated.leadId,
+      messageId: result.systemMessageId,
       assignedStaffId: updated.assignedStaffId,
-      payload: { messageId: systemMessageId, senderType: "SYSTEM", conversationId, leadId: conversation.leadId },
+      payload: { messageId: result.systemMessageId, senderType: "SYSTEM", conversationId, leadId: updated.leadId },
     });
     realtimeService.publish({
       type: "conversation.updated",
       businessId: actor.businessId,
       conversationId,
-      leadId: conversation.leadId,
+      leadId: updated.leadId,
       assignedStaffId: updated.assignedStaffId,
-      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: false, humanTakeover: false } },
+      payload: { conversationId, changes: { status: updated.status, closedAt: updated.closedAt, aiEnabled: false, humanTakeover: false, needsHumanReview: false } },
     });
     return updated;
   },
 
   async markRead(actor: ConversationActor, conversationId: string, context: Omit<AuditInput, "action">) {
     try {
-      const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, ...accessWhere(actor) } });
-      if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
       const now = new Date();
       const updated = await prisma.$transaction(async (tx) => {
+        const conversation = await tx.conversation.findFirst({ where: { id: conversationId, ...assignedOnlyAccessWhere(actor) } });
+        if (!conversation) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+        assertConversationUnlocked(conversation);
         await tx.message.updateMany({
           where: { businessId: actor.businessId, conversationId, senderType: MessageSenderType.CUSTOMER, readAt: null, deletedAt: null },
-          data: { readAt: now, deliveryStatus: "READ" },
+          data: { readAt: now, deliveryStatus: MessageDeliveryStatus.READ },
         });
-        const record = await tx.conversation.update({ where: { id: conversationId }, data: { unreadCount: 0 }, include: conversationInclude });
+        const read = await tx.conversation.updateMany({
+          where: { id: conversationId, ...assignedOnlyAccessWhere(actor) },
+          data: { unreadCount: 0 },
+        });
+        if (read.count !== 1) throw new AppError(404, "Conversation not found", "CONVERSATION_NOT_FOUND");
+        const record = await tx.conversation.findUniqueOrThrow({ where: { id: conversationId }, include: conversationInclude });
         await tx.leadActivity.create({
           data: { businessId: actor.businessId, leadId: conversation.leadId, actorUserId: actor.userId, action: LeadActivityAction.CONVERSATION_MARKED_READ, metadata: { conversationId } },
         });
@@ -613,13 +797,13 @@ export const conversationService = {
       });
       await Promise.all([
         invalidateConversationCache(actor.businessId, conversationId),
-        logAudit(actor, AuditAction.CONVERSATION_MARKED_READ, conversationId, conversation.leadId, context),
+        logAudit(actor, AuditAction.CONVERSATION_MARKED_READ, conversationId, updated.leadId, context),
       ]);
       realtimeService.publish({
         type: "conversation.read",
         businessId: actor.businessId,
         conversationId,
-        leadId: conversation.leadId,
+        leadId: updated.leadId,
         assignedStaffId: updated.assignedStaffId,
         payload: { conversationId, readByUserId: actor.userId, unreadCount: 0, readAt: now.toISOString() },
       });
@@ -627,7 +811,7 @@ export const conversationService = {
         type: "conversation.updated",
         businessId: actor.businessId,
         conversationId,
-        leadId: conversation.leadId,
+        leadId: updated.leadId,
         assignedStaffId: updated.assignedStaffId,
         payload: { conversationId, changes: { unreadCount: 0 } },
       });
@@ -659,7 +843,7 @@ export const conversationService = {
     const key = statsKey(actor);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
-    const where = accessWhere(actor);
+    const where = listAccessWhere(actor);
     const [grouped, unread] = await Promise.all([
       prisma.conversation.groupBy({ by: ["status"], where, _count: { _all: true } }),
       prisma.conversation.count({ where: { ...where, unreadCount: { gt: 0 } } }),

@@ -30,8 +30,10 @@ export const whatsappController = {
       ...inboundEvents.map((event) => whatsappService.processInbound(event)),
       ...statusEvents.map((event) => whatsappService.processStatusUpdate(event)),
     ]);
-    const failed = results.filter((result) => result.status === "rejected").length;
-    res.json({ received: true, processed: results.length - failed, failed });
+    const rejected = results.filter((result) => result.status === "rejected");
+    const limitBlocked = rejected.filter((result) => result.reason instanceof AppError && result.reason.code === "PLAN_LIMIT_REACHED").length;
+    const failed = rejected.length - limitBlocked;
+    res.json({ received: true, processed: results.length - rejected.length, limitBlocked, failed });
   }) satisfies RequestHandler,
 
   mockInbound: (async (req, res) => {
