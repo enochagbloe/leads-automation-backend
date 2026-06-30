@@ -82,6 +82,14 @@ const aiBookingAppointmentInclude = {
       requiresDepositBeforeConfirmation: true,
       requiresLocationBeforeConfirmation: true,
       requiresStaffAssignment: true,
+      allowedLocationTypes: true,
+      defaultLocationType: true,
+      requiresStaffAssignmentBeforeConfirmation: true,
+      requiresManagerApproval: true,
+      capacityMode: true,
+      requiredStaffRole: true,
+      requiredSkillTags: true,
+      allowAiToChooseLocationType: true,
       isActive: true,
       isArchived: true,
       readinessStatus: true,
@@ -207,6 +215,20 @@ function normalizeName(value?: string | null) {
   return value?.trim().toLowerCase();
 }
 
+function resolveAiBookingLocationType(service: AiBusinessContext["services"][number], requested?: AppointmentLocationType) {
+  if (service.defaultLocationType) return service.defaultLocationType;
+  if (!service.allowAiToChooseLocationType) return AppointmentLocationType.TO_BE_CONFIRMED;
+  if (
+    requested
+    && requested !== AppointmentLocationType.TO_BE_CONFIRMED
+    && (service.allowedLocationTypes.length === 0 || service.allowedLocationTypes.includes(requested))
+  ) {
+    return requested;
+  }
+  if (service.allowedLocationTypes.length === 1) return service.allowedLocationTypes[0]!;
+  return AppointmentLocationType.TO_BE_CONFIRMED;
+}
+
 function validDate(value?: string) {
   return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
 }
@@ -318,7 +340,9 @@ async function createAiBookingRequest(input: {
   if (!service.isBookable) throw new AppError(422, "AI booking service is not bookable.", "AI_BOOKING_SERVICE_NOT_BOOKABLE");
 
   const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
-  const locationNote = intent?.customerLocation ? ` Customer location mentioned: ${intent.customerLocation}.` : "";
+  const customerLocation = intent?.customerLocation?.trim() || null;
+  const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
+  const locationType = resolveAiBookingLocationType(service, intent?.locationType);
   const appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
     leadId: input.leadId,
     conversationId: input.conversationId,
@@ -334,8 +358,8 @@ async function createAiBookingRequest(input: {
     time: intent!.preferredTime!,
     timezone: intent?.timezone ?? input.context.business.timezone ?? "Africa/Accra",
     durationMinutes: service.durationMinutes ?? undefined,
-    locationType: AppointmentLocationType.TO_BE_CONFIRMED,
-    location: null,
+    locationType,
+    location: customerLocation,
     source: AppointmentSource.AI_CONVERSATION,
     aiDecision: {
       confidence: input.decision.confidence,

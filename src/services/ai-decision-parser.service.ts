@@ -1,3 +1,5 @@
+import { AppointmentLocationType } from "@prisma/client";
+
 export type AiReplyIntent =
   | "GENERAL_QUESTION"
   | "SERVICE_INQUIRY"
@@ -66,6 +68,7 @@ export type AiReplyDecision = {
     customerName?: string;
     customerPhone?: string;
     customerLocation?: string;
+    locationType?: AppointmentLocationType;
     notes?: string;
     missingFields?: string[];
   };
@@ -108,6 +111,7 @@ const COMPLAINT_CATEGORIES = new Set<AiComplaintCategory>([
 ]);
 
 const COMPLAINT_SEVERITIES = new Set<AiComplaintSeverity>(["LOW", "MEDIUM", "HIGH", "URGENT"]);
+const APPOINTMENT_LOCATION_TYPES = new Set<AppointmentLocationType>(Object.values(AppointmentLocationType));
 
 export const AI_DECISION_PARSE_FAILURE_REASON = "AI response could not be parsed as structured JSON.";
 
@@ -177,6 +181,31 @@ function complaintRecord(value: unknown): AiReplyDecision["complaint"] | undefin
   };
 }
 
+function optionalString(value: unknown, max = 300) {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
+function appointmentIntentRecord(value: unknown): AiReplyDecision["appointmentIntent"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const object = value as Record<string, unknown>;
+  const locationType = typeof object.locationType === "string" && APPOINTMENT_LOCATION_TYPES.has(object.locationType as AppointmentLocationType)
+    ? object.locationType as AppointmentLocationType
+    : undefined;
+  return {
+    ...(optionalString(object.serviceName, 120) ? { serviceName: optionalString(object.serviceName, 120) } : {}),
+    ...(optionalString(object.serviceId, 80) ? { serviceId: optionalString(object.serviceId, 80) } : {}),
+    ...(optionalString(object.preferredDate, 40) ? { preferredDate: optionalString(object.preferredDate, 40) } : {}),
+    ...(optionalString(object.preferredTime, 40) ? { preferredTime: optionalString(object.preferredTime, 40) } : {}),
+    ...(optionalString(object.timezone, 80) ? { timezone: optionalString(object.timezone, 80) } : {}),
+    ...(optionalString(object.customerName, 120) ? { customerName: optionalString(object.customerName, 120) } : {}),
+    ...(optionalString(object.customerPhone, 60) ? { customerPhone: optionalString(object.customerPhone, 60) } : {}),
+    ...(optionalString(object.customerLocation, 500) ? { customerLocation: optionalString(object.customerLocation, 500) } : {}),
+    ...(locationType ? { locationType } : {}),
+    ...(optionalString(object.notes, 1000) ? { notes: optionalString(object.notes, 1000) } : {}),
+    missingFields: stringArray(object.missingFields),
+  };
+}
+
 export function parseAiDecision(rawText: string): AiReplyDecision {
   try {
     const parsed = JSON.parse(extractJson(rawText)) as Record<string, unknown>;
@@ -189,9 +218,7 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
     const confidence = typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence)
       ? Math.max(0, Math.min(1, parsed.confidence))
       : 0;
-    const appointmentIntent = parsed.appointmentIntent && typeof parsed.appointmentIntent === "object" && !Array.isArray(parsed.appointmentIntent)
-      ? parsed.appointmentIntent as AiReplyDecision["appointmentIntent"]
-      : undefined;
+    const appointmentIntent = appointmentIntentRecord(parsed.appointmentIntent);
     const complaint = complaintRecord(parsed.complaint);
     return {
       intent,

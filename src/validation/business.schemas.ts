@@ -66,6 +66,7 @@ export const memberOperationalProfileSchema = z.object({
   specialties: tagArray.optional(),
   serviceTags: tagArray.optional(),
   isAiHandoffEligible: z.boolean().optional(),
+  canTakeAppointments: z.boolean().optional(),
   aiHandoffPriority: z.number().int().min(0).max(100).nullable().optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: "At least one field is required" });
 

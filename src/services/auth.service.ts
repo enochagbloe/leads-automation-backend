@@ -204,6 +204,7 @@ export const authService = {
       specialties: item.specialties,
       serviceTags: item.serviceTags,
       isAiHandoffEligible: item.isAiHandoffEligible,
+      canTakeAppointments: item.canTakeAppointments,
       aiHandoffPriority: item.aiHandoffPriority,
       accountType: user.accountType,
       canCreateBusiness: user.canCreateBusiness,
@@ -229,6 +230,7 @@ export const authService = {
         specialties: membership.specialties,
         serviceTags: membership.serviceTags,
         isAiHandoffEligible: membership.isAiHandoffEligible,
+        canTakeAppointments: membership.canTakeAppointments,
         aiHandoffPriority: membership.aiHandoffPriority,
         joinedAt: membership.joinedAt,
       } : null,
@@ -248,6 +250,7 @@ export const authService = {
           specialties: membership.specialties,
           serviceTags: membership.serviceTags,
           isAiHandoffEligible: membership.isAiHandoffEligible,
+          canTakeAppointments: membership.canTakeAppointments,
           aiHandoffPriority: membership.aiHandoffPriority,
         },
         account: {

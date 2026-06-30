@@ -1,5 +1,6 @@
 import {
   AppointmentConfirmationMode,
+  AppointmentLocationType,
   ConversationStatus,
   DayOfWeek,
   MessageDirection,
@@ -8,6 +9,7 @@ import {
   PlanCode,
   ServicePriceType,
   ServiceReadinessStatus,
+  ServiceCapacityMode,
   AiTone,
 } from "@prisma/client";
 import { env } from "../config/env";
@@ -50,6 +52,17 @@ export type AiBusinessContext = {
     priceDescription?: string | null;
     durationMinutes?: number | null;
     isBookable: boolean;
+    allowedLocationTypes: AppointmentLocationType[];
+    defaultLocationType?: AppointmentLocationType | null;
+    autoConfirmEligible: boolean;
+    requiresManualApproval: boolean;
+    requiresManagerApproval: boolean;
+    requiresStaffAssignmentBeforeConfirmation: boolean;
+    requiresLocationBeforeConfirmation: boolean;
+    capacityMode: ServiceCapacityMode;
+    requiredStaffRole?: string | null;
+    requiredSkillTags: string[];
+    allowAiToChooseLocationType: boolean;
     readinessStatus?: ServiceReadinessStatus;
   }>;
   availability: {
@@ -263,6 +276,17 @@ export const aiBusinessContextService = {
           priceDescription: true,
           durationMinutes: true,
           isBookable: true,
+          allowedLocationTypes: true,
+          defaultLocationType: true,
+          autoConfirmEligible: true,
+          requiresManualApproval: true,
+          requiresManagerApproval: true,
+          requiresStaffAssignmentBeforeConfirmation: true,
+          requiresLocationBeforeConfirmation: true,
+          capacityMode: true,
+          requiredStaffRole: true,
+          requiredSkillTags: true,
+          allowAiToChooseLocationType: true,
           readinessStatus: true,
           missingFields: true,
         },
@@ -317,6 +341,17 @@ export const aiBusinessContextService = {
       priceDescription: service.priceDescription,
       durationMinutes: service.durationMinutes,
       isBookable: service.isBookable,
+      allowedLocationTypes: service.allowedLocationTypes,
+      defaultLocationType: service.defaultLocationType,
+      autoConfirmEligible: service.autoConfirmEligible,
+      requiresManualApproval: service.requiresManualApproval,
+      requiresManagerApproval: service.requiresManagerApproval,
+      requiresStaffAssignmentBeforeConfirmation: service.requiresStaffAssignmentBeforeConfirmation,
+      requiresLocationBeforeConfirmation: service.requiresLocationBeforeConfirmation,
+      capacityMode: service.capacityMode,
+      requiredStaffRole: service.requiredStaffRole,
+      requiredSkillTags: service.requiredSkillTags,
+      allowAiToChooseLocationType: service.allowAiToChooseLocationType,
       readinessStatus: service.readinessStatus,
     }));
 
@@ -460,12 +495,13 @@ export const aiPromptContextFormatter = {
       this.format(context),
       "",
       "For booking intent: if service, date, and time are present, use suggestedAction CREATE_BOOKING_REQUEST. If any required detail is missing, ask a clarifying question with SEND_REPLY.",
+      "For booking intent locationType: use the service default appointment type when provided. Only choose a different locationType when the service says AI can choose location type and the customer clearly requested an allowed appointment type. Otherwise use TO_BE_CONFIRMED and ask a clarifying question when location details are required.",
       "Never say an appointment is confirmed. Booking requests require business confirmation.",
       "Complaint handling: detect dissatisfaction, delays, poor workmanship, staff behavior issues, missed appointments, payment problems, follow-up problems, communication breakdowns, missing work/items, and site/delivery issues.",
       "If the plan has team routing, include complaint.isComplaint, category, severity, summary, requiresInternalAction, and suggestedStaffSpecialtyTags when a complaint/internal issue is present.",
       "If the plan does not have team routing, do not include detailed complaint intelligence; use COMPLAINT intent and requiresHumanReview for safe handoff only.",
       "For complaint replies, acknowledge calmly and do not expose internal routing, tasks, assignments, staff names, or ticket language.",
-      "Respond with this JSON shape exactly: {\"intent\":\"GENERAL_QUESTION|SERVICE_INQUIRY|PRICING_INQUIRY|AVAILABILITY_INQUIRY|BOOKING_INTENT|RESCHEDULE_INTENT|CANCELLATION_INTENT|COMPLAINT|PAYMENT_QUESTION|HUMAN_REQUEST|UNKNOWN\",\"replyText\":string|null,\"confidence\":number,\"shouldReply\":boolean,\"requiresHumanReview\":boolean,\"reason\":string,\"usedKnowledge\":{\"profile\":boolean,\"services\":boolean,\"availability\":boolean,\"policies\":boolean,\"conversationHistory\":boolean},\"suggestedAction\":\"SEND_REPLY|REQUEST_HUMAN_REVIEW|CREATE_BOOKING_REQUEST|DETECT_BOOKING_ONLY|NO_ACTION\",\"complaint\":{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[]},\"appointmentIntent\":{\"serviceName\":string,\"serviceId\":string,\"preferredDate\":string,\"preferredTime\":string,\"timezone\":string,\"customerName\":string,\"customerPhone\":string,\"customerLocation\":string,\"notes\":string,\"missingFields\":string[]}}",
+      "Respond with this JSON shape exactly: {\"intent\":\"GENERAL_QUESTION|SERVICE_INQUIRY|PRICING_INQUIRY|AVAILABILITY_INQUIRY|BOOKING_INTENT|RESCHEDULE_INTENT|CANCELLATION_INTENT|COMPLAINT|PAYMENT_QUESTION|HUMAN_REQUEST|UNKNOWN\",\"replyText\":string|null,\"confidence\":number,\"shouldReply\":boolean,\"requiresHumanReview\":boolean,\"reason\":string,\"usedKnowledge\":{\"profile\":boolean,\"services\":boolean,\"availability\":boolean,\"policies\":boolean,\"conversationHistory\":boolean},\"suggestedAction\":\"SEND_REPLY|REQUEST_HUMAN_REVIEW|CREATE_BOOKING_REQUEST|DETECT_BOOKING_ONLY|NO_ACTION\",\"complaint\":{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[]},\"appointmentIntent\":{\"serviceName\":string,\"serviceId\":string,\"preferredDate\":string,\"preferredTime\":string,\"timezone\":string,\"customerName\":string,\"customerPhone\":string,\"customerLocation\":string,\"locationType\":\"PHONE_CALL|ONLINE|CUSTOMER_LOCATION|BUSINESS_LOCATION|TO_BE_CONFIRMED\",\"notes\":string,\"missingFields\":string[]}}",
     ].join("\n");
   },
 
@@ -480,7 +516,23 @@ export const aiPromptContextFormatter = {
   format(context: AiBusinessContext) {
     const services = context.services.length
       ? context.services.map((service) =>
-        `- ${service.name}${service.category ? ` (${service.category})` : ""}: ${service.description ?? "No description."} Pricing: ${priceText(service)} Duration: ${service.durationMinutes ?? "unknown"} minutes. Bookable: ${service.isBookable ? "yes" : "no"}. Readiness: ${service.readinessStatus ?? "unknown"}.`).join("\n")
+        [
+          `- ${service.name}${service.category ? ` (${service.category})` : ""}: ${service.description ?? "No description."}`,
+          `  Pricing: ${priceText(service)}`,
+          `  Duration: ${service.durationMinutes ?? "unknown"} minutes`,
+          `  Bookable: ${service.isBookable ? "yes" : "no"}`,
+          `  Allowed appointment types: ${service.allowedLocationTypes.join(", ") || "not configured"}`,
+          `  Default appointment type: ${service.defaultLocationType ?? "none"}`,
+          `  Requires location before confirmation: ${service.requiresLocationBeforeConfirmation ? "yes" : "no"}`,
+          `  Requires staff assignment before confirmation: ${service.requiresStaffAssignmentBeforeConfirmation ? "yes" : "no"}`,
+          `  Requires manager approval: ${service.requiresManagerApproval ? "yes" : "no"}`,
+          `  Auto-confirm eligible: ${service.autoConfirmEligible ? "yes" : "no"}`,
+          `  Capacity mode: ${service.capacityMode}`,
+          `  Required staff role: ${service.requiredStaffRole ?? "none"}`,
+          `  Required staff skills: ${service.requiredSkillTags.join(", ") || "none"}`,
+          `  AI can choose location type: ${service.allowAiToChooseLocationType ? "yes" : "no"}`,
+          `  Readiness: ${service.readinessStatus ?? "unknown"}.`,
+        ].join("\n")).join("\n")
       : "- No active services available. Do not invent services.";
     const policies = context.policies.length
       ? context.policies.map((policy) => `- ${policy.title} [${policy.category}]: ${policy.shortSummary ?? truncate(policy.content, 600)}`).join("\n")

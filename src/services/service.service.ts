@@ -71,6 +71,14 @@ const PUBLIC_SERVICE_SELECT = {
   requiresDepositBeforeConfirmation: true,
   requiresLocationBeforeConfirmation: true,
   requiresStaffAssignment: true,
+  allowedLocationTypes: true,
+  defaultLocationType: true,
+  requiresStaffAssignmentBeforeConfirmation: true,
+  requiresManagerApproval: true,
+  capacityMode: true,
+  requiredStaffRole: true,
+  requiredSkillTags: true,
+  allowAiToChooseLocationType: true,
   isBookable: true,
   isActive: true,
   isArchived: true,
@@ -179,6 +187,24 @@ async function invalidateServiceCaches(businessId: string, serviceId?: string) {
 
 function asJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function assertSafeBookingRules(input: {
+  autoConfirmEligible?: boolean;
+  requiresManagerApproval?: boolean;
+  capacityMode?: string;
+  requiresStaffAssignmentBeforeConfirmation?: boolean;
+}) {
+  if (input.autoConfirmEligible && input.requiresManagerApproval) {
+    throw new AppError(422, "Service cannot be auto-confirm eligible when manager approval is required.", "INVALID_SERVICE_BOOKING_RULES");
+  }
+  if (
+    input.autoConfirmEligible
+    && input.capacityMode === "STAFF_BASED"
+    && input.requiresStaffAssignmentBeforeConfirmation === false
+  ) {
+    throw new AppError(422, "Staff-based auto-confirm eligible services must require staff assignment before confirmation.", "INVALID_SERVICE_BOOKING_RULES");
+  }
 }
 
 function serviceLimitError(plan: { name: string; code: PlanCode; maxServices: number | null }, current: number) {
@@ -368,6 +394,13 @@ export const serviceService = {
       }
       const { business } = await mutationContext(tx, actor, input.isActive !== false ? 1 : 0);
       const priceType = input.priceType ?? ServicePriceType.NOT_SET;
+      const bookingRules = {
+        autoConfirmEligible: input.autoConfirmEligible ?? false,
+        requiresManagerApproval: input.requiresManagerApproval ?? true,
+        capacityMode: input.capacityMode ?? "STAFF_BASED",
+        requiresStaffAssignmentBeforeConfirmation: input.requiresStaffAssignmentBeforeConfirmation ?? true,
+      };
+      assertSafeBookingRules(bookingRules);
       const readiness = calculateServiceReadiness({
         ...input,
         currency: input.currency ?? business.defaultCurrency,
@@ -392,6 +425,19 @@ export const serviceService = {
           bufferMinutes: input.bufferMinutes ?? 0,
           requiresPayment: input.requiresPayment ?? false,
           paymentRequiredBeforeBooking: input.paymentRequiredBeforeBooking ?? false,
+          autoConfirmEligible: bookingRules.autoConfirmEligible,
+          requiresManualApproval: input.requiresManualApproval ?? true,
+          requiresDepositBeforeConfirmation: input.requiresDepositBeforeConfirmation ?? false,
+          requiresLocationBeforeConfirmation: input.requiresLocationBeforeConfirmation ?? false,
+          requiresStaffAssignment: input.requiresStaffAssignment ?? false,
+          allowedLocationTypes: input.allowedLocationTypes ?? [],
+          defaultLocationType: input.defaultLocationType ?? null,
+          requiresStaffAssignmentBeforeConfirmation: bookingRules.requiresStaffAssignmentBeforeConfirmation,
+          requiresManagerApproval: bookingRules.requiresManagerApproval,
+          capacityMode: bookingRules.capacityMode,
+          requiredStaffRole: input.requiredStaffRole,
+          requiredSkillTags: input.requiredSkillTags ?? [],
+          allowAiToChooseLocationType: input.allowAiToChooseLocationType ?? false,
           isBookable: input.isBookable ?? false,
           isActive: input.isActive ?? true,
           readinessStatus: readiness.readinessStatus,
@@ -430,6 +476,7 @@ export const serviceService = {
       if (merged.paymentRequiredBeforeBooking && !merged.requiresPayment) {
         throw new AppError(422, "Payment required before booking requires requiresPayment to be true", "VALIDATION_ERROR");
       }
+      assertSafeBookingRules(merged);
       const readiness = calculateServiceReadiness(merged);
       const changedFields = Object.keys(input).filter((field) => String(existing[field as keyof typeof existing] ?? "") !== String(input[field as keyof UpdateServiceInput] ?? ""));
       if (changedFields.length === 0) return { service: existing, changedFields };

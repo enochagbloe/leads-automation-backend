@@ -1,8 +1,10 @@
 import {
   AppointmentConfirmationMode,
   AppointmentLocationStatus,
+  AppointmentLocationType,
   AppointmentSource,
   PlanCode,
+  ServiceCapacityMode,
 } from "@prisma/client";
 import { env } from "../config/env";
 
@@ -22,10 +24,19 @@ export type AppointmentAutoConfirmDecisionInput = {
     requiresDepositBeforeConfirmation: boolean;
     requiresLocationBeforeConfirmation: boolean;
     requiresStaffAssignment: boolean;
+    allowedLocationTypes: AppointmentLocationType[];
+    defaultLocationType: AppointmentLocationType | null;
+    requiresStaffAssignmentBeforeConfirmation: boolean;
+    requiresManagerApproval: boolean;
+    capacityMode: ServiceCapacityMode;
+    requiredStaffRole: string | null;
+    requiredSkillTags: string[];
+    allowAiToChooseLocationType: boolean;
   } | null;
   customerName: string | null;
   customerPhone: string | null;
   assignedStaffId: string | null;
+  locationType: AppointmentLocationType;
   locationStatus: AppointmentLocationStatus;
   availability: {
     available: boolean;
@@ -90,9 +101,18 @@ export function evaluatePremiumAppointmentAutoConfirmation(
   if (!input.service) reasons.push("A bookable service is required.");
   if (input.service && !input.service.isBookable) reasons.push("Selected service is not bookable.");
   if (input.service && !input.service.autoConfirmEligible) reasons.push("Selected service is not eligible for AI auto-confirmation.");
-  if (input.service?.requiresManualApproval) reasons.push("Selected service requires manual approval.");
+  if (input.service?.requiresManualApproval || input.service?.requiresManagerApproval) {
+    reasons.push("Selected service requires manager approval.");
+  }
   if (input.service?.requiresPayment || input.service?.paymentRequiredBeforeBooking || input.service?.requiresDepositBeforeConfirmation) {
     reasons.push("Selected service requires payment or deposit before confirmation.");
+  }
+  if (
+    input.service
+    && input.service.allowedLocationTypes.length > 0
+    && !input.service.allowedLocationTypes.includes(input.locationType)
+  ) {
+    reasons.push("Requested location type is not allowed for this service.");
   }
   if (input.service?.requiresLocationBeforeConfirmation && input.locationStatus !== AppointmentLocationStatus.CONFIRMED) {
     reasons.push("Selected service requires a confirmed location.");
@@ -106,8 +126,18 @@ export function evaluatePremiumAppointmentAutoConfirmation(
   if (input.service?.requiresStaffAssignment && !input.assignedStaffId) {
     reasons.push("Selected service requires staff assignment.");
   }
-  if (!input.assignedStaffId) {
-    reasons.push("Safe auto-confirmation requires an assigned staff member or capacity rule.");
+  if (input.service?.capacityMode === ServiceCapacityMode.BUSINESS_WIDE) {
+    reasons.push("Business-wide capacity rules are not available for safe AI auto-confirmation yet.");
+  }
+  if (
+    input.service?.capacityMode === ServiceCapacityMode.STAFF_BASED
+    && (input.service.requiresStaffAssignmentBeforeConfirmation || input.service.requiresStaffAssignment)
+    && !input.assignedStaffId
+  ) {
+    reasons.push("Safe staff-based auto-confirmation requires an eligible assigned staff member.");
+  }
+  if (!input.assignedStaffId && input.service?.capacityMode !== ServiceCapacityMode.UNLIMITED) {
+    reasons.push("Safe auto-confirmation requires an assigned staff member or explicit unlimited capacity.");
   }
   if (!input.customerName?.trim()) reasons.push("Customer name is required.");
   if (!input.customerPhone?.trim()) reasons.push("Customer phone is required.");

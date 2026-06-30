@@ -304,6 +304,12 @@ enum AppointmentLocationType {
   TO_BE_CONFIRMED
 }
 
+enum ServiceCapacityMode {
+  STAFF_BASED
+  BUSINESS_WIDE
+  UNLIMITED
+}
+
 enum AppointmentLocationStatus {
   CONFIRMED
   NEEDS_CONFIRMATION
@@ -698,37 +704,45 @@ model Business {
 }
 
 model Service {
-  id                                 String                 @id @default(cuid())
-  businessId                         String
-  name                               String
-  slug                               String
-  category                           String?
-  description                        String?
-  basePrice                          Decimal?               @db.Decimal(12, 2)
-  currency                           String                 @default("GHS")
-  priceType                          ServicePriceType       @default(NOT_SET)
-  priceDescription                   String?
-  durationMinutes                    Int?
-  bufferMinutes                      Int                    @default(0)
-  requiresPayment                    Boolean                @default(false)
-  paymentRequiredBeforeBooking       Boolean                @default(false)
-  autoConfirmEligible                Boolean                @default(false)
-  requiresManualApproval             Boolean                @default(true)
-  requiresDepositBeforeConfirmation  Boolean                @default(false)
-  requiresLocationBeforeConfirmation Boolean                @default(false)
-  requiresStaffAssignment            Boolean                @default(false)
-  isBookable                         Boolean                @default(false)
-  isActive                           Boolean                @default(true)
-  isArchived                         Boolean                @default(false)
-  readinessStatus                    ServiceReadinessStatus @default(DRAFT)
-  missingFields                      String[]               @default([])
-  displayOrder                       Int                    @default(0)
-  source                             ServiceSource          @default(MANUAL)
-  createdById                        String?
-  updatedById                        String?
-  createdAt                          DateTime               @default(now())
-  updatedAt                          DateTime               @updatedAt
-  archivedAt                         DateTime?
+  id                                        String                    @id @default(cuid())
+  businessId                                String
+  name                                      String
+  slug                                      String
+  category                                  String?
+  description                               String?
+  basePrice                                 Decimal?                  @db.Decimal(12, 2)
+  currency                                  String                    @default("GHS")
+  priceType                                 ServicePriceType          @default(NOT_SET)
+  priceDescription                          String?
+  durationMinutes                           Int?
+  bufferMinutes                             Int                       @default(0)
+  requiresPayment                           Boolean                   @default(false)
+  paymentRequiredBeforeBooking              Boolean                   @default(false)
+  autoConfirmEligible                       Boolean                   @default(false)
+  requiresManualApproval                    Boolean                   @default(true)
+  requiresDepositBeforeConfirmation         Boolean                   @default(false)
+  requiresLocationBeforeConfirmation        Boolean                   @default(false)
+  requiresStaffAssignment                   Boolean                   @default(false)
+  allowedLocationTypes                      AppointmentLocationType[] @default([])
+  defaultLocationType                       AppointmentLocationType?
+  requiresStaffAssignmentBeforeConfirmation Boolean                   @default(true)
+  requiresManagerApproval                   Boolean                   @default(true)
+  capacityMode                              ServiceCapacityMode       @default(STAFF_BASED)
+  requiredStaffRole                         String?
+  requiredSkillTags                         String[]                  @default([])
+  allowAiToChooseLocationType               Boolean                   @default(false)
+  isBookable                                Boolean                   @default(false)
+  isActive                                  Boolean                   @default(true)
+  isArchived                                Boolean                   @default(false)
+  readinessStatus                           ServiceReadinessStatus    @default(DRAFT)
+  missingFields                             String[]                  @default([])
+  displayOrder                              Int                       @default(0)
+  source                                    ServiceSource             @default(MANUAL)
+  createdById                               String?
+  updatedById                               String?
+  createdAt                                 DateTime                  @default(now())
+  updatedAt                                 DateTime                  @updatedAt
+  archivedAt                                DateTime?
 
   business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
   createdBy    User?         @relation("ServiceCreator", fields: [createdById], references: [id], onDelete: SetNull)
@@ -823,6 +837,7 @@ model BusinessMember {
   specialties             String[]         @default([])
   serviceTags             String[]         @default([])
   isAiHandoffEligible     Boolean          @default(true)
+  canTakeAppointments     Boolean          @default(true)
   aiHandoffPriority       Int?
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
