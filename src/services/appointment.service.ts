@@ -2140,6 +2140,9 @@ export const appointmentService = {
     }
     requireManager(actor);
     const existing = await loadAppointment(actor, appointmentId);
+    if (TERMINAL_APPOINTMENT_STATUSES.has(existing.status)) {
+      throw new AppError(422, "Appointments with a final outcome cannot be reassigned.", "APPOINTMENT_OUTCOME_ALREADY_RECORDED");
+    }
     await validateAssignee(actor.businessId, assignedStaffId);
     const business = await validateBusiness(actor);
     const subscription = await activeSubscription(actor);
@@ -2238,11 +2241,11 @@ export const appointmentService = {
       });
       throw new AppError(409, "This appointment is already assigned to another team member.", "WORK_ALREADY_ASSIGNED");
     }
-    if (existing.assignedStaffId === actor.membershipId) return withAvailableActions(existing);
     if (TERMINAL_APPOINTMENT_STATUSES.has(existing.status)) {
       const code = existing.status === AppointmentStatus.CANCELLED ? "CANNOT_CLAIM_CANCELLED_WORK" : "CANNOT_CLAIM_COMPLETED_WORK";
       throw new AppError(409, "This appointment can no longer be claimed.", code);
     }
+    if (existing.assignedStaffId === actor.membershipId) return withAvailableActions(existing);
     await validateAssignee(actor.businessId, actor.membershipId);
     const durationMinutes = Math.max(1, Math.round((existing.endTime.getTime() - existing.startTime.getTime()) / 60_000));
     const availability = await checkSlot({
