@@ -14,6 +14,7 @@ import {
   updateConversationStatusSchema,
   updateConversationWorkspaceSchema,
 } from "../validation/conversation.schemas";
+import { sendKnowledgeAssetSchema as knowledgeSendSchema } from "../validation/knowledge.schemas";
 
 export const conversationRouter = Router();
 
@@ -23,6 +24,7 @@ conversationRouter.get("/", validateQuery(conversationListQuerySchema), conversa
 conversationRouter.post("/", mutationLimiter, validate(createConversationSchema), conversationController.create);
 conversationRouter.get("/:id", validateQuery(conversationDetailQuerySchema), conversationController.detail);
 conversationRouter.post("/:id/messages", mutationLimiter, requireMessageContent, validate(createMessageSchema), conversationController.message);
+conversationRouter.post("/:id/knowledge/send", mutationLimiter, validate(knowledgeSendSchema), conversationController.sendKnowledge);
 conversationRouter.post("/:id/messages/:messageId/retry", mutationLimiter, conversationController.retryMessage);
 conversationRouter.patch("/:id", mutationLimiter, validate(updateConversationWorkspaceSchema), conversationController.updateWorkspace);
 conversationRouter.patch("/:id/assign", mutationLimiter, validate(assignConversationSchema), conversationController.assign);

@@ -11,6 +11,9 @@ import {
   ServiceReadinessStatus,
   ServiceCapacityMode,
   AiTone,
+  KnowledgeArticleStatus,
+  KnowledgeAssetVisibility,
+  KnowledgeDocumentStatus,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -85,6 +88,21 @@ export type AiBusinessContext = {
     shortSummary?: string | null;
     content: string;
     priority?: number;
+  }>;
+  knowledgeArticles: Array<{
+    id: string;
+    title: string;
+    summary?: string | null;
+    body: string;
+    category?: string | null;
+    tags: string[];
+  }>;
+  knowledgeDocumentChunks: Array<{
+    id: string;
+    documentId: string;
+    documentTitle: string;
+    chunkText: string;
+    pageNumber?: number | null;
   }>;
   lead: {
     id?: string;
@@ -256,7 +274,7 @@ export const aiBusinessContextService = {
     });
     if (!conversation) throw new AppError(404, "Conversation not found while building AI context.", "AI_CONTEXT_CONVERSATION_NOT_FOUND");
 
-    const [services, availabilityRules, policies, recentMessages] = await Promise.all([
+    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages] = await Promise.all([
       prisma.service.findMany({
         where: { businessId: input.businessId, isActive: true, isArchived: false },
         orderBy: [
@@ -308,6 +326,34 @@ export const aiBusinessContextService = {
         orderBy: [{ priority: "desc" }, { displayOrder: "asc" }, { title: "asc" }],
         take: 20,
         select: { id: true, title: true, category: true, shortSummary: true, content: true, priority: true },
+      }),
+      prisma.knowledgeArticle.findMany({
+        where: {
+          businessId: input.businessId,
+          status: KnowledgeArticleStatus.PUBLISHED,
+          visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+        },
+        orderBy: [{ updatedAt: "desc" }, { title: "asc" }],
+        take: 20,
+        select: { id: true, title: true, summary: true, body: true, category: true, tags: true },
+      }),
+      prisma.knowledgeDocumentChunk.findMany({
+        where: {
+          businessId: input.businessId,
+          document: {
+            status: KnowledgeDocumentStatus.ACTIVE,
+            visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+          },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: 12,
+        select: {
+          id: true,
+          documentId: true,
+          chunkText: true,
+          pageNumber: true,
+          document: { select: { title: true } },
+        },
       }),
       prisma.message.findMany({
         where: {
@@ -433,6 +479,14 @@ export const aiBusinessContextService = {
         content: truncate(policy.content, 1400),
         priority: policy.priority,
       })),
+      knowledgeArticles,
+      knowledgeDocumentChunks: knowledgeDocumentChunks.map((chunk) => ({
+        id: chunk.id,
+        documentId: chunk.documentId,
+        documentTitle: chunk.document.title,
+        chunkText: truncate(chunk.chunkText, 900),
+        pageNumber: chunk.pageNumber,
+      })),
       lead: conversation.lead ? {
         id: conversation.lead.id,
         name: conversation.lead.fullName,
@@ -537,6 +591,17 @@ export const aiPromptContextFormatter = {
     const policies = context.policies.length
       ? context.policies.map((policy) => `- ${policy.title} [${policy.category}]: ${policy.shortSummary ?? truncate(policy.content, 600)}`).join("\n")
       : "- No customer-facing policies configured. Request human review for policy questions.";
+    const knowledgeArticles = context.knowledgeArticles.length
+      ? context.knowledgeArticles.map((article) => [
+        `- ${article.title}${article.category ? ` [${article.category}]` : ""}`,
+        `  Summary: ${article.summary ?? "No summary."}`,
+        `  Body excerpt: ${truncate(article.body, 1200)}`,
+        article.tags.length ? `  Tags: ${article.tags.join(", ")}` : "",
+      ].filter(Boolean).join("\n")).join("\n")
+      : "- No published client-sendable knowledge articles.";
+    const documentSnippets = context.knowledgeDocumentChunks.length
+      ? context.knowledgeDocumentChunks.map((chunk) => `- ${chunk.documentTitle}${chunk.pageNumber ? ` p.${chunk.pageNumber}` : ""}: ${chunk.chunkText}`).join("\n")
+      : "- No active client-sendable uploaded document snippets.";
     const messages = context.recentMessages.length
       ? context.recentMessages.map((message) => `- ${message.createdAt} ${message.senderType}/${message.direction}: ${message.text}`).join("\n")
       : "- No recent messages.";
@@ -565,6 +630,12 @@ export const aiPromptContextFormatter = {
       "",
       "CUSTOMER-FACING POLICIES",
       policies,
+      "",
+      "PUBLISHED KNOWLEDGE ARTICLES",
+      knowledgeArticles,
+      "",
+      "UPLOADED DOCUMENT KNOWLEDGE SNIPPETS",
+      documentSnippets,
       "",
       "CUSTOMER CONTEXT",
       context.lead ? `Name: ${context.lead.name ?? "unknown"}, phone: ${context.lead.phone ?? "unknown"}, email: ${context.lead.email ?? "unknown"}, source: ${context.lead.source ?? "unknown"}, status: ${context.lead.status ?? "unknown"}` : "No lead context.",

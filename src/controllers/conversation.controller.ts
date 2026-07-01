@@ -1,6 +1,7 @@
 import { BusinessRole } from "@prisma/client";
 import { Request, RequestHandler } from "express";
 import { conversationService } from "../services/conversation.service";
+import { knowledgeService } from "../services/knowledge.service";
 import { messageService } from "../services/message.service";
 import { requestMetadata } from "../utils/request";
 import { ConversationDetailQuery, ConversationListQuery } from "../validation/conversation.schemas";
@@ -31,6 +32,7 @@ export const conversationController = {
   stats: async (req, res) => res.json(await conversationService.stats(actor(req))),
   detail: async (req, res) => res.json(await conversationService.detail(actor(req), conversationId(req), res.locals.validatedQuery as ConversationDetailQuery)),
   message: async (req, res) => res.status(201).json(await messageService.createStaffMessage(actor(req), conversationId(req), req.body, requestMetadata(req))),
+  sendKnowledge: async (req, res) => res.json(await knowledgeService.sendToConversation(actor(req), conversationId(req), req.body, requestMetadata(req))),
   retryMessage: async (req, res) => res.json(await messageService.retryWhatsAppMessage(actor(req), conversationId(req), messageId(req), requestMetadata(req))),
   updateWorkspace: async (req, res) => res.json(await conversationService.updateWorkspace(actor(req), conversationId(req), req.body)),
   assign: async (req, res) => res.json(await conversationService.assign(actor(req), conversationId(req), req.body.assignedStaffId, requestMetadata(req))),

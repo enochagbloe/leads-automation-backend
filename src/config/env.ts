@@ -39,6 +39,8 @@ const schema = z.object({
   OPENROUTER_API_KEY: optionalString,
   OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api/v1"),
   OPENROUTER_DEFAULT_MODEL: optionalString,
+  OPENROUTER_EMBEDDING_MODEL: optionalString,
+  OPENROUTER_EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(1536),
   OPENROUTER_FALLBACK_MODELS: z.string().default("").transform((value) =>
     value.split(",").map((model) => model.trim()).filter(Boolean)),
   OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -51,6 +53,20 @@ const schema = z.object({
   PREMIUM_APPOINTMENT_AUTO_CONFIRM_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   AI_MAX_CONTEXT_MESSAGES: z.coerce.number().int().positive().max(50).default(12),
   AI_MAX_BUSINESS_CONTEXT_TOKENS: z.coerce.number().int().positive().default(6000),
+  KNOWLEDGE_BASIC_ASSET_LIMIT: z.coerce.number().int().nonnegative().default(5),
+  KNOWLEDGE_PLUS_ASSET_LIMIT: z.coerce.number().int().nonnegative().default(50),
+  KNOWLEDGE_PREMIUM_ASSET_LIMIT: z.coerce.number().int().nonnegative().default(200),
+  KNOWLEDGE_BASIC_AI_DRAFT_LIMIT: z.coerce.number().int().nonnegative().default(0),
+  KNOWLEDGE_PLUS_AI_DRAFT_LIMIT: z.coerce.number().int().nonnegative().default(20),
+  KNOWLEDGE_PREMIUM_AI_DRAFT_LIMIT: z.coerce.number().int().nonnegative().default(100),
+  KNOWLEDGE_BASIC_PDF_UPLOAD_LIMIT: z.coerce.number().int().nonnegative().default(10),
+  KNOWLEDGE_PLUS_PDF_UPLOAD_LIMIT: z.coerce.number().int().nonnegative().default(50),
+  KNOWLEDGE_PREMIUM_PDF_UPLOAD_LIMIT: z.coerce.number().int().nonnegative().default(250),
+  KNOWLEDGE_BASIC_STORAGE_LIMIT_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  KNOWLEDGE_PLUS_STORAGE_LIMIT_BYTES: z.coerce.number().int().positive().default(1024 * 1024 * 1024),
+  KNOWLEDGE_PREMIUM_STORAGE_LIMIT_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024 * 1024),
+  KNOWLEDGE_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  KNOWLEDGE_STORAGE_DIR: z.string().min(1).default("storage/knowledge"),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === "production" && !value.RESEND_API_KEY) {
     context.addIssue({

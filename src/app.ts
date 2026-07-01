@@ -25,6 +25,7 @@ import { inviteRouter } from "./routes/invite.routes";
 import { businessMemberRouter } from "./routes/business-member.routes";
 import { meRouter } from "./routes/me.routes";
 import { customerIssueRouter } from "./routes/customer-issue.routes";
+import { knowledgeRouter } from "./routes/knowledge.routes";
 
 export const app = express();
 
@@ -32,7 +33,7 @@ app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: corsOrigins, credentials: true }));
 app.use(express.json({
-  limit: "100kb",
+  limit: Math.ceil(env.KNOWLEDGE_UPLOAD_MAX_BYTES * 1.4),
   verify: (req, _res, buffer) => {
     (req as express.Request).rawBody = buffer;
   },
@@ -58,6 +59,7 @@ app.get("/api", (_req, res) => res.json({
     businessNotifications: "/api/business/notifications",
     businessMembers: "/api/business/members",
     businessCustomerIssues: "/api/business/customer-issues",
+    businessKnowledge: "/api/business/knowledge",
     businessLeads: "/api/business/leads",
     businessConversations: "/api/business/conversations",
     businessAi: "/api/business/conversations/:conversationId/ai/process-latest",
@@ -97,6 +99,7 @@ app.use("/api/business/appointments", appointmentRouter);
 app.use("/api/business/notifications", notificationRouter);
 app.use("/api/business/members", businessMemberRouter);
 app.use("/api/business/customer-issues", customerIssueRouter);
+app.use("/api/business/knowledge", knowledgeRouter);
 app.use("/api/business/leads", leadRouter);
 app.use("/api/business/conversations", conversationRouter);
 app.use("/api/business", aiRouter);
