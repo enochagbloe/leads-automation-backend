@@ -59,6 +59,7 @@ export type AiReplyDecision = {
     requiresInternalAction?: boolean;
     suggestedStaffSpecialtyTags?: string[];
   };
+  complaints?: Array<NonNullable<AiReplyDecision["complaint"]>>;
   appointmentIntent?: {
     serviceName?: string;
     serviceId?: string;
@@ -181,6 +182,14 @@ function complaintRecord(value: unknown): AiReplyDecision["complaint"] | undefin
   };
 }
 
+function complaintRecords(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => complaintRecord(item))
+    .filter((item): item is NonNullable<AiReplyDecision["complaint"]> => Boolean(item?.isComplaint))
+    .slice(0, 5);
+}
+
 function optionalString(value: unknown, max = 300) {
   return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : undefined;
 }
@@ -220,6 +229,7 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
       : 0;
     const appointmentIntent = appointmentIntentRecord(parsed.appointmentIntent);
     const complaint = complaintRecord(parsed.complaint);
+    const complaints = complaintRecords(parsed.complaints);
     return {
       intent,
       replyText: typeof parsed.replyText === "string" && parsed.replyText.trim() ? parsed.replyText.trim() : null,
@@ -230,6 +240,7 @@ export function parseAiDecision(rawText: string): AiReplyDecision {
       usedKnowledge: booleanRecord(parsed.usedKnowledge),
       suggestedAction,
       ...(complaint ? { complaint } : {}),
+      ...(complaints.length > 0 ? { complaints } : {}),
       ...(appointmentIntent ? { appointmentIntent } : {}),
     };
   } catch {
