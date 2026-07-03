@@ -329,6 +329,7 @@ export const businessMemberAccessService = {
         specialties: true,
         serviceTags: true,
         isAiHandoffEligible: true,
+        canTakeAppointments: true,
         aiHandoffPriority: true,
         joinedAt: true,
         createdAt: true,
@@ -369,6 +370,7 @@ export const businessMemberAccessService = {
         specialties: member.specialties,
         serviceTags: member.serviceTags,
         isAiHandoffEligible: member.isAiHandoffEligible,
+        canTakeAppointments: member.canTakeAppointments,
         aiHandoffPriority: member.aiHandoffPriority,
         joinedAt: member.joinedAt,
         createdAt: member.createdAt,
@@ -630,6 +632,7 @@ export const businessMemberAccessService = {
       specialties?: string[];
       serviceTags?: string[];
       isAiHandoffEligible?: boolean;
+      canTakeAppointments?: boolean;
       aiHandoffPriority?: number | null;
     },
     context: Omit<AuditInput, "action">,

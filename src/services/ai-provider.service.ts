@@ -19,6 +19,40 @@ export type AiGenerateReplyInput = {
   };
 };
 
+export type AiCompletionInput = {
+  businessId: string;
+  systemPrompt: string;
+  userPrompt: string;
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  responseFormat?: { type: "json_object" };
+  metadata?: Record<string, unknown>;
+};
+
+export type AiCompletionResult = {
+  rawText: string;
+  provider: "OPENROUTER";
+  model: string;
+  primaryModel: string;
+  finalModelUsed: string;
+  fallbackAttempted: boolean;
+  fallbackModelsTried: string[];
+  fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }>;
+  providerRequestCount: number;
+  fallbackExhausted?: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  latencyMs: number;
+  requestId?: string;
+};
+
+export type AiCompletionStreamHandlers = {
+  onToken?: (token: string) => void | Promise<void>;
+  onChunk?: (chunk: unknown) => void | Promise<void>;
+};
+
 export type AiGenerateReplyResult = {
   rawText: string;
   parsedDecision?: AiReplyDecision;
@@ -40,6 +74,8 @@ export type AiGenerateReplyResult = {
 
 export interface AiProvider {
   generateReply(input: AiGenerateReplyInput): Promise<AiGenerateReplyResult>;
+  generateCompletion(input: AiCompletionInput): Promise<AiCompletionResult>;
+  streamCompletion(input: AiCompletionInput, handlers: AiCompletionStreamHandlers): Promise<AiCompletionResult>;
 }
 
 type OpenRouterResponse = {
@@ -51,6 +87,14 @@ type OpenRouterResponse = {
     completion_tokens?: number;
     total_tokens?: number;
   };
+  error?: { message?: string; code?: string };
+};
+
+type OpenRouterStreamChunk = {
+  id?: string;
+  model?: string;
+  choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+  usage?: OpenRouterResponse["usage"];
   error?: { message?: string; code?: string };
 };
 
@@ -67,9 +111,34 @@ function attemptModels(primary: string) {
 function providerErrorCode(status: number) {
   if (status === 408 || status === 504) return "AI_PROVIDER_TIMEOUT";
   if (status === 429) return "AI_PROVIDER_RATE_LIMITED";
+  if (status === 401 || status === 403) return "AI_PROVIDER_AUTH_FAILED";
   if (status === 404) return "AI_MODEL_UNAVAILABLE";
   if (status >= 500) return "AI_PROVIDER_UNAVAILABLE";
   return "AI_PROVIDER_ERROR";
+}
+
+function openRouterHeaders() {
+  return {
+    Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+    "Content-Type": "application/json",
+    "HTTP-Referer": env.OPENROUTER_APP_URL ?? env.APP_URL,
+    "X-Title": env.OPENROUTER_APP_NAME,
+  };
+}
+
+function openRouterCompletionBody(input: AiCompletionInput, model: string, stream = false) {
+  return JSON.stringify({
+    model,
+    temperature: input.temperature ?? 0.2,
+    max_tokens: input.maxTokens ?? 700,
+    ...(input.responseFormat ? { response_format: input.responseFormat } : {}),
+    ...(stream ? { stream: true } : {}),
+    messages: [
+      { role: "system", content: input.systemPrompt },
+      { role: "user", content: input.userPrompt },
+    ],
+    metadata: input.metadata ? { businessId: input.businessId, ...input.metadata } : undefined,
+  });
 }
 
 function decisionValid(decision: AiReplyDecision | undefined) {
@@ -80,6 +149,153 @@ function decisionValid(decision: AiReplyDecision | undefined) {
 }
 
 export class OpenRouterProvider implements AiProvider {
+  async generateCompletion(input: AiCompletionInput): Promise<AiCompletionResult> {
+    if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
+    const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
+    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
+
+    const startedAt = Date.now();
+    const models = attemptModels(primaryModel);
+    const fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }> = [];
+
+    for (const model of models) {
+      const attemptStartedAt = Date.now();
+      try {
+        const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: openRouterHeaders(),
+          body: openRouterCompletionBody(input, model),
+          signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+        });
+        const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
+        const rawText = raw?.choices?.[0]?.message?.content;
+        if (!response.ok || !rawText) {
+          fallbackFailureReasons.push({ model, reason: providerErrorCode(response.status), message: raw?.error?.message });
+          continue;
+        }
+        return {
+          rawText,
+          provider: "OPENROUTER",
+          model: raw?.model ?? model,
+          primaryModel,
+          finalModelUsed: raw?.model ?? model,
+          fallbackAttempted: fallbackFailureReasons.length > 0,
+          fallbackModelsTried: [...fallbackFailureReasons.map((failure) => failure.model), model],
+          fallbackFailureReasons,
+          providerRequestCount: fallbackFailureReasons.length + 1,
+          promptTokens: raw?.usage?.prompt_tokens,
+          completionTokens: raw?.usage?.completion_tokens,
+          totalTokens: raw?.usage?.total_tokens,
+          latencyMs: Date.now() - attemptStartedAt,
+          requestId: raw?.id,
+        };
+      } catch (error) {
+        fallbackFailureReasons.push({
+          model,
+          reason: error instanceof DOMException && error.name === "TimeoutError" ? "AI_PROVIDER_TIMEOUT" : "AI_PROVIDER_ERROR",
+          message: error instanceof Error ? error.message : undefined,
+        });
+      }
+    }
+
+    throw new AppError(502, "AI completion failed for every configured model.", "AI_PROVIDER_ERROR", {
+      primaryModel,
+      fallbackModelsTried: fallbackFailureReasons.map((failure) => failure.model),
+      fallbackFailureReasons,
+      providerRequestCount: fallbackFailureReasons.length,
+      latencyMs: Date.now() - startedAt,
+    });
+  }
+
+  async streamCompletion(input: AiCompletionInput, handlers: AiCompletionStreamHandlers): Promise<AiCompletionResult> {
+    if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
+    const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
+    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
+
+    const startedAt = Date.now();
+    const models = attemptModels(primaryModel);
+    const fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }> = [];
+
+    for (const model of models) {
+      const attemptStartedAt = Date.now();
+      let rawText = "";
+      let requestId: string | undefined;
+      let providerModel: string | undefined;
+      try {
+        const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: openRouterHeaders(),
+          body: openRouterCompletionBody(input, model, true),
+          signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+        });
+        if (!response.ok || !response.body) {
+          const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
+          fallbackFailureReasons.push({ model, reason: providerErrorCode(response.status), message: raw?.error?.message });
+          continue;
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+          for (const part of parts) {
+            for (const line of part.split("\n")) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const data = trimmed.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
+              const chunk = JSON.parse(data) as OpenRouterStreamChunk;
+              await handlers.onChunk?.(chunk);
+              if (chunk.error) throw new AppError(502, chunk.error.message ?? "AI provider stream failed.", "AI_PROVIDER_STREAM_FAILED");
+              requestId ??= chunk.id;
+              providerModel ??= chunk.model;
+              const token = chunk.choices?.map((choice) => choice.delta?.content ?? "").join("") ?? "";
+              if (!token) continue;
+              rawText += token;
+              await handlers.onToken?.(token);
+            }
+          }
+        }
+        if (!rawText.trim()) {
+          fallbackFailureReasons.push({ model, reason: "AI_OUTPUT_EMPTY" });
+          continue;
+        }
+        return {
+          rawText,
+          provider: "OPENROUTER",
+          model: providerModel ?? model,
+          primaryModel,
+          finalModelUsed: providerModel ?? model,
+          fallbackAttempted: fallbackFailureReasons.length > 0,
+          fallbackModelsTried: [...fallbackFailureReasons.map((failure) => failure.model), model],
+          fallbackFailureReasons,
+          providerRequestCount: fallbackFailureReasons.length + 1,
+          latencyMs: Date.now() - attemptStartedAt,
+          requestId,
+        };
+      } catch (error) {
+        if (rawText.trim()) throw error;
+        fallbackFailureReasons.push({
+          model,
+          reason: error instanceof AppError ? error.code : error instanceof DOMException && error.name === "TimeoutError" ? "AI_PROVIDER_TIMEOUT" : "AI_PROVIDER_STREAM_FAILED",
+          message: error instanceof Error ? error.message : undefined,
+        });
+      }
+    }
+
+    throw new AppError(502, "AI streaming completion failed for every configured model.", "AI_PROVIDER_STREAM_FAILED", {
+      primaryModel,
+      fallbackModelsTried: fallbackFailureReasons.map((failure) => failure.model),
+      fallbackFailureReasons,
+      providerRequestCount: fallbackFailureReasons.length,
+      latencyMs: Date.now() - startedAt,
+    });
+  }
+
   async generateReply(input: AiGenerateReplyInput): Promise<AiGenerateReplyResult> {
     if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
     const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;

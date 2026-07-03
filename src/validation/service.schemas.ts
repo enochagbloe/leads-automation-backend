@@ -1,4 +1,9 @@
-import { ServicePriceType, ServiceReadinessStatus } from "@prisma/client";
+import {
+  AppointmentLocationType,
+  ServiceCapacityMode,
+  ServicePriceType,
+  ServiceReadinessStatus,
+} from "@prisma/client";
 import { z } from "zod";
 
 const nullableText = (max: number) => z.union([z.string().trim().max(max), z.null()]).optional()
@@ -10,6 +15,9 @@ const nullablePrice = z.union([
   z.number().finite().nonnegative().max(9_999_999_999.99).transform((value) => value.toFixed(2)),
   z.null(),
 ]).optional();
+const tagList = z.array(z.string().trim().min(1).max(60))
+  .max(20)
+  .transform((values) => [...new Set(values.map((value) => value.trim()).filter(Boolean))]);
 
 const serviceFields = {
   name: z.string().trim().min(2).max(100),
@@ -28,6 +36,15 @@ const serviceFields = {
   requiresDepositBeforeConfirmation: z.boolean().optional(),
   requiresLocationBeforeConfirmation: z.boolean().optional(),
   requiresStaffAssignment: z.boolean().optional(),
+  allowedLocationTypes: z.array(z.nativeEnum(AppointmentLocationType)).max(10).optional()
+    .transform((values) => values ? [...new Set(values)] : values),
+  defaultLocationType: z.nativeEnum(AppointmentLocationType).nullable().optional(),
+  requiresStaffAssignmentBeforeConfirmation: z.boolean().optional(),
+  requiresManagerApproval: z.boolean().optional(),
+  capacityMode: z.nativeEnum(ServiceCapacityMode).optional(),
+  requiredStaffRole: nullableText(80),
+  requiredSkillTags: tagList.optional(),
+  allowAiToChooseLocationType: z.boolean().optional(),
   isBookable: z.boolean().optional(),
   isActive: z.boolean().optional(),
 };
@@ -42,10 +59,59 @@ function paymentRequirement(input: { requiresPayment?: boolean; paymentRequiredB
   }
 }
 
-export const createServiceSchema = z.object(serviceFields).strict().superRefine(paymentRequirement);
+function locationSettings(input: { allowedLocationTypes?: AppointmentLocationType[]; defaultLocationType?: AppointmentLocationType | null }, context: z.RefinementCtx) {
+  if (
+    input.defaultLocationType
+    && input.allowedLocationTypes
+    && input.allowedLocationTypes.length > 0
+    && !input.allowedLocationTypes.includes(input.defaultLocationType)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["defaultLocationType"],
+      message: "Default location type must be one of the allowed location types",
+    });
+  }
+}
+
+type ServiceRefinementInput = {
+  requiresPayment?: boolean;
+  paymentRequiredBeforeBooking?: boolean;
+  autoConfirmEligible?: boolean;
+  requiresManagerApproval?: boolean;
+  capacityMode?: ServiceCapacityMode;
+  requiresStaffAssignmentBeforeConfirmation?: boolean;
+  allowedLocationTypes?: AppointmentLocationType[];
+  defaultLocationType?: AppointmentLocationType | null;
+};
+
+function serviceRefinements(input: ServiceRefinementInput, context: z.RefinementCtx) {
+  paymentRequirement(input, context);
+  locationSettings(input, context);
+  if (input.autoConfirmEligible && input.requiresManagerApproval) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["autoConfirmEligible"],
+      message: "Service cannot be auto-confirm eligible when manager approval is required",
+    });
+  }
+  if (
+    input.autoConfirmEligible
+    && input.capacityMode === ServiceCapacityMode.STAFF_BASED
+    && input.requiresStaffAssignmentBeforeConfirmation === false
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["requiresStaffAssignmentBeforeConfirmation"],
+      message: "Staff-based auto-confirm eligible services must require staff assignment before confirmation",
+    });
+  }
+}
+
+export const createServiceSchema = z.object(serviceFields).strict().superRefine(serviceRefinements);
 export const updateServiceSchema = z.object(serviceFields).partial().strict()
   .refine((input) => Object.keys(input).length > 0, "At least one field is required")
-  .superRefine(paymentRequirement);
+  .superRefine(serviceRefinements);
 
 export const reorderServicesSchema = z.object({
   items: z.array(z.object({
