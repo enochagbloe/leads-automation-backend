@@ -473,6 +473,7 @@ enum CustomerIssueSeverity {
 enum CustomerIssueStatus {
   OPEN
   ACKNOWLEDGED
+  REOPENED
   RESOLVED
   CLOSED
 }
@@ -1411,6 +1412,7 @@ model CustomerIssueLog {
   createdBy                        CustomerIssueCreatedBy @default(AI)
   createdByUserId                  String?
   metadata                         Json?
+  reopenCount                      Int                    @default(0)
   createdAt                        DateTime               @default(now())
   updatedAt                        DateTime               @updatedAt
   resolvedAt                       DateTime?
