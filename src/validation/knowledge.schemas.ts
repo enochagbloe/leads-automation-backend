@@ -51,6 +51,7 @@ export const draftKnowledgeArticleSchema = z.object({
   relatedPolicyIds: z.array(trimmed.min(1)).max(10).default([]),
   visibility: z.nativeEnum(KnowledgeAssetVisibility).default(KnowledgeAssetVisibility.INTERNAL_ONLY),
   customerQuestion: optionalTrimmed,
+  notes: optionalTrimmed,
 });
 
 export const generateStarterArticlesSchema = z.object({

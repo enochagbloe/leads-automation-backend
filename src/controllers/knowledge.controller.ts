@@ -1,6 +1,7 @@
 import { BusinessRole } from "@prisma/client";
 import { Request, RequestHandler } from "express";
 import { knowledgeService } from "../services/knowledge.service";
+import { AppError } from "../utils/errors";
 import { requestMetadata } from "../utils/request";
 import {
   KnowledgeArticleListQuery,
@@ -30,6 +31,21 @@ function sendDownload(res: Parameters<RequestHandler>[1], file: { buffer: Buffer
   res.send(file.buffer);
 }
 
+function wantsSse(req: Request) {
+  return req.get("accept")?.split(",").some((entry) => entry.trim().toLowerCase().startsWith("text/event-stream")) ?? false;
+}
+
+function writeSse(res: Parameters<RequestHandler>[1], event: string, data: Record<string, unknown>) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function safeStreamError(error: unknown) {
+  const code = error instanceof AppError ? error.code : "AI_PROVIDER_FAILED";
+  const message = error instanceof AppError ? error.message : "AI could not draft the article. Please try again.";
+  return { success: false, reason: code, message };
+}
+
 export const knowledgeController = {
   stats: async (req, res) => res.json(await knowledgeService.stats(actor(req))),
 
@@ -40,7 +56,34 @@ export const knowledgeController = {
   updateArticle: async (req, res) => res.json(await knowledgeService.updateArticle(actor(req), param(req, "articleId"), req.body, requestMetadata(req))),
   updateArticleStatus: async (req, res) => res.json(await knowledgeService.updateArticleStatus(actor(req), param(req, "articleId"), req.body.status, requestMetadata(req))),
   archiveArticle: async (req, res) => res.json(await knowledgeService.archiveArticle(actor(req), param(req, "articleId"), requestMetadata(req))),
-  draftArticle: async (req, res) => res.status(201).json(await knowledgeService.draftArticle(actor(req), req.body, requestMetadata(req))),
+  draftArticle: async (req, res, next) => {
+    const currentActor = actor(req);
+    if (!wantsSse(req)) {
+      const article = await knowledgeService.draftArticle(currentActor, req.body, requestMetadata(req));
+      res.status(201).json({ success: true, article });
+      return;
+    }
+    try {
+      await knowledgeService.assertCanDraftArticle(currentActor, req.body);
+    } catch (error) {
+      next(error);
+      return;
+    }
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    try {
+      await knowledgeService.streamDraftArticle(currentActor, req.body, requestMetadata(req), (event, data) => {
+        writeSse(res, event, data);
+      });
+      res.end();
+    } catch (error) {
+      writeSse(res, "draft_error", safeStreamError(error));
+      res.end();
+    }
+  },
   generateStarterArticles: async (req, res) => res.status(201).json(await knowledgeService.generateStarterArticles(actor(req), req.body, requestMetadata(req))),
 
   listDocuments: async (req, res) => res.json(await knowledgeService.listDocuments(actor(req), res.locals.validatedQuery as KnowledgeDocumentListQuery)),

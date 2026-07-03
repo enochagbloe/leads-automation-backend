@@ -36,6 +36,7 @@ import {
   UploadKnowledgeDocumentMetadataInput,
 } from "../validation/knowledge.schemas";
 import { AuditInput, auditService } from "./audit.service";
+import { AiCompletionResult, aiProvider } from "./ai-provider.service";
 import { cacheService } from "./cache.service";
 import { knowledgeEmbeddingService } from "./knowledge-embedding.service";
 import { knowledgePdfService } from "./knowledge-pdf.service";
@@ -423,7 +424,65 @@ async function notifyManagersArticleNeedsReview(actor: KnowledgeActor, article: 
   });
 }
 
-async function generateArticleWithOpenRouter(actor: KnowledgeActor, input: DraftKnowledgeArticleInput) {
+type GeneratedKnowledgeDraft = {
+  title: string;
+  summary: string | null;
+  body: string;
+  category: string | null;
+  tags: string[];
+  aiConfidence: number | null;
+  aiDraftReason: string;
+};
+
+function cleanJsonText(value: string) {
+  const trimmed = value.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced?.[1]?.trim() ?? trimmed;
+}
+
+function parseGeneratedDraft(rawText: string, input: DraftKnowledgeArticleInput): GeneratedKnowledgeDraft {
+  let parsed: Partial<{
+    title: string;
+    summary: string | null;
+    body: string;
+    category: string | null;
+    tags: string[];
+    aiConfidence: number;
+    confidence: number;
+    aiDraftReason: string;
+    draftReason: string;
+  }>;
+  try {
+    parsed = JSON.parse(cleanJsonText(rawText)) as typeof parsed;
+  } catch {
+    throw new AppError(502, "AI article draft response was not valid JSON.", "AI_OUTPUT_PARSE_FAILED");
+  }
+  const title = typeof parsed.title === "string" ? parsed.title.trim().slice(0, 160) : "";
+  const body = typeof parsed.body === "string" ? parsed.body.trim() : "";
+  if (!title || body.length < 40) {
+    throw new AppError(502, "AI article draft response did not include meaningful article content.", "AI_OUTPUT_EMPTY");
+  }
+  const confidence = typeof parsed.aiConfidence === "number"
+    ? parsed.aiConfidence
+    : typeof parsed.confidence === "number"
+      ? parsed.confidence
+      : null;
+  return {
+    title,
+    summary: typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary.trim().slice(0, 500) : null,
+    body,
+    category: typeof parsed.category === "string" && parsed.category.trim() ? parsed.category.trim() : input.category ?? null,
+    tags: Array.isArray(parsed.tags) ? parsed.tags.filter((tag) => typeof tag === "string" && tag.trim()).map((tag) => tag.trim()).slice(0, 12) : [],
+    aiConfidence: confidence === null ? null : Math.max(0, Math.min(1, confidence)),
+    aiDraftReason: (typeof parsed.aiDraftReason === "string" && parsed.aiDraftReason.trim())
+      ? parsed.aiDraftReason.trim()
+      : (typeof parsed.draftReason === "string" && parsed.draftReason.trim())
+        ? parsed.draftReason.trim()
+        : input.notes ?? input.customerQuestion ?? input.topic,
+  };
+}
+
+async function buildKnowledgeDraftPrompt(actor: KnowledgeActor, input: DraftKnowledgeArticleInput, output: "json" | "markdown" = "json") {
   if (!env.OPENROUTER_API_KEY || !env.OPENROUTER_DEFAULT_MODEL) {
     throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
   }
@@ -436,7 +495,7 @@ async function generateArticleWithOpenRouter(actor: KnowledgeActor, input: Draft
       where: { businessId: actor.businessId, isActive: true, isArchived: false },
       orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
       take: 20,
-      select: { name: true, category: true, description: true, priceType: true, priceDescription: true, durationMinutes: true, isBookable: true },
+      select: { id: true, name: true, category: true, description: true, priceType: true, priceDescription: true, durationMinutes: true, isBookable: true },
     }),
     prisma.businessPolicy.findMany({
       where: { businessId: actor.businessId, isActive: true, isArchived: false },
@@ -445,66 +504,82 @@ async function generateArticleWithOpenRouter(actor: KnowledgeActor, input: Draft
       select: { title: true, category: true, shortSummary: true, content: true },
     }),
   ]);
-  const systemPrompt = "You draft concise, factual customer support knowledge base articles for a business. Return strict JSON only.";
+  const selectedServices = input.relatedServiceIds.length
+    ? services.filter((service) => input.relatedServiceIds.includes(service.id))
+    : [];
+  const systemPrompt = output === "json"
+    ? [
+      "You draft clear, customer-friendly business knowledge base articles.",
+      "Use only known business, service, and policy information from the prompt.",
+      "Do not invent prices, refund policies, delivery timelines, deliverables, availability, or guarantees.",
+      "If a detail is missing, write conservatively and flag it for owner review.",
+      "Return strict JSON only. Do not wrap the JSON in markdown fences.",
+    ].join(" ")
+    : [
+      "You draft clear, customer-friendly business knowledge base articles in readable markdown.",
+      "Use only known business, service, and policy information from the prompt.",
+      "Do not invent prices, refund policies, delivery timelines, deliverables, availability, or guarantees.",
+      "If a detail is missing, write conservatively and flag it for owner review.",
+      "Write only the article markdown. Do not return JSON.",
+    ].join(" ");
   const userPrompt = [
     "Business context:",
     business ? JSON.stringify(business) : "Business profile unavailable.",
-    "Services:",
+    "All active services:",
     JSON.stringify(services),
+    "Selected related services:",
+    JSON.stringify(selectedServices),
     "Policies:",
     JSON.stringify(policies.map((policy) => ({ ...policy, content: policy.shortSummary ?? policy.content.slice(0, 800) }))),
     "",
     "Create one knowledge base article draft.",
     `Topic: ${input.topic}`,
     input.category ? `Category: ${input.category}` : "",
+    `Visibility: ${input.visibility}`,
     input.customerQuestion ? `Customer question: ${input.customerQuestion}` : "",
-    "Return JSON with title, summary, body, category, tags, confidence, draftReason.",
-    "Body must be practical, specific to the business context, and safe for a human to review before publishing.",
+    input.notes ? `Owner notes: ${input.notes}` : "",
+    output === "json"
+      ? "Return JSON with title, summary, body, category, tags, aiConfidence, aiDraftReason."
+      : "Write a complete markdown article with an H1 title and useful headings, for example Overview, What is included, Pricing, Important notes, and Next step where relevant.",
+    output === "json" ? "The body must be readable markdown-like text with useful headings." : "",
+    "The body must be practical, specific to the business context, and safe for a human to review before publishing.",
   ].filter(Boolean).join("\n");
+  return { systemPrompt, userPrompt };
+}
 
-  const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": env.OPENROUTER_APP_URL ?? env.APP_URL,
-      "X-Title": env.OPENROUTER_APP_NAME,
-    },
-    body: JSON.stringify({
-      model: env.OPENROUTER_DEFAULT_MODEL,
-      temperature: 0.25,
-      max_tokens: 1200,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      metadata: { businessId: actor.businessId, source: "KNOWLEDGE_ARTICLE_DRAFT" },
-    }),
-    signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+async function structureMarkdownDraft(actor: KnowledgeActor, input: DraftKnowledgeArticleInput, markdown: string) {
+  const result = await aiProvider.generateCompletion({
+    businessId: actor.businessId,
+    systemPrompt: "Convert the provided article markdown into strict JSON only. Do not add business facts. Preserve the article body markdown exactly except for minor cleanup.",
+    userPrompt: [
+      `Topic: ${input.topic}`,
+      input.category ? `Requested category: ${input.category}` : "",
+      `Requested visibility: ${input.visibility}`,
+      input.notes ? `Owner notes: ${input.notes}` : "",
+      "Return JSON with title, summary, body, category, tags, aiConfidence, aiDraftReason.",
+      "Article markdown:",
+      markdown,
+    ].filter(Boolean).join("\n"),
+    temperature: 0,
+    maxTokens: 1600,
+    responseFormat: { type: "json_object" },
+    metadata: { source: "KNOWLEDGE_ARTICLE_DRAFT_STRUCTURE" },
   });
-  const raw = await response.json().catch(() => null) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } } | null;
-  const content = raw?.choices?.[0]?.message?.content;
-  if (!response.ok || !content) throw new AppError(502, raw?.error?.message ?? "AI article draft failed.", "AI_PROVIDER_ERROR");
-  const parsed = JSON.parse(content) as Partial<{
-    title: string;
-    summary: string;
-    body: string;
-    category: string;
-    tags: string[];
-    confidence: number;
-    draftReason: string;
-  }>;
-  if (!parsed.title || !parsed.body) throw new AppError(502, "AI article draft response was incomplete.", "AI_RESPONSE_PARSE_ERROR");
-  return {
-    title: parsed.title.slice(0, 160),
-    summary: parsed.summary?.slice(0, 500) ?? null,
-    body: parsed.body,
-    category: parsed.category ?? input.category ?? null,
-    tags: Array.isArray(parsed.tags) ? parsed.tags.filter((tag) => typeof tag === "string").slice(0, 12) : [],
-    aiConfidence: typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : null,
-    aiDraftReason: parsed.draftReason ?? input.customerQuestion ?? input.topic,
-  };
+  return parseGeneratedDraft(result.rawText, input);
+}
+
+async function generateArticleWithOpenRouter(actor: KnowledgeActor, input: DraftKnowledgeArticleInput) {
+  const prompt = await buildKnowledgeDraftPrompt(actor, input);
+  const result = await aiProvider.generateCompletion({
+    businessId: actor.businessId,
+    systemPrompt: prompt.systemPrompt,
+    userPrompt: prompt.userPrompt,
+    temperature: 0.25,
+    maxTokens: 1400,
+    responseFormat: { type: "json_object" },
+    metadata: { source: "KNOWLEDGE_ARTICLE_DRAFT" },
+  });
+  return parseGeneratedDraft(result.rawText, input);
 }
 
 function decodePdf(input: UploadKnowledgeDocumentInput) {
@@ -674,6 +749,67 @@ function documentAccessWhere(actor: KnowledgeActor, documentId?: string): Prisma
       visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
     } : {}),
   };
+}
+
+async function saveGeneratedKnowledgeDraft(
+  actor: KnowledgeActor,
+  input: DraftKnowledgeArticleInput,
+  draft: GeneratedKnowledgeDraft,
+  context: Omit<AuditInput, "action">,
+) {
+  const article = await prisma.$transaction(async (tx) => {
+    await lockKnowledgeQuota(tx, actor.businessAccountId);
+    await assertAssetCapacityTx(tx, actor);
+    await assertAiDraftCapacityTx(tx, actor);
+    return tx.knowledgeArticle.create({
+      data: {
+        businessId: actor.businessId,
+        title: draft.title,
+        slug: await uniqueSlug(actor.businessId, draft.title, undefined, undefined, tx),
+        summary: draft.summary,
+        body: draft.body,
+        category: draft.category,
+        tags: draft.tags,
+        relatedServiceIds: input.relatedServiceIds,
+        relatedPolicyIds: input.relatedPolicyIds,
+        status: KnowledgeArticleStatus.NEEDS_REVIEW,
+        source: KnowledgeArticleSource.AI_DRAFT,
+        visibility: input.visibility,
+        aiGenerated: true,
+        aiPromptVersion: KNOWLEDGE_PROMPT_VERSION,
+        aiDraftReason: draft.aiDraftReason,
+        aiConfidence: draft.aiConfidence,
+        createdByMembershipId: actor.membershipId,
+        updatedByMembershipId: actor.membershipId,
+      },
+    });
+  }).catch((error: unknown) => {
+    if (error instanceof AppError) throw error;
+    throw new AppError(500, "AI draft article could not be saved.", "ARTICLE_SAVE_FAILED");
+  });
+  const sideEffects = await Promise.allSettled([
+    invalidateKnowledgeCaches(actor.businessId),
+    notifyManagersArticleNeedsReview(actor, article),
+    auditService.log({
+      ...context,
+      action: AuditAction.KNOWLEDGE_ARTICLE_AI_DRAFT_CREATED,
+      businessId: actor.businessId,
+      userId: actor.userId,
+      actorMembershipId: actor.membershipId,
+      metadata: { articleId: article.id, topic: input.topic },
+    }),
+  ]);
+  for (const result of sideEffects) {
+    if (result.status === "rejected") console.error("AI knowledge draft side effect failed", { error: result.reason });
+  }
+  scheduleEmbeddingSync("article.ai_draft", knowledgeEmbeddingService.syncArticle(article.id));
+  realtimeService.publish({
+    type: "business.knowledge.article.created",
+    businessId: actor.businessId,
+    broadcastToStaff: shouldBroadcastArticle(article),
+    payload: { article },
+  });
+  return article;
 }
 
 export const knowledgeService = {
@@ -924,45 +1060,60 @@ export const knowledgeService = {
     await Promise.all([assertAssetCapacity(actor), assertAiDraftCapacity(actor)]);
     await validateRelatedIds(actor.businessId, input);
     const draft = await generateArticleWithOpenRouter(actor, input);
-    const article = await prisma.$transaction(async (tx) => {
-      await lockKnowledgeQuota(tx, actor.businessAccountId);
-      await assertAssetCapacityTx(tx, actor);
-      await assertAiDraftCapacityTx(tx, actor);
-      return tx.knowledgeArticle.create({
-        data: {
-          businessId: actor.businessId,
-          title: draft.title,
-          slug: await uniqueSlug(actor.businessId, draft.title, undefined, undefined, tx),
-          summary: draft.summary,
-          body: draft.body,
-          category: draft.category,
-          tags: draft.tags,
-          relatedServiceIds: input.relatedServiceIds,
-          relatedPolicyIds: input.relatedPolicyIds,
-          status: KnowledgeArticleStatus.NEEDS_REVIEW,
-          source: KnowledgeArticleSource.AI_DRAFT,
-          visibility: input.visibility,
-          aiGenerated: true,
-          aiPromptVersion: KNOWLEDGE_PROMPT_VERSION,
-          aiDraftReason: draft.aiDraftReason,
-          aiConfidence: draft.aiConfidence,
-          createdByMembershipId: actor.membershipId,
-          updatedByMembershipId: actor.membershipId,
-        },
-      });
-    });
-    await Promise.all([
-      invalidateKnowledgeCaches(actor.businessId),
-      notifyManagersArticleNeedsReview(actor, article),
-      auditService.log({ ...context, action: AuditAction.KNOWLEDGE_ARTICLE_AI_DRAFT_CREATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId: article.id, topic: input.topic } }),
-    ]);
-    scheduleEmbeddingSync("article.ai_draft", knowledgeEmbeddingService.syncArticle(article.id));
-    realtimeService.publish({
-      type: "business.knowledge.article.created",
+    return saveGeneratedKnowledgeDraft(actor, input, draft, context);
+  },
+
+  async assertCanDraftArticle(actor: KnowledgeActor, input: DraftKnowledgeArticleInput) {
+    managerOnly(actor);
+    await Promise.all([assertAssetCapacity(actor), assertAiDraftCapacity(actor)]);
+    await validateRelatedIds(actor.businessId, input);
+  },
+
+  async streamDraftArticle(
+    actor: KnowledgeActor,
+    input: DraftKnowledgeArticleInput,
+    context: Omit<AuditInput, "action">,
+    onEvent: (event: string, data: Record<string, unknown>) => void | Promise<void>,
+  ) {
+    const prompt = await buildKnowledgeDraftPrompt(actor, input, "markdown");
+    await onEvent("draft_started", { status: "started", message: "AI is drafting the article..." });
+    let streamedText = "";
+    const completion: AiCompletionResult = await aiProvider.streamCompletion({
       businessId: actor.businessId,
-      broadcastToStaff: shouldBroadcastArticle(article),
-      payload: { article },
+      systemPrompt: prompt.systemPrompt,
+      userPrompt: prompt.userPrompt,
+      temperature: 0.25,
+      maxTokens: 1400,
+      metadata: { source: "KNOWLEDGE_ARTICLE_DRAFT" },
+    }, {
+      onToken: async (token) => {
+        streamedText += token;
+        await onEvent("draft_delta", { field: "body", delta: token });
+      },
     });
+    const markdown = (completion.rawText || streamedText).trim();
+    if (!markdown) throw new AppError(502, "AI article draft response was empty.", "AI_OUTPUT_EMPTY");
+    const draft = await structureMarkdownDraft(actor, input, markdown);
+    await onEvent("draft_metadata", {
+      title: draft.title,
+      summary: draft.summary,
+      category: draft.category,
+      tags: draft.tags,
+      visibility: input.visibility,
+      status: KnowledgeArticleStatus.NEEDS_REVIEW,
+      source: KnowledgeArticleSource.AI_DRAFT,
+      aiGenerated: true,
+      aiConfidence: draft.aiConfidence,
+      aiDraftReason: draft.aiDraftReason,
+    });
+    const article = await saveGeneratedKnowledgeDraft(actor, input, draft, context);
+    await onEvent("draft_saved", {
+      articleId: article.id,
+      status: article.status,
+      source: article.source,
+      aiGenerated: article.aiGenerated,
+    });
+    await onEvent("draft_completed", { success: true, articleId: article.id });
     return article;
   },
 
@@ -1011,7 +1162,7 @@ export const knowledgeService = {
       }
       return rows;
     });
-    await Promise.all([
+    const sideEffects = await Promise.allSettled([
       invalidateKnowledgeCaches(actor.businessId),
       ...created.map((article, index) => notifyManagersArticleNeedsReview(actor, article)
         .then(() => auditService.log({
@@ -1023,6 +1174,11 @@ export const knowledgeService = {
           metadata: { articleId: article.id, topic: topics[index], starterBatch: true },
         }))),
     ]);
+    for (const result of sideEffects) {
+      if (result.status === "rejected") {
+        console.error("Starter knowledge article side effect failed", { error: result.reason });
+      }
+    }
     for (const article of created) {
       scheduleEmbeddingSync("article.starter_draft", knowledgeEmbeddingService.syncArticle(article.id));
       realtimeService.publish({
