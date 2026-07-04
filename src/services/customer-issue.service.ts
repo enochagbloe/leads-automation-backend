@@ -31,7 +31,8 @@ import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.se
 import { emailService } from "./email.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
-import { CustomerIssueListQuery } from "../validation/customer-issue.schemas";
+import { subscriptionService } from "./subscription.service";
+import { CustomerIssueListQuery, CustomerIssueMetricsQuery } from "../validation/customer-issue.schemas";
 
 export type CustomerIssueActor = {
   userId: string;
@@ -98,6 +99,22 @@ function issueAccessWhere(actor: CustomerIssueActor): Prisma.CustomerIssueLogWhe
     businessId: actor.businessId,
     ...(actor.role === BusinessRole.STAFF ? { OR: [{ responsibleMembershipId: actor.membershipId }, { responsibleMembershipId: null }] } : {}),
   };
+}
+
+function hasPlusComplaintIntelligence(plan: PlanCode) {
+  return plan === PlanCode.PLUS || plan === PlanCode.PREMIUM;
+}
+
+async function assertPlusComplaintIntelligence(actor: CustomerIssueActor) {
+  const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
+  if (!hasPlusComplaintIntelligence(subscription.plan.code)) {
+    throw new AppError(403, "Upgrade to Plus to access complaint intelligence and dashboard metrics.", "PLAN_UPGRADE_REQUIRED", {
+      currentPlan: subscription.plan.code,
+      recommendedPlan: PlanCode.PLUS,
+      featureKey: "complaintIntelligence",
+    });
+  }
+  return subscription;
 }
 
 function normalizeWords(...values: Array<string | null | undefined>) {
@@ -182,6 +199,28 @@ function conversationUrl(conversationId: string) {
 
 function excerpt(value: string) {
   return value.trim().slice(0, 500);
+}
+
+function basicComplaintSummary(customerMessageContent: string) {
+  const value = excerpt(customerMessageContent);
+  return value ? `Customer complaint recorded: ${value}`.slice(0, 500) : "Customer complaint recorded for follow-up.";
+}
+
+function complaintCategoryForPlan(complaint: AiComplaintInput, plan: PlanCode) {
+  return hasPlusComplaintIntelligence(plan) ? complaint.category ?? CustomerIssueCategory.OTHER : CustomerIssueCategory.OTHER;
+}
+
+function complaintSeverityForPlan(complaint: AiComplaintInput, plan: PlanCode) {
+  return hasPlusComplaintIntelligence(plan) ? complaint.severity ?? CustomerIssueSeverity.MEDIUM : CustomerIssueSeverity.MEDIUM;
+}
+
+function complaintSummaryForPlan(input: { complaint: AiComplaintInput; plan: PlanCode; reason: string; customerMessageContent: string }) {
+  if (!hasPlusComplaintIntelligence(input.plan)) return basicComplaintSummary(input.customerMessageContent);
+  return input.complaint.summary ?? input.reason ?? "Customer issue detected by AI.";
+}
+
+function complaintTagsForPlan(complaint: AiComplaintInput, plan: PlanCode) {
+  return hasPlusComplaintIntelligence(plan) ? complaint.suggestedStaffSpecialtyTags ?? [] : [];
 }
 
 const stopWords = new Set([
@@ -411,6 +450,50 @@ async function sendResolutionCustomerMessage(input: {
   return settled;
 }
 
+type IssueWithInclude = Prisma.CustomerIssueLogGetPayload<{ include: typeof issueInclude }>;
+
+function resolutionDurationMs(issue: { createdAt: Date; resolvedAt: Date | null }) {
+  return issue.resolvedAt ? Math.max(0, issue.resolvedAt.getTime() - issue.createdAt.getTime()) : null;
+}
+
+async function firstResponseMap(issues: Array<{ id: string; conversationId: string | null; createdAt: Date }>) {
+  const responsePairs = await Promise.all(issues.map(async (issue) => {
+    if (!issue.conversationId) return [issue.id, null] as const;
+    const response = await prisma.message.findFirst({
+      where: {
+        conversationId: issue.conversationId,
+        createdAt: { gte: issue.createdAt },
+        direction: MessageDirection.OUTBOUND,
+        senderType: { in: [MessageSenderType.STAFF, MessageSenderType.AI, MessageSenderType.SYSTEM] },
+        deletedAt: null,
+      },
+      select: { createdAt: true },
+      orderBy: { createdAt: "asc" },
+    });
+    return [issue.id, response?.createdAt ?? null] as const;
+  }));
+  return new Map(responsePairs);
+}
+
+async function withPlusTiming<T extends IssueWithInclude>(issues: T[]) {
+  if (issues.length === 0) return issues.map((issue) => ({ issue, metrics: { firstResponseAt: null, responseDurationMs: null, resolutionDurationMs: resolutionDurationMs(issue) } }));
+  const responses = await firstResponseMap(issues);
+  return issues.map((issue) => {
+    const firstResponseAt = responses.get(issue.id) ?? null;
+    return {
+      ...issue,
+      firstResponseAt,
+      responseDurationMs: firstResponseAt ? Math.max(0, firstResponseAt.getTime() - issue.createdAt.getTime()) : null,
+      resolutionDurationMs: resolutionDurationMs(issue),
+    };
+  });
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null;
+  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
 export const customerIssueService = {
   async handleBasicSafeHandoff(input: AiIssueInput) {
     const managers = await managerRecipients(input.businessId);
@@ -489,16 +572,22 @@ export const customerIssueService = {
       matchedExisting: boolean;
       reopened: boolean;
     }> = [];
+    const plusIntelligence = hasPlusComplaintIntelligence(input.plan);
 
     for (const complaint of complaints) {
-      const category = complaint.category ?? CustomerIssueCategory.OTHER;
-      const severity = complaint.severity ?? CustomerIssueSeverity.MEDIUM;
-      const summary = complaint.summary ?? input.decision.reason ?? "Customer issue detected by AI.";
+      const category = complaintCategoryForPlan(complaint, input.plan);
+      const severity = complaintSeverityForPlan(complaint, input.plan);
+      const summary = complaintSummaryForPlan({
+        complaint,
+        plan: input.plan,
+        reason: input.decision.reason,
+        customerMessageContent: input.customerMessageContent,
+      });
       const match = await findMatchingIssue({
         businessId: input.businessId,
         conversationId: input.conversationId,
         customerMessageContent: input.customerMessageContent,
-        complaint,
+        complaint: { ...complaint, category, severity, summary },
       });
       if (match) {
         const reopened = match.issue.status === CustomerIssueStatus.RESOLVED;
@@ -519,6 +608,7 @@ export const customerIssueService = {
               customerMessageId: input.customerMessageId,
               customerMessageExcerpt: excerpt(input.customerMessageContent),
               severity: strongerSeverity(match.issue.severity, severity),
+              ...(plusIntelligence ? { category, subcategory: complaint.subcategory ?? match.issue.subcategory, summary } : {}),
               ...(reopened ? {
                 status: CustomerIssueStatus.REOPENED,
                 resolvedAt: null,
@@ -591,7 +681,7 @@ export const customerIssueService = {
         businessId: input.businessId,
         category,
         summary,
-        suggestedTags: complaint.suggestedStaffSpecialtyTags ?? [],
+        suggestedTags: complaintTagsForPlan(complaint, input.plan),
       });
       const now = new Date();
       const issue = await prisma.$transaction(async (tx) => {
@@ -616,7 +706,8 @@ export const customerIssueService = {
             metadata: json({
               decisionIntent: input.decision.intent,
               confidence: input.decision.confidence,
-              suggestedStaffSpecialtyTags: complaint.suggestedStaffSpecialtyTags ?? [],
+              suggestedStaffSpecialtyTags: complaintTagsForPlan(complaint, input.plan),
+              intelligenceEnabled: plusIntelligence,
               relatedCustomerMessageIds: [input.customerMessageId],
               timeline: [{
                 type: "CUSTOMER_ISSUE_CREATED_FROM_CUSTOMER_MESSAGE",
@@ -741,6 +832,8 @@ export const customerIssueService = {
     const key = listKey(actor, query);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
+    const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
+    const includePlusMetrics = hasPlusComplaintIntelligence(subscription.plan.code);
     const where: Prisma.CustomerIssueLogWhereInput = {
       ...issueAccessWhere(actor),
       ...(query.status ? { status: query.status } : {}),
@@ -761,7 +854,10 @@ export const customerIssueService = {
       }),
       prisma.customerIssueLog.count({ where }),
     ]);
-    const result = { data, pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) } };
+    const result = {
+      data: includePlusMetrics ? await withPlusTiming(data) : data,
+      pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) },
+    };
     await cacheService.set(key, result, 60);
     return result;
   },
@@ -770,11 +866,148 @@ export const customerIssueService = {
     const key = detailKey(actor, issueId);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
+    const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
     const issue = await prisma.customerIssueLog.findFirst({ where: { id: issueId, ...issueAccessWhere(actor) }, include: issueInclude });
     if (!issue) throw new AppError(404, "Customer issue not found.", "CUSTOMER_ISSUE_NOT_FOUND");
-    const result = { issue };
+    const result = { issue: hasPlusComplaintIntelligence(subscription.plan.code) ? (await withPlusTiming([issue]))[0] : issue };
     await cacheService.set(key, result, 120);
     return result;
+  },
+
+  async metrics(actor: CustomerIssueActor, query: CustomerIssueMetricsQuery) {
+    await assertPlusComplaintIntelligence(actor);
+    const where: Prisma.CustomerIssueLogWhereInput = {
+      ...issueAccessWhere(actor),
+      ...(query.createdFrom || query.createdTo ? { createdAt: { ...(query.createdFrom ? { gte: query.createdFrom } : {}), ...(query.createdTo ? { lte: query.createdTo } : {}) } } : {}),
+    };
+    const [issues, byStatus, byCategory, byPriority, members] = await Promise.all([
+      prisma.customerIssueLog.findMany({
+        where,
+        select: {
+          id: true,
+          status: true,
+          category: true,
+          severity: true,
+          responsibleMembershipId: true,
+          createdAt: true,
+          resolvedAt: true,
+          reopenCount: true,
+        },
+      }),
+      prisma.customerIssueLog.groupBy({ by: ["status"], where, _count: { _all: true } }),
+      prisma.customerIssueLog.groupBy({ by: ["category"], where, _count: { _all: true } }),
+      prisma.customerIssueLog.groupBy({ by: ["severity"], where, _count: { _all: true } }),
+      prisma.businessMember.findMany({
+        where: { businessId: actor.businessId },
+        select: { id: true, role: true, user: { select: { firstName: true, lastName: true, email: true } } },
+      }),
+    ]);
+    const resolved = issues.filter((issue) => issue.resolvedAt);
+    const memberMap = new Map(members.map((member) => [member.id, member]));
+    const staffStats = new Map<string, {
+      membershipId: string;
+      name: string;
+      email: string;
+      role: BusinessRole;
+      assignedComplaints: number;
+      resolvedComplaints: number;
+      resolutionDurations: number[];
+    }>();
+    for (const issue of issues) {
+      if (!issue.responsibleMembershipId) continue;
+      const member = memberMap.get(issue.responsibleMembershipId);
+      const name = member ? `${member.user.firstName} ${member.user.lastName}`.trim() : "Unknown staff";
+      const current = staffStats.get(issue.responsibleMembershipId) ?? {
+        membershipId: issue.responsibleMembershipId,
+        name,
+        email: member?.user.email ?? "",
+        role: member?.role ?? BusinessRole.STAFF,
+        assignedComplaints: 0,
+        resolvedComplaints: 0,
+        resolutionDurations: [],
+      };
+      current.assignedComplaints += 1;
+      if (issue.resolvedAt) {
+        current.resolvedComplaints += 1;
+        current.resolutionDurations.push(resolutionDurationMs(issue) ?? 0);
+      }
+      staffStats.set(issue.responsibleMembershipId, current);
+    }
+    const openStatuses = new Set<CustomerIssueStatus>([CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED]);
+    return {
+      totalComplaints: issues.length,
+      openComplaints: issues.filter((issue) => openStatuses.has(issue.status)).length,
+      resolvedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.RESOLVED).length,
+      reopenedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.REOPENED || issue.reopenCount > 0).length,
+      byStatus: Object.fromEntries(Object.values(CustomerIssueStatus).map((status) => [status, byStatus.find((item) => item.status === status)?._count._all ?? 0])),
+      byCategory: Object.fromEntries(Object.values(CustomerIssueCategory).map((category) => [category, byCategory.find((item) => item.category === category)?._count._all ?? 0])),
+      byPriority: Object.fromEntries(Object.values(CustomerIssueSeverity).map((severity) => [severity, byPriority.find((item) => item.severity === severity)?._count._all ?? 0])),
+      averageResolutionTimeMs: average(resolved.map((issue) => resolutionDurationMs(issue) ?? 0)),
+      staffStats: Array.from(staffStats.values()).map((stat) => ({
+        membershipId: stat.membershipId,
+        name: stat.name,
+        email: stat.email,
+        role: stat.role,
+        assignedComplaints: stat.assignedComplaints,
+        resolvedComplaints: stat.resolvedComplaints,
+        averageResolutionTimeMs: average(stat.resolutionDurations),
+      })).sort((a, b) => b.assignedComplaints - a.assignedComplaints || a.name.localeCompare(b.name)),
+    };
+  },
+
+  async updateIntelligence(
+    actor: CustomerIssueActor,
+    issueId: string,
+    input: { category?: CustomerIssueCategory; severity?: CustomerIssueSeverity; summary?: string },
+  ) {
+    await assertPlusComplaintIntelligence(actor);
+    const existing = await prisma.customerIssueLog.findFirst({ where: { id: issueId, ...issueAccessWhere(actor) } });
+    if (!existing) throw new AppError(404, "Customer issue not found.", "CUSTOMER_ISSUE_NOT_FOUND");
+    if (actor.role === BusinessRole.STAFF && existing.responsibleMembershipId !== actor.membershipId) {
+      throw new AppError(403, "You do not have permission to update this customer issue.", "FORBIDDEN");
+    }
+    const updated = await prisma.customerIssueLog.update({
+      where: { id: existing.id },
+      data: {
+        ...(input.category ? { category: input.category } : {}),
+        ...(input.severity ? { severity: input.severity } : {}),
+        ...(input.summary ? { summary: input.summary } : {}),
+        metadata: json({
+          ...issueMetadata(existing.metadata),
+          intelligenceEditedAt: new Date().toISOString(),
+          intelligenceEditedByMembershipId: actor.membershipId,
+        }),
+      },
+      include: issueInclude,
+    });
+    await Promise.all([
+      invalidateIssueCaches(actor.businessId, updated.id),
+      auditService.log({
+        action: AuditAction.CUSTOMER_ISSUE_STATUS_UPDATED,
+        businessId: actor.businessId,
+        userId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        metadata: json({
+          issueId: updated.id,
+          previousCategory: existing.category,
+          newCategory: updated.category,
+          previousSeverity: existing.severity,
+          newSeverity: updated.severity,
+          summaryUpdated: Boolean(input.summary),
+          source: "CUSTOMER_ISSUE_INTELLIGENCE_EDIT",
+        }),
+      }),
+    ]);
+    const staffMembershipIds = [updated.responsibleMembershipId].filter((id): id is string => Boolean(id));
+    realtimeService.publish({
+      type: "business.customer_issue.status_updated",
+      businessId: actor.businessId,
+      conversationId: updated.conversationId ?? undefined,
+      leadId: updated.leadId ?? undefined,
+      staffMembershipIds,
+      payload: { issue: updated, previousCategory: existing.category, previousSeverity: existing.severity, intelligenceUpdated: true },
+    });
+    return { issue: updated };
   },
 
   async updateStatus(actor: CustomerIssueActor, issueId: string, status: CustomerIssueStatus) {
