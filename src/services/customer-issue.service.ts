@@ -31,7 +31,6 @@ import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.se
 import { emailService } from "./email.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
-import { subscriptionService } from "./subscription.service";
 import { CustomerIssueListQuery } from "../validation/customer-issue.schemas";
 
 export type CustomerIssueActor = {
@@ -99,18 +98,6 @@ function issueAccessWhere(actor: CustomerIssueActor): Prisma.CustomerIssueLogWhe
     businessId: actor.businessId,
     ...(actor.role === BusinessRole.STAFF ? { OR: [{ responsibleMembershipId: actor.membershipId }, { responsibleMembershipId: null }] } : {}),
   };
-}
-
-async function assertPlusOrPremium(businessAccountId: string, businessId: string) {
-  const subscription = await subscriptionService.getCurrentRecord(businessAccountId);
-  if (subscription.plan.code === PlanCode.BASIC) {
-    throw new AppError(403, "Upgrade to Plus to access AI customer issue intelligence.", "PLAN_UPGRADE_REQUIRED", {
-      currentPlan: PlanCode.BASIC,
-      recommendedPlan: PlanCode.PLUS,
-      featureKey: "customerIssueIntelligence",
-    });
-  }
-  return subscription;
 }
 
 function normalizeWords(...values: Array<string | null | undefined>) {
@@ -482,7 +469,6 @@ export const customerIssueService = {
   },
 
   async createFromAiDecision(input: AiIssueInput) {
-    if (input.plan === PlanCode.BASIC) return this.handleBasicSafeHandoff(input);
     const detectedComplaints = complaintInputs(input.decision);
     if (detectedComplaints.length === 0 && input.decision.intent !== "COMPLAINT") return null;
     const complaints = detectedComplaints.length > 0
@@ -752,7 +738,6 @@ export const customerIssueService = {
   },
 
   async list(actor: CustomerIssueActor, query: CustomerIssueListQuery) {
-    await assertPlusOrPremium(actor.businessAccountId, actor.businessId);
     const key = listKey(actor, query);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
@@ -782,7 +767,6 @@ export const customerIssueService = {
   },
 
   async detail(actor: CustomerIssueActor, issueId: string) {
-    await assertPlusOrPremium(actor.businessAccountId, actor.businessId);
     const key = detailKey(actor, issueId);
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
@@ -794,7 +778,6 @@ export const customerIssueService = {
   },
 
   async updateStatus(actor: CustomerIssueActor, issueId: string, status: CustomerIssueStatus) {
-    await assertPlusOrPremium(actor.businessAccountId, actor.businessId);
     const existing = await prisma.customerIssueLog.findFirst({ where: { id: issueId, ...issueAccessWhere(actor) } });
     if (!existing) throw new AppError(404, "Customer issue not found.", "CUSTOMER_ISSUE_NOT_FOUND");
     if (actor.role === BusinessRole.STAFF && existing.responsibleMembershipId !== actor.membershipId) {

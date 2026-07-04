@@ -135,8 +135,8 @@ function safeProviderError(error: unknown) {
   return "AI_PROVIDER_ERROR";
 }
 
-function isComplaintDecision(decision: { intent?: string | null; complaint?: { isComplaint?: boolean } } | undefined) {
-  return decision?.intent === "COMPLAINT" || decision?.complaint?.isComplaint === true;
+function isComplaintDecision(decision: { intent?: string | null; complaint?: { isComplaint?: boolean }; complaints?: Array<{ isComplaint?: boolean }> } | undefined) {
+  return decision?.intent === "COMPLAINT" || decision?.complaint?.isComplaint === true || decision?.complaints?.some((complaint) => complaint.isComplaint === true) === true;
 }
 
 async function invalidateConversationCaches(businessId: string, conversationId: string, leadId: string) {
