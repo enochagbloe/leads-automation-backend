@@ -34,6 +34,7 @@ export type AiComplaintCategory =
   | "OTHER";
 
 export type AiComplaintSeverity = "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+export type AiComplaintMatchType = "NEW" | "CONTINUATION" | "FOLLOW_UP_TO_RESOLVED";
 
 export type AiReplyDecision = {
   intent: AiReplyIntent;
@@ -58,6 +59,8 @@ export type AiReplyDecision = {
     summary?: string;
     requiresInternalAction?: boolean;
     suggestedStaffSpecialtyTags?: string[];
+    matchType?: AiComplaintMatchType;
+    matchedIssueId?: string;
   };
   complaints?: Array<NonNullable<AiReplyDecision["complaint"]>>;
   appointmentIntent?: {
@@ -112,6 +115,7 @@ const COMPLAINT_CATEGORIES = new Set<AiComplaintCategory>([
 ]);
 
 const COMPLAINT_SEVERITIES = new Set<AiComplaintSeverity>(["LOW", "MEDIUM", "HIGH", "URGENT"]);
+const COMPLAINT_MATCH_TYPES = new Set<AiComplaintMatchType>(["NEW", "CONTINUATION", "FOLLOW_UP_TO_RESOLVED"]);
 const APPOINTMENT_LOCATION_TYPES = new Set<AppointmentLocationType>(Object.values(AppointmentLocationType));
 
 export const AI_DECISION_PARSE_FAILURE_REASON = "AI response could not be parsed as structured JSON.";
@@ -171,6 +175,9 @@ function complaintRecord(value: unknown): AiReplyDecision["complaint"] | undefin
   const severity = typeof object.severity === "string" && COMPLAINT_SEVERITIES.has(object.severity as AiComplaintSeverity)
     ? object.severity as AiComplaintSeverity
     : undefined;
+  const matchType = typeof object.matchType === "string" && COMPLAINT_MATCH_TYPES.has(object.matchType as AiComplaintMatchType)
+    ? object.matchType as AiComplaintMatchType
+    : undefined;
   return {
     isComplaint: object.isComplaint === true,
     ...(category ? { category } : {}),
@@ -179,6 +186,8 @@ function complaintRecord(value: unknown): AiReplyDecision["complaint"] | undefin
     ...(typeof object.summary === "string" && object.summary.trim() ? { summary: object.summary.trim().slice(0, 500) } : {}),
     requiresInternalAction: object.requiresInternalAction === true,
     suggestedStaffSpecialtyTags: stringArray(object.suggestedStaffSpecialtyTags),
+    ...(matchType ? { matchType } : {}),
+    ...(typeof object.matchedIssueId === "string" && object.matchedIssueId.trim() ? { matchedIssueId: object.matchedIssueId.trim().slice(0, 80) } : {}),
   };
 }
 

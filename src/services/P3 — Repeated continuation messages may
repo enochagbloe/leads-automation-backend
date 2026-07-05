@@ -1,0 +1,119 @@
+P3 — Repeated continuation messages may notify managers too often
+
+When a message matches an existing issue, notifyIssueUpdate() notifies managers and assigned staff.
+
+For every minor continuation, this can become noisy.
+
+Better rule:
+
+Continuation of active issue → notify all members from owner, manager and the assigned staff memeber
+Reopen resolved issue → notify assigned staff + managers
+Urgent severity increase → notify managers
+Unassigned issue → notify managers
+
+
+
+P3 — handleBasicSafeHandoff() appears unused now
+
+I found handleBasicSafeHandoff() in customer-issue.service.ts, but the new createFromAiDecision() no longer routes Basic into it.
+
+That may be dead code now.
+
+Either:
+
+remove it
+
+or use it intentionally when Basic needs safe handoff in addition to complaint logging.
+
+
+P2 — Premium insights sends customer/staff names to AI provider
+
+In premium-complaint-insights.service.ts, samples include:
+
+responsibleStaff
+customer
+customerMessageExcerpt
+summary
+
+This may be acceptable, but be intentional. For privacy, you may want to redact:
+
+customer phone numbers
+emails
+exact personal identifiers
+
+Recommendation:
+
+Use customer labels like Customer #1, Customer #2
+Use staff role/name only if needed for internal analytics
+Avoid phone numbers in AI prompts
+
+Not a blocker, but important for production trust.
+
+
+
+P2 — AI context prompt asks for complaint fields but not existing case matching fields
+
+The prompt says:
+
+include complaint.isComplaint, category, severity, summary...
+
+But it does not ask AI to classify:
+
+new complaint
+continuation
+follow-up to resolved complaint
+
+So even if existing complaints are later added to context, the AI still will not output the decision type unless the schema changes.
+
+Required prompt addition:
+
+When existing complaint cases are provided, decide whether each complaint is:
+- NEW
+- CONTINUATION
+- FOLLOW_UP_TO_RESOLVED
+
+If it matches an existing case, include matchedIssueId.
+
+P2 — Complaint timeline is still metadata-only
+
+The timeline is stored in JSON metadata:
+
+metadata.timeline
+metadata.relatedCustomerMessageIds
+
+but it is weak for real case management.
+
+Problems:
+
+timeline capped at 50 entries
+hard to paginate
+hard to query
+hard to build analytics
+hard to audit individual message-to-complaint links
+
+Recommended table:
+
+CustomerIssueTimelineEvent {
+  id
+  businessId
+  issueId
+  messageId?
+  actorMembershipId?
+  type
+  summary
+  metadata
+  createdAt
+}
+
+And/or:
+
+CustomerIssueMessage {
+  id
+  businessId
+  issueId
+  messageId
+  relationType: "CREATED_FROM" | "MATCHED_FOLLOW_UP" | "REOPENED_BY"
+  createdAt
+}
+
+Not a merge blocker if this is MVP, but it matters for Premium analytics later.

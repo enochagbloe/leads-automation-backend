@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   AuditAction,
   BusinessNotificationEntityType,
@@ -5,10 +6,13 @@ import {
   BusinessNotificationType,
   BusinessRole,
   ConversationChannel,
+  ConversationStatus,
   CustomerIssueCategory,
   CustomerIssueCreatedBy,
+  CustomerIssueMessageRelationType,
   CustomerIssueSeverity,
   CustomerIssueStatus,
+  CustomerIssueTimelineEventType,
   CustomerIssueType,
   LeadActivityAction,
   MembershipStatus,
@@ -32,6 +36,7 @@ import { emailService } from "./email.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
 import { subscriptionService } from "./subscription.service";
+import { reopenConversationFromMessageActivity } from "./conversation-lifecycle.service";
 import { CustomerIssueListQuery, CustomerIssueMetricsQuery } from "../validation/customer-issue.schemas";
 
 export type CustomerIssueActor = {
@@ -65,6 +70,8 @@ const issueInclude = {
   suggestedResponsibleMember: { select: { id: true, role: true, user: { select: { id: true, firstName: true, lastName: true, email: true } } } },
   clientOwner: { select: { id: true, role: true, user: { select: { id: true, firstName: true, lastName: true, email: true } } } },
 } satisfies Prisma.CustomerIssueLogInclude;
+
+type IssueDbClient = typeof prisma | Prisma.TransactionClient;
 
 function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -105,6 +112,10 @@ function hasPlusComplaintIntelligence(plan: PlanCode) {
   return plan === PlanCode.PLUS || plan === PlanCode.PREMIUM;
 }
 
+// Product tier split:
+// Basic gets core complaint case management: AI detection, case creation, status/reopen tracking,
+// resolution messages, timeline, search, and basic counts. Plus/Premium add intelligence features:
+// specialty-tag routing, timing metrics, intelligence editing, and dashboard breakdowns.
 async function assertPlusComplaintIntelligence(actor: CustomerIssueActor) {
   const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
   if (!hasPlusComplaintIntelligence(subscription.plan.code)) {
@@ -167,8 +178,8 @@ async function managerRecipients(businessId: string) {
   });
 }
 
-async function routeResponsibleStaff(input: { businessId: string; category: CustomerIssueCategory; summary: string; suggestedTags: string[] }) {
-  const members = await prisma.businessMember.findMany({
+async function routeResponsibleStaff(input: { businessId: string; category: CustomerIssueCategory; summary: string; suggestedTags: string[] }, db: IssueDbClient = prisma) {
+  const members = await db.businessMember.findMany({
     where: {
       businessId: input.businessId,
       status: MembershipStatus.ACTIVE,
@@ -201,26 +212,56 @@ function excerpt(value: string) {
   return value.trim().slice(0, 500);
 }
 
-function basicComplaintSummary(customerMessageContent: string) {
-  const value = excerpt(customerMessageContent);
-  return value ? `Customer complaint recorded: ${value}`.slice(0, 500) : "Customer complaint recorded for follow-up.";
+function complaintCategoryForPlan(complaint: AiComplaintInput) {
+  return complaint.category ?? CustomerIssueCategory.OTHER;
 }
 
-function complaintCategoryForPlan(complaint: AiComplaintInput, plan: PlanCode) {
-  return hasPlusComplaintIntelligence(plan) ? complaint.category ?? CustomerIssueCategory.OTHER : CustomerIssueCategory.OTHER;
+function complaintSeverityForPlan(complaint: AiComplaintInput) {
+  return complaint.severity ?? CustomerIssueSeverity.MEDIUM;
 }
 
-function complaintSeverityForPlan(complaint: AiComplaintInput, plan: PlanCode) {
-  return hasPlusComplaintIntelligence(plan) ? complaint.severity ?? CustomerIssueSeverity.MEDIUM : CustomerIssueSeverity.MEDIUM;
-}
-
-function complaintSummaryForPlan(input: { complaint: AiComplaintInput; plan: PlanCode; reason: string; customerMessageContent: string }) {
-  if (!hasPlusComplaintIntelligence(input.plan)) return basicComplaintSummary(input.customerMessageContent);
+function complaintSummaryForPlan(input: { complaint: AiComplaintInput; reason: string; customerMessageContent: string }) {
   return input.complaint.summary ?? input.reason ?? "Customer issue detected by AI.";
 }
 
 function complaintTagsForPlan(complaint: AiComplaintInput, plan: PlanCode) {
   return hasPlusComplaintIntelligence(plan) ? complaint.suggestedStaffSpecialtyTags ?? [] : [];
+}
+
+function normalizeFingerprintPart(value: string | null | undefined) {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function complaintFingerprint(input: {
+  businessId: string;
+  conversationId: string;
+  customerMessageId: string;
+  category: CustomerIssueCategory;
+  subcategory?: string | null;
+  summary: string;
+  customerMessageContent: string;
+  multipleComplaints: boolean;
+}) {
+  const raw = input.multipleComplaints
+    ? [
+      input.businessId,
+      input.conversationId,
+      input.customerMessageId,
+      input.category,
+      normalizeFingerprintPart(input.subcategory),
+      normalizeFingerprintPart(input.summary),
+    ].join("|")
+    : [
+      input.businessId,
+      input.conversationId,
+      input.customerMessageId,
+      normalizeFingerprintPart(input.customerMessageContent),
+    ].join("|");
+  return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
 const stopWords = new Set([
@@ -233,6 +274,10 @@ const severityRank: Record<CustomerIssueSeverity, number> = {
   HIGH: 3,
   URGENT: 4,
 };
+
+const AI_MATCHED_ACTIVE_ISSUE_MIN_SCORE = 7;
+const AI_MATCHED_RESOLVED_ISSUE_MIN_SCORE = 8;
+const RESOLUTION_MESSAGE_ATTEMPT_STALE_MS = 10 * 60 * 1000;
 
 function complaintInputs(decision: AiReplyDecision): AiComplaintInput[] {
   const values = [...(decision.complaints ?? []), ...(decision.complaint ? [decision.complaint] : [])]
@@ -256,6 +301,52 @@ function issueMetadata(value: Prisma.JsonValue | null): Record<string, unknown> 
   return value && typeof value === "object" && !Array.isArray(value) ? { ...value } as Record<string, unknown> : {};
 }
 
+function metadataString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isResolutionMessageAttemptInProgress(metadata: Record<string, unknown>, now = new Date()) {
+  if (metadataString(metadata.resolutionCustomerMessageSentAt)) return false;
+  if (metadataString(metadata.resolutionCustomerMessageFailedAt)) return false;
+  const startedAt = metadataString(metadata.resolutionCustomerMessageSendStartedAt);
+  if (!startedAt) return false;
+  const startedTime = Date.parse(startedAt);
+  if (Number.isNaN(startedTime)) return false;
+  return now.getTime() - startedTime < RESOLUTION_MESSAGE_ATTEMPT_STALE_MS;
+}
+
+function resolutionMessageDeliverySucceeded(status: MessageDeliveryStatus) {
+  return status === MessageDeliveryStatus.INTERNAL
+    || status === MessageDeliveryStatus.SENT
+    || status === MessageDeliveryStatus.DELIVERED
+    || status === MessageDeliveryStatus.READ;
+}
+
+function assertValidIssueTransition(actor: CustomerIssueActor, currentStatus: CustomerIssueStatus, nextStatus: CustomerIssueStatus) {
+  if (currentStatus === nextStatus) return;
+  if (currentStatus === CustomerIssueStatus.CLOSED) {
+    throw new AppError(409, "Closed customer issues cannot be changed through normal status updates.", "CUSTOMER_ISSUE_CLOSED");
+  }
+  const allowed: CustomerIssueStatus[] = (() => {
+    switch (currentStatus) {
+      case CustomerIssueStatus.OPEN:
+        return [CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.RESOLVED, CustomerIssueStatus.CLOSED];
+      case CustomerIssueStatus.ACKNOWLEDGED:
+        return [CustomerIssueStatus.RESOLVED, CustomerIssueStatus.CLOSED];
+      case CustomerIssueStatus.REOPENED:
+        return [CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.RESOLVED, CustomerIssueStatus.CLOSED];
+      case CustomerIssueStatus.RESOLVED:
+        return isManager(actor.role) ? [CustomerIssueStatus.REOPENED, CustomerIssueStatus.CLOSED] : [CustomerIssueStatus.CLOSED];
+    }
+  })();
+  if (!allowed.includes(nextStatus)) {
+    throw new AppError(409, "This customer issue status transition is not allowed.", "INVALID_CUSTOMER_ISSUE_STATUS_TRANSITION", {
+      currentStatus,
+      requestedStatus: nextStatus,
+    });
+  }
+}
+
 function appendUnique(values: unknown, value: string) {
   const list = Array.isArray(values) ? values.filter((item): item is string => typeof item === "string") : [];
   return Array.from(new Set([...list, value])).slice(-50);
@@ -270,20 +361,45 @@ function strongerSeverity(current: CustomerIssueSeverity, next: CustomerIssueSev
   return severityRank[next] > severityRank[current] ? next : current;
 }
 
-function matchScore(issue: {
+function daysBetween(from: Date, to = new Date()) {
+  return Math.floor((to.getTime() - from.getTime()) / 86_400_000);
+}
+
+function matchDetails(issue: {
   category: CustomerIssueCategory;
   subcategory: string | null;
   summary: string;
   customerMessageExcerpt: string | null;
+  status: CustomerIssueStatus;
+  resolvedAt: Date | null;
+  updatedAt: Date;
 }, complaint: AiComplaintInput, customerMessageContent: string) {
   const category = complaint.category ?? CustomerIssueCategory.OTHER;
-  let score = issue.category === category ? 5 : 0;
-  if (issue.subcategory && complaint.subcategory && issue.subcategory.toLowerCase() === complaint.subcategory.toLowerCase()) score += 2;
+  const sameCategory = issue.category === category;
+  const sameSubcategory = Boolean(issue.subcategory && complaint.subcategory
+    && issue.subcategory.toLowerCase() === complaint.subcategory.toLowerCase());
   const existingWords = new Set(wordsForMatching(issue.summary, issue.customerMessageExcerpt, issue.subcategory));
   const incomingWords = wordsForMatching(complaint.summary, complaint.subcategory, customerMessageContent);
   const overlap = incomingWords.filter((word) => existingWords.has(word)).length;
+  const hasMeaningfulOverlap = overlap >= 2;
+  const resolvedAgeDays = issue.resolvedAt ? daysBetween(issue.resolvedAt) : null;
+  let score = sameCategory ? 4 : 0;
+  if (sameSubcategory) score += 3;
   score += Math.min(overlap, 6);
-  return score;
+  const isOldResolvedIssue = issue.status === CustomerIssueStatus.RESOLVED && resolvedAgeDays !== null && resolvedAgeDays > 60;
+  const isMatch = score >= 8
+    || (sameCategory && sameSubcategory && score >= 6)
+    || (sameCategory && hasMeaningfulOverlap && score >= 7);
+  const oldResolvedStrongEnough = !isOldResolvedIssue || score >= 10 || (sameSubcategory && overlap >= 3);
+  return {
+    score,
+    overlap,
+    sameCategory,
+    sameSubcategory,
+    hasMeaningfulOverlap,
+    resolvedAgeDays,
+    isMatch: isMatch && oldResolvedStrongEnough,
+  };
 }
 
 async function findMatchingIssue(input: {
@@ -291,8 +407,63 @@ async function findMatchingIssue(input: {
   conversationId: string;
   customerMessageContent: string;
   complaint: AiComplaintInput;
-}) {
-  const existing = await prisma.customerIssueLog.findMany({
+  complaintFingerprint?: string | null;
+}, db: IssueDbClient = prisma) {
+  if (input.complaintFingerprint) {
+    const issue = await db.customerIssueLog.findFirst({
+      where: {
+        businessId: input.businessId,
+        conversationId: input.conversationId,
+        complaintFingerprint: input.complaintFingerprint,
+      },
+      include: issueInclude,
+    });
+    if (issue) return {
+      issue,
+      score: 100,
+      matchType: issue.status === CustomerIssueStatus.RESOLVED ? "FOLLOW_UP_TO_RESOLVED" as const : "CONTINUATION" as const,
+      match: {
+        score: 100,
+        overlap: null,
+        sameCategory: true,
+        sameSubcategory: null,
+        hasMeaningfulOverlap: null,
+        resolvedAgeDays: issue.resolvedAt ? daysBetween(issue.resolvedAt) : null,
+        isMatch: true,
+        source: "COMPLAINT_FINGERPRINT",
+      },
+    };
+  }
+  if (input.complaint.matchedIssueId && input.complaint.matchType && input.complaint.matchType !== "NEW") {
+    const issue = await db.customerIssueLog.findFirst({
+      where: {
+        id: input.complaint.matchedIssueId,
+        businessId: input.businessId,
+        conversationId: input.conversationId,
+        status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED, CustomerIssueStatus.RESOLVED] },
+      },
+      include: issueInclude,
+    });
+    if (issue) {
+      const match = matchDetails(issue, input.complaint, input.customerMessageContent);
+      const minScore = issue.status === CustomerIssueStatus.RESOLVED
+        ? AI_MATCHED_RESOLVED_ISSUE_MIN_SCORE
+        : AI_MATCHED_ACTIVE_ISSUE_MIN_SCORE;
+      if (match.isMatch || match.score >= minScore) {
+        return {
+          issue,
+          score: match.score,
+          matchType: issue.status === CustomerIssueStatus.RESOLVED ? "FOLLOW_UP_TO_RESOLVED" as const : "CONTINUATION" as const,
+          match: {
+            ...match,
+            source: "AI_MATCHED_ISSUE_ID",
+            aiRequestedMatchType: input.complaint.matchType,
+          },
+        };
+      }
+    }
+  }
+  const existing = await db.customerIssueLog.findMany({
     where: {
       businessId: input.businessId,
       conversationId: input.conversationId,
@@ -303,10 +474,64 @@ async function findMatchingIssue(input: {
     take: 25,
   });
   const ranked = existing
-    .map((issue) => ({ issue, score: matchScore(issue, input.complaint, input.customerMessageContent) }))
-    .filter((entry) => entry.score >= 6 || (entry.issue.category === (input.complaint.category ?? CustomerIssueCategory.OTHER) && entry.score >= 5))
-    .sort((a, b) => b.score - a.score);
-  return ranked[0] ?? null;
+    .map((issue) => ({ issue, match: matchDetails(issue, input.complaint, input.customerMessageContent) }))
+    .filter((entry) => entry.match.isMatch)
+    .sort((a, b) => b.match.score - a.match.score);
+  return ranked[0]
+    ? {
+      issue: ranked[0].issue,
+      score: ranked[0].match.score,
+      match: ranked[0].match,
+      matchType: ranked[0].issue.status === CustomerIssueStatus.RESOLVED ? "FOLLOW_UP_TO_RESOLVED" as const : "CONTINUATION" as const,
+    }
+    : null;
+}
+
+async function lockIssueMatchingScope(tx: Prisma.TransactionClient, businessId: string, conversationId: string) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${businessId}), hashtext(${`customer-issues:${conversationId}`}))`;
+}
+
+async function createIssueTimelineEvent(tx: Prisma.TransactionClient, input: {
+  businessId: string;
+  issueId: string;
+  messageId?: string | null;
+  actorMembershipId?: string | null;
+  type: CustomerIssueTimelineEventType;
+  summary: string;
+  metadata?: Prisma.InputJsonValue;
+  messageRelationType?: CustomerIssueMessageRelationType;
+  createdAt?: Date;
+}) {
+  await tx.customerIssueTimelineEvent.create({
+    data: {
+      businessId: input.businessId,
+      issueId: input.issueId,
+      messageId: input.messageId ?? null,
+      actorMembershipId: input.actorMembershipId ?? null,
+      type: input.type,
+      summary: input.summary,
+      metadata: input.metadata,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    },
+  });
+  if (!input.messageId || !input.messageRelationType) return;
+  await tx.customerIssueMessage.upsert({
+    where: {
+      issueId_messageId_relationType: {
+        issueId: input.issueId,
+        messageId: input.messageId,
+        relationType: input.messageRelationType,
+      },
+    },
+    create: {
+      businessId: input.businessId,
+      issueId: input.issueId,
+      messageId: input.messageId,
+      relationType: input.messageRelationType,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    },
+    update: {},
+  });
 }
 
 async function notifyIssueUpdate(input: {
@@ -319,8 +544,10 @@ async function notifyIssueUpdate(input: {
   category: CustomerIssueCategory;
   severity: CustomerIssueSeverity;
   reopened: boolean;
+  severityEscalated: boolean;
 }) {
-  const managers = await managerRecipients(input.businessId);
+  const shouldNotifyManagers = input.reopened || input.severityEscalated || !input.responsibleMembershipId;
+  const managers = shouldNotifyManagers ? await managerRecipients(input.businessId) : [];
   const recipients = Array.from(new Set([
     input.responsibleMembershipId,
     ...managers.map((member) => member.id),
@@ -335,7 +562,9 @@ async function notifyIssueUpdate(input: {
     title: input.reopened ? "Customer issue reopened" : "Customer issue updated",
     message: input.reopened
       ? "A resolved customer issue was reopened by a new related customer message."
-      : "A new customer message was matched to an existing customer issue.",
+      : input.severityEscalated
+        ? "A related customer message increased the issue severity."
+        : "A new customer message was matched to an existing customer issue.",
     entityType: BusinessNotificationEntityType.CUSTOMER_ISSUE,
     entityId: input.issueId,
     actions: [{ label: "View issue", action: "VIEW_CUSTOMER_ISSUE", variant: "default" }],
@@ -346,6 +575,8 @@ async function notifyIssueUpdate(input: {
       category: input.category,
       severity: input.severity,
       reopened: input.reopened,
+      severityEscalated: input.severityEscalated,
+      managerEscalated: shouldNotifyManagers,
     },
   });
 }
@@ -360,41 +591,202 @@ async function sendResolutionCustomerMessage(input: {
     include: { lead: { select: { phone: true } } },
   });
   if (!conversation) return null;
+  if (conversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED) return null;
+  const latestIssue = await prisma.customerIssueLog.findFirst({
+    where: { id: input.issue.id, businessId: input.actor.businessId },
+    select: { metadata: true, updatedAt: true },
+  });
+  if (!latestIssue) return null;
+  const currentMetadata = issueMetadata(latestIssue.metadata);
+  if (metadataString(currentMetadata.resolutionCustomerMessageSentAt)) return null;
+  if (isResolutionMessageAttemptInProgress(currentMetadata)) return null;
+  const attemptCount = typeof currentMetadata.resolutionCustomerMessageAttemptCount === "number"
+    ? currentMetadata.resolutionCustomerMessageAttemptCount
+    : 0;
+  const sendStartedAt = new Date().toISOString();
+  const existingResolutionMessageId = metadataString(currentMetadata.resolutionCustomerMessageId);
+  const claimed = await prisma.customerIssueLog.updateMany({
+    where: {
+      id: input.issue.id,
+      businessId: input.actor.businessId,
+      updatedAt: latestIssue.updatedAt,
+    },
+    data: {
+      metadata: json({
+        ...currentMetadata,
+        resolutionCustomerMessageSendStartedAt: sendStartedAt,
+        resolutionCustomerMessageAttemptCount: attemptCount + 1,
+        resolutionCustomerMessageRetryable: false,
+        resolutionCustomerMessageFailedAt: null,
+        resolutionCustomerMessageError: null,
+      }),
+    },
+  });
+  if (claimed.count !== 1) return null;
+  if (conversation.channel === ConversationChannel.WHATSAPP && !conversation.lead.phone?.trim()) {
+    const failedAt = new Date().toISOString();
+    await prisma.customerIssueLog.update({
+      where: { id: input.issue.id },
+      data: {
+        metadata: json({
+          ...currentMetadata,
+          resolutionCustomerMessageSendStartedAt: sendStartedAt,
+          resolutionCustomerMessageAttemptCount: attemptCount + 1,
+          resolutionCustomerMessageLastAttemptCompletedAt: failedAt,
+          resolutionCustomerMessageFailedAt: failedAt,
+          resolutionCustomerMessageDeliveryStatus: MessageDeliveryStatus.FAILED,
+          resolutionCustomerMessageRetryable: false,
+          resolutionCustomerMessageError: "WHATSAPP_LEAD_PHONE_MISSING",
+        }),
+      },
+    });
+    await prisma.customerIssueTimelineEvent.create({
+      data: {
+        businessId: input.actor.businessId,
+        issueId: input.issue.id,
+        actorMembershipId: input.actor.membershipId,
+        type: CustomerIssueTimelineEventType.RESOLUTION_MESSAGE_SENT,
+        summary: "Resolution message could not be sent because the WhatsApp lead phone is missing.",
+        metadata: json({ deliveryStatus: MessageDeliveryStatus.FAILED, error: "WHATSAPP_LEAD_PHONE_MISSING", retryable: false }),
+      },
+    });
+    return null;
+  }
   const content = "Your concern has been resolved from our side. If you notice anything else or have additional concerns, please let us know. We're happy to assist.";
   let deliveryStatus: MessageDeliveryStatus = conversation.channel === ConversationChannel.WHATSAPP ? MessageDeliveryStatus.PENDING : MessageDeliveryStatus.INTERNAL;
   let provider: string | null = null;
   let providerMessageId: string | null = null;
   let sendError: string | null = null;
-  const message = await prisma.$transaction(async (tx) => {
-    const created = await tx.message.create({
-      data: {
+  let reopenResult: { reopened: boolean; changes?: Record<string, unknown> | null } = { reopened: false, changes: null };
+  let message: Prisma.MessageGetPayload<{}> | null = existingResolutionMessageId
+    ? await prisma.message.findFirst({
+      where: {
+        id: existingResolutionMessageId,
         businessId: input.actor.businessId,
         conversationId: conversation.id,
-        leadId: conversation.leadId,
-        senderType: MessageSenderType.AI,
-        content,
-        messageType: MessageType.TEXT,
-        direction: MessageDirection.OUTBOUND,
-        deliveryStatus,
-        readAt: deliveryStatus === MessageDeliveryStatus.INTERNAL ? new Date() : null,
-        metadata: json({ source: "CUSTOMER_ISSUE_RESOLUTION", issueId: input.issue.id }),
+        deletedAt: null,
+      },
+    })
+    : null;
+  if (message && resolutionMessageDeliverySucceeded(message.deliveryStatus)) {
+    const completedAt = new Date().toISOString();
+    await prisma.customerIssueLog.update({
+      where: { id: input.issue.id },
+      data: {
+        metadata: json({
+          ...currentMetadata,
+          resolutionCustomerMessageId: message.id,
+          resolutionCustomerMessageDeliveryStatus: message.deliveryStatus,
+          resolutionCustomerMessageSendStartedAt: sendStartedAt,
+          resolutionCustomerMessageLastAttemptCompletedAt: completedAt,
+          resolutionCustomerMessageSentAt: metadataString(currentMetadata.resolutionCustomerMessageSentAt) ?? completedAt,
+          resolutionCustomerMessageFailedAt: null,
+          resolutionCustomerMessageRetryable: false,
+          resolutionCustomerMessageError: null,
+        }),
       },
     });
-    await tx.conversation.update({
-      where: { id: conversation.id },
-      data: { lastMessagePreview: content.slice(0, 240), lastMessageAt: created.createdAt },
-    });
-    await tx.leadActivity.create({
+    return message;
+  }
+  if (message?.deliveryStatus === MessageDeliveryStatus.PENDING) {
+    // PENDING is ambiguous after a crash: Meta may already have accepted the send before the
+    // provider result was persisted. Do not auto-send again from this path.
+    const completedAt = new Date().toISOString();
+    await prisma.customerIssueLog.update({
+      where: { id: input.issue.id },
       data: {
+        metadata: json({
+          ...currentMetadata,
+          resolutionCustomerMessageId: message.id,
+          resolutionCustomerMessageDeliveryStatus: message.deliveryStatus,
+          resolutionCustomerMessageSendStartedAt: sendStartedAt,
+          resolutionCustomerMessageLastAttemptCompletedAt: completedAt,
+          resolutionCustomerMessageRetryable: false,
+          resolutionCustomerMessageFailedAt: null,
+          resolutionCustomerMessageError: "RESOLUTION_MESSAGE_DELIVERY_PENDING",
+        }),
+      },
+    });
+    return message;
+  }
+  if (message?.deliveryStatus === MessageDeliveryStatus.FAILED) {
+    message = await prisma.message.update({
+      where: { id: message.id },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.PENDING,
+        providerMessageId: null,
+        metadata: json({ source: "CUSTOMER_ISSUE_RESOLUTION", issueId: input.issue.id, deliveryStatus: MessageDeliveryStatus.PENDING, retryOfMessageId: message.id }),
+      },
+    });
+  }
+  if (!message) {
+    const createdMessage = await prisma.$transaction(async (tx) => {
+      // Product rule: resolving a customer issue sends the customer-facing resolution message even
+      // when the conversation is CLOSED. Because this is real outbound message activity, the shared
+      // conversation lifecycle helper reopens the conversation unless plan/payment access is blocked.
+      const reopen = await reopenConversationFromMessageActivity(tx, {
         businessId: input.actor.businessId,
         leadId: conversation.leadId,
+        conversationId: conversation.id,
+        source: "AI_MESSAGE",
         actorUserId: input.actor.userId,
-        action: LeadActivityAction.MESSAGE_CREATED,
-        metadata: { source: "CUSTOMER_ISSUE_RESOLUTION", conversationId: conversation.id, issueId: input.issue.id, messageId: created.id, senderType: MessageSenderType.AI },
-      },
+        actorMembershipId: input.actor.membershipId,
+        metadata: json({ source: "CUSTOMER_ISSUE_RESOLUTION", issueId: input.issue.id, reopenRule: "RESOLUTION_MESSAGE_REOPENS_CLOSED_CONVERSATION" }),
+        reopenAs: {
+          status: ConversationStatus.OPEN,
+          aiEnabled: false,
+          humanTakeover: false,
+          needsHumanReview: false,
+        },
+      });
+      const created = await tx.message.create({
+        data: {
+          businessId: input.actor.businessId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          senderType: MessageSenderType.AI,
+          content,
+          messageType: MessageType.TEXT,
+          direction: MessageDirection.OUTBOUND,
+          deliveryStatus,
+          readAt: deliveryStatus === MessageDeliveryStatus.INTERNAL ? new Date() : null,
+          metadata: json({ source: "CUSTOMER_ISSUE_RESOLUTION", issueId: input.issue.id, reopenRule: "RESOLUTION_MESSAGE_REOPENS_CLOSED_CONVERSATION" }),
+        },
+      });
+      const issueAfterCreate = await tx.customerIssueLog.findUnique({
+        where: { id: input.issue.id },
+        select: { metadata: true },
+      });
+      await tx.customerIssueLog.update({
+        where: { id: input.issue.id },
+        data: {
+          metadata: json({
+            ...issueMetadata(issueAfterCreate?.metadata ?? null),
+            resolutionCustomerMessageId: created.id,
+            resolutionCustomerMessageDeliveryStatus: deliveryStatus,
+            resolutionCustomerMessageSendStartedAt: sendStartedAt,
+            resolutionCustomerMessageRetryable: false,
+          }),
+        },
+      });
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: { lastMessagePreview: content.slice(0, 240), lastMessageAt: created.createdAt },
+      });
+      await tx.leadActivity.create({
+        data: {
+          businessId: input.actor.businessId,
+          leadId: conversation.leadId,
+          actorUserId: input.actor.userId,
+          action: LeadActivityAction.MESSAGE_CREATED,
+          metadata: { source: "CUSTOMER_ISSUE_RESOLUTION", conversationId: conversation.id, issueId: input.issue.id, messageId: created.id, senderType: MessageSenderType.AI },
+        },
+      });
+      return Object.assign(created, { reopen });
     });
-    return created;
-  });
+    message = createdMessage;
+    reopenResult = createdMessage.reopen;
+  }
   if (conversation.channel === ConversationChannel.WHATSAPP) {
     try {
       const integration = await getWhatsAppIntegration(input.actor.businessId);
@@ -424,6 +816,46 @@ async function sendResolutionCustomerMessage(input: {
       metadata: json({ source: "CUSTOMER_ISSUE_RESOLUTION", issueId: input.issue.id, deliveryStatus, provider, providerMessageId, ...(sendError ? { error: sendError } : {}) }),
     },
   });
+  const issueAfterMessage = await prisma.customerIssueLog.findUnique({
+    where: { id: input.issue.id },
+    select: { metadata: true },
+  });
+  const metadataAfterMessage = issueMetadata(issueAfterMessage?.metadata ?? null);
+  const deliverySucceeded = resolutionMessageDeliverySucceeded(deliveryStatus);
+  const completedAt = new Date().toISOString();
+  await prisma.customerIssueLog.update({
+    where: { id: input.issue.id },
+    data: {
+      metadata: json({
+        ...metadataAfterMessage,
+        resolutionCustomerMessageId: settled.id,
+        resolutionCustomerMessageDeliveryStatus: deliveryStatus,
+        resolutionCustomerMessageSendStartedAt: sendStartedAt,
+        resolutionCustomerMessageLastAttemptCompletedAt: completedAt,
+        resolutionCustomerMessageRetryable: !deliverySucceeded,
+        ...(deliverySucceeded ? {
+          resolutionCustomerMessageSentAt: completedAt,
+          resolutionCustomerMessageFailedAt: null,
+          resolutionCustomerMessageError: null,
+        } : {
+          resolutionCustomerMessageFailedAt: completedAt,
+          resolutionCustomerMessageError: sendError ?? "Resolution message delivery failed.",
+        }),
+      }),
+    },
+  });
+  await prisma.customerIssueTimelineEvent.create({
+    data: {
+      businessId: input.actor.businessId,
+      issueId: input.issue.id,
+      messageId: settled.id,
+      actorMembershipId: input.actor.membershipId,
+      type: CustomerIssueTimelineEventType.RESOLUTION_MESSAGE_SENT,
+      summary: deliverySucceeded ? "Resolution message sent to customer." : "Resolution message delivery failed.",
+      metadata: json({ deliveryStatus, provider, providerMessageId, deliverySucceeded, retryable: !deliverySucceeded, ...(sendError ? { error: sendError } : {}) }),
+      createdAt: settled.createdAt,
+    },
+  });
   await Promise.all([
     cacheService.delByPattern(`business:${input.actor.businessId}:conversations:list:*`),
     cacheService.delByPattern(`business:${input.actor.businessId}:conversations:detail:${conversation.id}:*`),
@@ -445,8 +877,25 @@ async function sendResolutionCustomerMessage(input: {
     conversationId: conversation.id,
     leadId: conversation.leadId,
     assignedStaffId: conversation.assignedStaffId,
-    payload: { conversationId: conversation.id, changes: { lastMessagePreview: content.slice(0, 240), lastMessageAt: settled.createdAt } },
+    payload: {
+      conversationId: conversation.id,
+      changes: {
+        ...(reopenResult.changes ?? {}),
+        lastMessagePreview: content.slice(0, 240),
+        lastMessageAt: settled.createdAt,
+      },
+    },
   });
+  if (reopenResult.reopened) {
+    realtimeService.publish({
+      type: "conversation.reopened",
+      businessId: input.actor.businessId,
+      conversationId: conversation.id,
+      leadId: conversation.leadId,
+      assignedStaffId: conversation.assignedStaffId,
+      payload: { conversationId: conversation.id, source: "CUSTOMER_ISSUE_RESOLUTION", changes: reopenResult.changes ?? {} },
+    });
+  }
   return settled;
 }
 
@@ -495,62 +944,6 @@ function average(values: number[]) {
 }
 
 export const customerIssueService = {
-  async handleBasicSafeHandoff(input: AiIssueInput) {
-    const managers = await managerRecipients(input.businessId);
-    const recipients = Array.from(new Set([input.conversationAssignedMembershipId, ...managers.map((member) => member.id)].filter(Boolean))) as string[];
-    const notifications = await notificationService.createNotificationsForRecipients({
-      businessId: input.businessId,
-      businessAccountId: input.businessAccountId,
-      recipientMembershipIds: recipients,
-      type: BusinessNotificationType.AI_HUMAN_REVIEW_REQUIRED,
-      priority: BusinessNotificationPriority.HIGH,
-      title: "Customer conversation needs attention",
-      message: "Customer needs attention in this conversation.",
-      entityType: BusinessNotificationEntityType.CONVERSATION,
-      entityId: input.conversationId,
-      actions: [{ label: "View conversation", action: "VIEW_CONVERSATION", variant: "default" }],
-      metadata: { conversationId: input.conversationId, leadId: input.leadId, messageId: input.customerMessageId, source: "AI_SAFE_HANDOFF" },
-    });
-    const firstRecipient = input.conversationAssignedMembershipId
-      ? await prisma.businessMember.findFirst({ where: { id: input.conversationAssignedMembershipId, businessId: input.businessId }, include: { user: true, business: true } })
-      : null;
-    const fallbackRecipient = firstRecipient ?? await prisma.businessMember.findFirst({
-      where: { businessId: input.businessId, status: MembershipStatus.ACTIVE, role: { in: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER] } },
-      include: { user: true, business: true },
-    });
-    const emailSent = fallbackRecipient
-      ? await emailService.sendCustomerAttentionEmail(fallbackRecipient.user.email, {
-        businessName: fallbackRecipient.business.name,
-        customerName: undefined,
-        messageExcerpt: excerpt(input.customerMessageContent),
-        conversationUrl: conversationUrl(input.conversationId),
-        receivedAt: new Date(),
-      })
-      : false;
-    await Promise.all([
-      aiUsageService.trackSafeHandoff({ accountUsageId: input.accountUsageId, emailSent }),
-      auditService.log({
-        action: AuditAction.AI_SAFE_HANDOFF_TRIGGERED,
-        businessId: input.businessId,
-        metadata: json({ conversationId: input.conversationId, leadId: input.leadId, messageId: input.customerMessageId, plan: input.plan }),
-      }),
-      emailSent ? auditService.log({
-        action: AuditAction.AI_SAFE_HANDOFF_NOTIFICATION_SENT,
-        businessId: input.businessId,
-        metadata: json({ conversationId: input.conversationId, emailSent }),
-      }) : Promise.resolve(),
-    ]);
-    realtimeService.publish({
-      type: "business.ai.safe_handoff_triggered",
-      businessId: input.businessId,
-      conversationId: input.conversationId,
-      leadId: input.leadId,
-      assignedStaffId: input.conversationAssignedMembershipId,
-      payload: { conversationId: input.conversationId, notificationsCreated: notifications.length },
-    });
-    return { notifications, emailSent };
-  },
-
   async createFromAiDecision(input: AiIssueInput) {
     const detectedComplaints = complaintInputs(input.decision);
     if (detectedComplaints.length === 0 && input.decision.intent !== "COMPLAINT") return null;
@@ -575,23 +968,35 @@ export const customerIssueService = {
     const plusIntelligence = hasPlusComplaintIntelligence(input.plan);
 
     for (const complaint of complaints) {
-      const category = complaintCategoryForPlan(complaint, input.plan);
-      const severity = complaintSeverityForPlan(complaint, input.plan);
+      const category = complaintCategoryForPlan(complaint);
+      const severity = complaintSeverityForPlan(complaint);
       const summary = complaintSummaryForPlan({
         complaint,
-        plan: input.plan,
         reason: input.decision.reason,
         customerMessageContent: input.customerMessageContent,
       });
-      const match = await findMatchingIssue({
+      const fingerprint = complaintFingerprint({
         businessId: input.businessId,
         conversationId: input.conversationId,
+        customerMessageId: input.customerMessageId,
+        category,
+        subcategory: complaint.subcategory,
+        summary,
         customerMessageContent: input.customerMessageContent,
-        complaint: { ...complaint, category, severity, summary },
+        multipleComplaints: complaints.length > 1,
       });
-      if (match) {
-        const reopened = match.issue.status === CustomerIssueStatus.RESOLVED;
-        const updated = await prisma.$transaction(async (tx) => {
+      const mutation = await prisma.$transaction(async (tx) => {
+        await lockIssueMatchingScope(tx, input.businessId, input.conversationId);
+        const match = await findMatchingIssue({
+          businessId: input.businessId,
+          conversationId: input.conversationId,
+          customerMessageContent: input.customerMessageContent,
+          complaint: { ...complaint, category, severity, summary },
+          complaintFingerprint: fingerprint,
+        }, tx);
+        if (match) {
+          const reopened = match.issue.status === CustomerIssueStatus.RESOLVED;
+          const severityEscalated = severityRank[severity] > severityRank[match.issue.severity];
           const metadata = issueMetadata(match.issue.metadata);
           const timelineEvent = {
             type: reopened ? "CUSTOMER_ISSUE_REOPENED_BY_CUSTOMER_MESSAGE" : "CUSTOMER_ISSUE_MESSAGE_MATCHED",
@@ -601,14 +1006,26 @@ export const customerIssueService = {
             severity,
             matchedAt: new Date().toISOString(),
             score: match.score,
+            matchType: match.matchType,
+            overlap: match.match?.overlap ?? null,
+            sameSubcategory: match.match?.sameSubcategory ?? null,
+            resolvedAgeDays: match.match?.resolvedAgeDays ?? null,
+            aiMatchedIssueId: complaint.matchedIssueId ?? null,
           };
-          const record = await tx.customerIssueLog.update({
-            where: { id: match.issue.id },
+          const changed = await tx.customerIssueLog.updateMany({
+            where: {
+              id: match.issue.id,
+              businessId: input.businessId,
+              status: match.issue.status,
+            },
             data: {
               customerMessageId: input.customerMessageId,
               customerMessageExcerpt: excerpt(input.customerMessageContent),
               severity: strongerSeverity(match.issue.severity, severity),
-              ...(plusIntelligence ? { category, subcategory: complaint.subcategory ?? match.issue.subcategory, summary } : {}),
+              category,
+              subcategory: complaint.subcategory ?? match.issue.subcategory,
+              summary,
+              complaintFingerprint: match.issue.complaintFingerprint ?? fingerprint,
               ...(reopened ? {
                 status: CustomerIssueStatus.REOPENED,
                 resolvedAt: null,
@@ -618,10 +1035,19 @@ export const customerIssueService = {
                 ...metadata,
                 lastMatchedMessageId: input.customerMessageId,
                 lastMatchedAt: timelineEvent.matchedAt,
+                lastMatchType: match.matchType,
+                aiMatchedIssueId: complaint.matchedIssueId ?? null,
+                complaintFingerprint: fingerprint,
                 relatedCustomerMessageIds: appendUnique(metadata.relatedCustomerMessageIds, input.customerMessageId),
                 timeline: appendTimeline(metadata.timeline, timelineEvent),
               }),
             },
+          });
+          if (changed.count !== 1) {
+            throw new AppError(409, "Customer issue changed during matching.", "CUSTOMER_ISSUE_STATE_CHANGED");
+          }
+          const record = await tx.customerIssueLog.findUniqueOrThrow({
+            where: { id: match.issue.id },
             include: issueInclude,
           });
           await createSystemMessage({
@@ -633,59 +1059,36 @@ export const customerIssueService = {
               : "Customer issue updated with a new related customer message.",
             metadata: json({ type: reopened ? "CUSTOMER_ISSUE_REOPENED" : "CUSTOMER_ISSUE_MESSAGE_MATCHED", issueId: record.id, category, severity, messageId: input.customerMessageId }),
           }, tx);
-          return record;
-        });
-        await Promise.all([
-          notifyIssueUpdate({
+          await createIssueTimelineEvent(tx, {
             businessId: input.businessId,
-            businessAccountId: input.businessAccountId,
-            issueId: updated.id,
-            conversationId: input.conversationId,
-            leadId: input.leadId,
-            responsibleMembershipId: updated.responsibleMembershipId,
-            category: updated.category,
-            severity: updated.severity,
+            issueId: record.id,
+            messageId: input.customerMessageId,
+            type: reopened ? CustomerIssueTimelineEventType.REOPENED_BY_CUSTOMER_MESSAGE : CustomerIssueTimelineEventType.MATCHED_FOLLOW_UP,
+            summary,
+            metadata: json(timelineEvent),
+            messageRelationType: reopened ? CustomerIssueMessageRelationType.REOPENED_BY : CustomerIssueMessageRelationType.MATCHED_FOLLOW_UP,
+            createdAt: new Date(timelineEvent.matchedAt),
+          });
+          return {
+            type: "matched" as const,
+            issue: record,
             reopened,
-          }),
-          auditService.log({
-            action: reopened ? AuditAction.CUSTOMER_ISSUE_STATUS_UPDATED : AuditAction.AI_COMPLAINT_DETECTED,
-            businessId: input.businessId,
-            metadata: json({
-              issueId: updated.id,
-              conversationId: input.conversationId,
-              leadId: input.leadId,
-              messageId: input.customerMessageId,
-              matchedExisting: true,
-              reopened,
-              previousStatus: match.issue.status,
-              newStatus: updated.status,
-              matchScore: match.score,
-            }),
-          }),
-          invalidateIssueCaches(input.businessId, updated.id),
-        ]);
-        const staffMembershipIds = [updated.responsibleMembershipId].filter((id): id is string => Boolean(id));
-        realtimeService.publish({
-          type: "business.customer_issue.status_updated",
-          businessId: input.businessId,
-          conversationId: input.conversationId,
-          leadId: input.leadId,
-          staffMembershipIds,
-          payload: { issue: updated, matchedExisting: true, reopened },
-        });
-        results.push({ issue: updated, emailSent: false, matchedExisting: true, reopened });
-        continue;
-      }
+            severityEscalated,
+            previousStatus: match.issue.status,
+            score: match.score,
+            matchType: match.matchType,
+            matchDetails: match.match ?? null,
+          };
+        }
 
-      const routing = await routeResponsibleStaff({
-        businessId: input.businessId,
-        category,
-        summary,
-        suggestedTags: complaintTagsForPlan(complaint, input.plan),
-      });
-      const now = new Date();
-      const issue = await prisma.$transaction(async (tx) => {
-        const created = await tx.customerIssueLog.create({
+        const routing = await routeResponsibleStaff({
+          businessId: input.businessId,
+          category,
+          summary,
+          suggestedTags: complaintTagsForPlan(complaint, input.plan),
+        }, tx);
+        const now = new Date();
+        const issue = await tx.customerIssueLog.create({
           data: {
             businessId: input.businessId,
             leadId: input.leadId,
@@ -703,9 +1106,11 @@ export const customerIssueService = {
             responsibleMembershipId: routing.member?.id ?? null,
             routingReason: routing.reason,
             createdBy: CustomerIssueCreatedBy.AI,
+            complaintFingerprint: fingerprint,
             metadata: json({
               decisionIntent: input.decision.intent,
               confidence: input.decision.confidence,
+              complaintFingerprint: fingerprint,
               suggestedStaffSpecialtyTags: complaintTagsForPlan(complaint, input.plan),
               intelligenceEnabled: plusIntelligence,
               relatedCustomerMessageIds: [input.customerMessageId],
@@ -728,10 +1133,77 @@ export const customerIssueService = {
           leadId: input.leadId,
           conversationId: input.conversationId,
           content: "Customer issue logged for internal follow-up.",
-          metadata: json({ type: "CUSTOMER_ISSUE_LOGGED", issueId: created.id, category, severity }),
+          metadata: json({ type: "CUSTOMER_ISSUE_LOGGED", issueId: issue.id, category, severity }),
         }, tx);
-        return created;
-      });
+        await createIssueTimelineEvent(tx, {
+          businessId: input.businessId,
+          issueId: issue.id,
+          messageId: input.customerMessageId,
+          type: CustomerIssueTimelineEventType.CREATED_FROM_CUSTOMER_MESSAGE,
+          summary,
+          metadata: json({
+            decisionIntent: input.decision.intent,
+            confidence: input.decision.confidence,
+            complaintFingerprint: fingerprint,
+            category,
+            severity,
+            suggestedStaffSpecialtyTags: complaintTagsForPlan(complaint, input.plan),
+          }),
+          messageRelationType: CustomerIssueMessageRelationType.CREATED_FROM,
+          createdAt: now,
+        });
+        return { type: "created" as const, issue, routing, now };
+      }, { maxWait: 10_000, timeout: 30_000 });
+
+      if (mutation.type === "matched") {
+        const updated = mutation.issue;
+        await Promise.all([
+          notifyIssueUpdate({
+            businessId: input.businessId,
+            businessAccountId: input.businessAccountId,
+            issueId: updated.id,
+            conversationId: input.conversationId,
+            leadId: input.leadId,
+            responsibleMembershipId: updated.responsibleMembershipId,
+            category: updated.category,
+            severity: updated.severity,
+            reopened: mutation.reopened,
+            severityEscalated: mutation.severityEscalated,
+          }),
+          auditService.log({
+            action: mutation.reopened ? AuditAction.CUSTOMER_ISSUE_STATUS_UPDATED : AuditAction.AI_COMPLAINT_DETECTED,
+            businessId: input.businessId,
+            metadata: json({
+              issueId: updated.id,
+              conversationId: input.conversationId,
+              leadId: input.leadId,
+              messageId: input.customerMessageId,
+              matchedExisting: true,
+              reopened: mutation.reopened,
+              previousStatus: mutation.previousStatus,
+              newStatus: updated.status,
+              matchScore: mutation.score,
+              matchType: mutation.matchType,
+              matchDetails: mutation.matchDetails,
+              aiMatchedIssueId: complaint.matchedIssueId ?? null,
+            }),
+          }),
+          invalidateIssueCaches(input.businessId, updated.id),
+        ]);
+        const staffMembershipIds = [updated.responsibleMembershipId].filter((id): id is string => Boolean(id));
+        realtimeService.publish({
+          type: "business.customer_issue.status_updated",
+          businessId: input.businessId,
+          conversationId: input.conversationId,
+          leadId: input.leadId,
+          staffMembershipIds,
+          payload: { issue: updated, matchedExisting: true, reopened: mutation.reopened },
+        });
+        results.push({ issue: updated, emailSent: false, matchedExisting: true, reopened: mutation.reopened });
+        continue;
+      }
+
+      const { issue, routing, now } = mutation;
       let emailSent = false;
       if (routing.member) {
         emailSent = await emailService.sendCustomerIssueAssignedEmail(routing.member.user.email, {
@@ -834,16 +1306,33 @@ export const customerIssueService = {
     if (cached) return cached;
     const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
     const includePlusMetrics = hasPlusComplaintIntelligence(subscription.plan.code);
-    const where: Prisma.CustomerIssueLogWhereInput = {
-      ...issueAccessWhere(actor),
-      ...(query.status ? { status: query.status } : {}),
-      ...(query.category ? { category: query.category } : {}),
-      ...(query.severity ? { severity: query.severity } : {}),
-      ...(query.responsibleMembershipId ? { responsibleMembershipId: query.responsibleMembershipId } : {}),
-      ...(query.leadId ? { leadId: query.leadId } : {}),
-      ...(query.conversationId ? { conversationId: query.conversationId } : {}),
-      ...(query.createdFrom || query.createdTo ? { createdAt: { ...(query.createdFrom ? { gte: query.createdFrom } : {}), ...(query.createdTo ? { lte: query.createdTo } : {}) } } : {}),
-    };
+    const filters: Prisma.CustomerIssueLogWhereInput[] = [issueAccessWhere(actor)];
+    if (query.search) {
+      const normalizedSearch = query.search.toLowerCase();
+      const matchingCategories = Object.values(CustomerIssueCategory).filter((category) => category.toLowerCase().includes(normalizedSearch));
+      filters.push({
+        OR: [
+          { summary: { contains: query.search, mode: "insensitive" } },
+          { customerMessageExcerpt: { contains: query.search, mode: "insensitive" } },
+          { subcategory: { contains: query.search, mode: "insensitive" } },
+          { lead: { fullName: { contains: query.search, mode: "insensitive" } } },
+          { lead: { phone: { contains: query.search } } },
+          { lead: { email: { contains: query.search, mode: "insensitive" } } },
+          { conversation: { displayId: { contains: query.search, mode: "insensitive" } } },
+          ...(matchingCategories.length > 0 ? [{ category: { in: matchingCategories } }] : []),
+        ],
+      });
+    }
+    if (query.status) filters.push({ status: query.status });
+    if (query.category) filters.push({ category: query.category });
+    if (query.severity) filters.push({ severity: query.severity });
+    if (query.responsibleMembershipId) filters.push({ responsibleMembershipId: query.responsibleMembershipId });
+    if (query.leadId) filters.push({ leadId: query.leadId });
+    if (query.conversationId) filters.push({ conversationId: query.conversationId });
+    if (query.createdFrom || query.createdTo) {
+      filters.push({ createdAt: { ...(query.createdFrom ? { gte: query.createdFrom } : {}), ...(query.createdTo ? { lte: query.createdTo } : {}) } });
+    }
+    const where: Prisma.CustomerIssueLogWhereInput = { AND: filters };
     const [data, total] = await prisma.$transaction([
       prisma.customerIssueLog.findMany({
         where,
@@ -864,36 +1353,74 @@ export const customerIssueService = {
 
   async detail(actor: CustomerIssueActor, issueId: string) {
     const key = detailKey(actor, issueId);
+    const authorized = await prisma.customerIssueLog.findFirst({
+      where: { id: issueId, ...issueAccessWhere(actor) },
+      select: { id: true },
+    });
+    if (!authorized) throw new AppError(404, "Customer issue not found.", "CUSTOMER_ISSUE_NOT_FOUND");
     const cached = await cacheService.get<unknown>(key);
     if (cached) return cached;
     const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
     const issue = await prisma.customerIssueLog.findFirst({ where: { id: issueId, ...issueAccessWhere(actor) }, include: issueInclude });
     if (!issue) throw new AppError(404, "Customer issue not found.", "CUSTOMER_ISSUE_NOT_FOUND");
-    const result = { issue: hasPlusComplaintIntelligence(subscription.plan.code) ? (await withPlusTiming([issue]))[0] : issue };
+    const [timelineEvents, issueMessages] = await Promise.all([
+      prisma.customerIssueTimelineEvent.findMany({
+        where: { businessId: actor.businessId, issueId },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: 200,
+        include: {
+          actorMembership: { select: { id: true, role: true, user: { select: { id: true, firstName: true, lastName: true, email: true } } } },
+          message: { select: { id: true, senderType: true, messageType: true, direction: true, content: true, createdAt: true } },
+        },
+      }),
+      prisma.customerIssueMessage.findMany({
+        where: { businessId: actor.businessId, issueId },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        include: {
+          message: { select: { id: true, senderType: true, messageType: true, direction: true, content: true, createdAt: true } },
+        },
+      }),
+    ]);
+    const result = {
+      issue: hasPlusComplaintIntelligence(subscription.plan.code) ? (await withPlusTiming([issue]))[0] : issue,
+      timelineEvents,
+      issueMessages,
+    };
     await cacheService.set(key, result, 120);
     return result;
   },
 
   async metrics(actor: CustomerIssueActor, query: CustomerIssueMetricsQuery) {
-    await assertPlusComplaintIntelligence(actor);
+    const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
+    const includePlusMetrics = hasPlusComplaintIntelligence(subscription.plan.code);
     const where: Prisma.CustomerIssueLogWhereInput = {
       ...issueAccessWhere(actor),
       ...(query.createdFrom || query.createdTo ? { createdAt: { ...(query.createdFrom ? { gte: query.createdFrom } : {}), ...(query.createdTo ? { lte: query.createdTo } : {}) } } : {}),
     };
-    const [issues, byStatus, byCategory, byPriority, members] = await Promise.all([
-      prisma.customerIssueLog.findMany({
-        where,
-        select: {
-          id: true,
-          status: true,
-          category: true,
-          severity: true,
-          responsibleMembershipId: true,
-          createdAt: true,
-          resolvedAt: true,
-          reopenCount: true,
-        },
-      }),
+    const issues = await prisma.customerIssueLog.findMany({
+      where,
+      select: {
+        id: true,
+        status: true,
+        category: true,
+        severity: true,
+        responsibleMembershipId: true,
+        createdAt: true,
+        resolvedAt: true,
+        reopenCount: true,
+      },
+    });
+    const resolved = issues.filter((issue) => issue.resolvedAt);
+    const openStatuses = new Set<CustomerIssueStatus>([CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED]);
+    const basicMetrics = {
+      totalComplaints: issues.length,
+      openComplaints: issues.filter((issue) => openStatuses.has(issue.status)).length,
+      resolvedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.RESOLVED).length,
+      reopenedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.REOPENED || issue.reopenCount > 0).length,
+      assignedToMeComplaints: issues.filter((issue) => issue.responsibleMembershipId === actor.membershipId).length,
+    };
+    if (!includePlusMetrics) return basicMetrics;
+    const [byStatus, byCategory, byPriority, members] = await Promise.all([
       prisma.customerIssueLog.groupBy({ by: ["status"], where, _count: { _all: true } }),
       prisma.customerIssueLog.groupBy({ by: ["category"], where, _count: { _all: true } }),
       prisma.customerIssueLog.groupBy({ by: ["severity"], where, _count: { _all: true } }),
@@ -902,7 +1429,6 @@ export const customerIssueService = {
         select: { id: true, role: true, user: { select: { firstName: true, lastName: true, email: true } } },
       }),
     ]);
-    const resolved = issues.filter((issue) => issue.resolvedAt);
     const memberMap = new Map(members.map((member) => [member.id, member]));
     const staffStats = new Map<string, {
       membershipId: string;
@@ -933,12 +1459,8 @@ export const customerIssueService = {
       }
       staffStats.set(issue.responsibleMembershipId, current);
     }
-    const openStatuses = new Set<CustomerIssueStatus>([CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED]);
     return {
-      totalComplaints: issues.length,
-      openComplaints: issues.filter((issue) => openStatuses.has(issue.status)).length,
-      resolvedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.RESOLVED).length,
-      reopenedComplaints: issues.filter((issue) => issue.status === CustomerIssueStatus.REOPENED || issue.reopenCount > 0).length,
+      ...basicMetrics,
       byStatus: Object.fromEntries(Object.values(CustomerIssueStatus).map((status) => [status, byStatus.find((item) => item.status === status)?._count._all ?? 0])),
       byCategory: Object.fromEntries(Object.values(CustomerIssueCategory).map((category) => [category, byCategory.find((item) => item.category === category)?._count._all ?? 0])),
       byPriority: Object.fromEntries(Object.values(CustomerIssueSeverity).map((severity) => [severity, byPriority.find((item) => item.severity === severity)?._count._all ?? 0])),
@@ -966,19 +1488,31 @@ export const customerIssueService = {
     if (actor.role === BusinessRole.STAFF && existing.responsibleMembershipId !== actor.membershipId) {
       throw new AppError(403, "You do not have permission to update this customer issue.", "FORBIDDEN");
     }
-    const updated = await prisma.customerIssueLog.update({
-      where: { id: existing.id },
-      data: {
-        ...(input.category ? { category: input.category } : {}),
-        ...(input.severity ? { severity: input.severity } : {}),
-        ...(input.summary ? { summary: input.summary } : {}),
-        metadata: json({
-          ...issueMetadata(existing.metadata),
-          intelligenceEditedAt: new Date().toISOString(),
-          intelligenceEditedByMembershipId: actor.membershipId,
-        }),
-      },
-      include: issueInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.customerIssueLog.updateMany({
+        where: {
+          id: existing.id,
+          businessId: actor.businessId,
+          updatedAt: existing.updatedAt,
+        },
+        data: {
+          ...(input.category ? { category: input.category } : {}),
+          ...(input.severity ? { severity: input.severity } : {}),
+          ...(input.summary ? { summary: input.summary } : {}),
+          metadata: json({
+            ...issueMetadata(existing.metadata),
+            intelligenceEditedAt: new Date().toISOString(),
+            intelligenceEditedByMembershipId: actor.membershipId,
+          }),
+        },
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, "Customer issue changed. Refresh and try again.", "CUSTOMER_ISSUE_STATE_CHANGED");
+      }
+      return tx.customerIssueLog.findUniqueOrThrow({
+        where: { id: existing.id },
+        include: issueInclude,
+      });
     });
     await Promise.all([
       invalidateIssueCaches(actor.businessId, updated.id),
@@ -1016,16 +1550,41 @@ export const customerIssueService = {
     if (actor.role === BusinessRole.STAFF && existing.responsibleMembershipId !== actor.membershipId) {
       throw new AppError(403, "You do not have permission to update this customer issue.", "FORBIDDEN");
     }
+    assertValidIssueTransition(actor, existing.status, status);
     if (status === CustomerIssueStatus.CLOSED && !isManager(actor.role)) {
       throw new AppError(403, "Only an owner or manager can close customer issues.", "FORBIDDEN");
     }
-    const updated = await prisma.customerIssueLog.update({
-      where: { id: existing.id },
-      data: {
-        status,
-        resolvedAt: status === CustomerIssueStatus.RESOLVED || status === CustomerIssueStatus.CLOSED ? new Date() : null,
-      },
-      include: issueInclude,
+    const now = new Date();
+    const manuallyReopened = existing.status === CustomerIssueStatus.RESOLVED && status === CustomerIssueStatus.REOPENED;
+    const updated = await prisma.$transaction(async (tx) => {
+      const changed = await tx.customerIssueLog.updateMany({
+        where: {
+          id: existing.id,
+          businessId: actor.businessId,
+          status: existing.status,
+        },
+        data: {
+          status,
+          resolvedAt: status === CustomerIssueStatus.RESOLVED || status === CustomerIssueStatus.CLOSED ? now : null,
+          ...(manuallyReopened ? { reopenCount: { increment: 1 } } : {}),
+        },
+      });
+      if (changed.count !== 1) {
+        throw new AppError(409, "Customer issue changed. Refresh and try again.", "CUSTOMER_ISSUE_STATE_CHANGED");
+      }
+      await createIssueTimelineEvent(tx, {
+        businessId: actor.businessId,
+        issueId: existing.id,
+        actorMembershipId: actor.membershipId,
+        type: CustomerIssueTimelineEventType.STATUS_CHANGED,
+        summary: `Customer issue status changed from ${existing.status} to ${status}.`,
+        metadata: json({ previousStatus: existing.status, newStatus: status, ...(manuallyReopened ? { reopenSource: "MANAGER_ACTION" } : {}) }),
+        createdAt: now,
+      });
+      return tx.customerIssueLog.findUniqueOrThrow({
+        where: { id: existing.id },
+        include: issueInclude,
+      });
     });
     await Promise.all([
       invalidateIssueCaches(actor.businessId, updated.id),
@@ -1034,7 +1593,7 @@ export const customerIssueService = {
         businessId: actor.businessId,
         userId: actor.userId,
         actorMembershipId: actor.membershipId,
-        metadata: json({ issueId: updated.id, previousStatus: existing.status, newStatus: status }),
+        metadata: json({ issueId: updated.id, previousStatus: existing.status, newStatus: status, ...(manuallyReopened ? { reopenSource: "MANAGER_ACTION" } : {}) }),
       }),
     ]);
     if (status === CustomerIssueStatus.RESOLVED && existing.status !== CustomerIssueStatus.RESOLVED) {
@@ -1049,7 +1608,7 @@ export const customerIssueService = {
       conversationId: updated.conversationId ?? undefined,
       leadId: updated.leadId ?? undefined,
       staffMembershipIds,
-      payload: { issue: updated, previousStatus: existing.status, newStatus: status },
+      payload: { issue: updated, previousStatus: existing.status, newStatus: status, ...(manuallyReopened ? { reopenSource: "MANAGER_ACTION" } : {}) },
     });
     return { issue: updated };
   },

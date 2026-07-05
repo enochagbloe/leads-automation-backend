@@ -14,6 +14,9 @@ import {
   KnowledgeArticleStatus,
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
+  CustomerIssueCategory,
+  CustomerIssueSeverity,
+  CustomerIssueStatus,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -127,6 +130,18 @@ export type AiBusinessContext = {
     direction: MessageDirection;
     text: string;
     createdAt: string;
+  }>;
+  existingCustomerIssues: Array<{
+    id: string;
+    status: CustomerIssueStatus;
+    category: CustomerIssueCategory;
+    subcategory?: string | null;
+    severity: CustomerIssueSeverity;
+    summary: string;
+    customerMessageExcerpt?: string | null;
+    reopenCount: number;
+    createdAt: string;
+    resolvedAt?: string | null;
   }>;
   planCapabilities: {
     plan: PlanCode;
@@ -274,7 +289,7 @@ export const aiBusinessContextService = {
     });
     if (!conversation) throw new AppError(404, "Conversation not found while building AI context.", "AI_CONTEXT_CONVERSATION_NOT_FOUND");
 
-    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages] = await Promise.all([
+    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages, existingCustomerIssues] = await Promise.all([
       prisma.service.findMany({
         where: { businessId: input.businessId, isActive: true, isArchived: false },
         orderBy: [
@@ -368,6 +383,27 @@ export const aiBusinessContextService = {
         orderBy: { createdAt: "desc" },
         take: maxMessages,
         select: { id: true, senderType: true, direction: true, content: true, messageType: true, createdAt: true },
+      }),
+      prisma.customerIssueLog.findMany({
+        where: {
+          businessId: input.businessId,
+          conversationId: input.conversationId,
+          status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED, CustomerIssueStatus.RESOLVED] },
+        },
+        orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+        take: 20,
+        select: {
+          id: true,
+          status: true,
+          category: true,
+          subcategory: true,
+          severity: true,
+          summary: true,
+          customerMessageExcerpt: true,
+          reopenCount: true,
+          createdAt: true,
+          resolvedAt: true,
+        },
       }),
     ]);
 
@@ -511,6 +547,18 @@ export const aiBusinessContextService = {
         text: safeMessageText(message),
         createdAt: message.createdAt.toISOString(),
       })),
+      existingCustomerIssues: existingCustomerIssues.map((issue) => ({
+        id: issue.id,
+        status: issue.status,
+        category: issue.category,
+        subcategory: issue.subcategory,
+        severity: issue.severity,
+        summary: truncate(issue.summary, 500),
+        customerMessageExcerpt: issue.customerMessageExcerpt ? truncate(issue.customerMessageExcerpt, 500) : null,
+        reopenCount: issue.reopenCount,
+        createdAt: issue.createdAt.toISOString(),
+        resolvedAt: issue.resolvedAt?.toISOString() ?? null,
+      })),
       planCapabilities: {
         plan: input.plan,
         ...getAiPlanPermissions(input.plan),
@@ -552,10 +600,15 @@ export const aiPromptContextFormatter = {
       "For booking intent locationType: use the service default appointment type when provided. Only choose a different locationType when the service says AI can choose location type and the customer clearly requested an allowed appointment type. Otherwise use TO_BE_CONFIRMED and ask a clarifying question when location details are required.",
       "Never say an appointment is confirmed. Booking requests require business confirmation.",
       "Complaint handling: detect dissatisfaction, delays, poor workmanship, staff behavior issues, missed appointments, payment problems, follow-up problems, communication breakdowns, missing work/items, and site/delivery issues.",
-      "For every plan tier, include complaint.isComplaint, category, severity, summary, requiresInternalAction, and suggestedStaffSpecialtyTags when a complaint/internal issue is present.",
-      "If one customer message contains multiple independent complaints, include each case in complaints[] with its own category, severity, summary, requiresInternalAction, and suggestedStaffSpecialtyTags. Keep complaint populated with the highest-priority complaint for backward compatibility.",
+      "Complaint case matching is required. Before outputting a complaint, compare the latest customer message against EXISTING CUSTOMER ISSUES.",
+      "For each complaint object, always include matchType. Use NEW when the complaint is unrelated to existing cases, CONTINUATION when it continues an active/open/acknowledged/reopened case, or FOLLOW_UP_TO_RESOLVED when it relates to a resolved case that should be reopened.",
+      "For CONTINUATION and FOLLOW_UP_TO_RESOLVED, include matchedIssueId and it must exactly match an id shown in EXISTING CUSTOMER ISSUES.",
+      "For NEW complaints, set matchType to NEW and leave matchedIssueId as an empty string.",
+      "Do not merge unrelated complaints just because they share a category. If the message describes separate problems, output separate complaint objects in complaints[].",
+      "For every plan tier, include complaint.isComplaint, category, severity, summary, requiresInternalAction, suggestedStaffSpecialtyTags, matchType, and matchedIssueId when a complaint/internal issue is present.",
+      "If one customer message contains multiple independent complaints, include each case in complaints[] with its own category, severity, summary, requiresInternalAction, suggestedStaffSpecialtyTags, matchType, and matchedIssueId. Keep complaint populated with the highest-priority complaint for backward compatibility.",
       "For complaint replies, acknowledge calmly and do not expose internal routing, tasks, assignments, staff names, or ticket language.",
-      "Respond with this JSON shape exactly: {\"intent\":\"GENERAL_QUESTION|SERVICE_INQUIRY|PRICING_INQUIRY|AVAILABILITY_INQUIRY|BOOKING_INTENT|RESCHEDULE_INTENT|CANCELLATION_INTENT|COMPLAINT|PAYMENT_QUESTION|HUMAN_REQUEST|UNKNOWN\",\"replyText\":string|null,\"confidence\":number,\"shouldReply\":boolean,\"requiresHumanReview\":boolean,\"reason\":string,\"usedKnowledge\":{\"profile\":boolean,\"services\":boolean,\"availability\":boolean,\"policies\":boolean,\"conversationHistory\":boolean},\"suggestedAction\":\"SEND_REPLY|REQUEST_HUMAN_REVIEW|CREATE_BOOKING_REQUEST|DETECT_BOOKING_ONLY|NO_ACTION\",\"complaint\":{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[]},\"complaints\":[{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[]}],\"appointmentIntent\":{\"serviceName\":string,\"serviceId\":string,\"preferredDate\":string,\"preferredTime\":string,\"timezone\":string,\"customerName\":string,\"customerPhone\":string,\"customerLocation\":string,\"locationType\":\"PHONE_CALL|ONLINE|CUSTOMER_LOCATION|BUSINESS_LOCATION|TO_BE_CONFIRMED\",\"notes\":string,\"missingFields\":string[]}}",
+      "Respond with this JSON shape exactly: {\"intent\":\"GENERAL_QUESTION|SERVICE_INQUIRY|PRICING_INQUIRY|AVAILABILITY_INQUIRY|BOOKING_INTENT|RESCHEDULE_INTENT|CANCELLATION_INTENT|COMPLAINT|PAYMENT_QUESTION|HUMAN_REQUEST|UNKNOWN\",\"replyText\":string|null,\"confidence\":number,\"shouldReply\":boolean,\"requiresHumanReview\":boolean,\"reason\":string,\"usedKnowledge\":{\"profile\":boolean,\"services\":boolean,\"availability\":boolean,\"policies\":boolean,\"conversationHistory\":boolean},\"suggestedAction\":\"SEND_REPLY|REQUEST_HUMAN_REVIEW|CREATE_BOOKING_REQUEST|DETECT_BOOKING_ONLY|NO_ACTION\",\"complaint\":{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[],\"matchType\":\"NEW|CONTINUATION|FOLLOW_UP_TO_RESOLVED\",\"matchedIssueId\":string},\"complaints\":[{\"isComplaint\":boolean,\"category\":\"DELAY|POOR_SERVICE|QUALITY_ISSUE|STAFF_BEHAVIOR|MISCOMMUNICATION|PAYMENT_ISSUE|APPOINTMENT_ISSUE|DELIVERY_OR_SITE_ISSUE|MISSING_ITEM_OR_MISSING_WORK|FOLLOW_UP_REQUIRED|OTHER\",\"subcategory\":string,\"severity\":\"LOW|MEDIUM|HIGH|URGENT\",\"summary\":string,\"requiresInternalAction\":boolean,\"suggestedStaffSpecialtyTags\":string[],\"matchType\":\"NEW|CONTINUATION|FOLLOW_UP_TO_RESOLVED\",\"matchedIssueId\":string}],\"appointmentIntent\":{\"serviceName\":string,\"serviceId\":string,\"preferredDate\":string,\"preferredTime\":string,\"timezone\":string,\"customerName\":string,\"customerPhone\":string,\"customerLocation\":string,\"locationType\":\"PHONE_CALL|ONLINE|CUSTOMER_LOCATION|BUSINESS_LOCATION|TO_BE_CONFIRMED\",\"notes\":string,\"missingFields\":string[]}}",
     ].join("\n");
   },
 
@@ -564,6 +617,9 @@ export const aiPromptContextFormatter = {
     return [
       "Create a structured decision for the latest customer message.",
       latest ? `Latest customer message or relevant latest message: ${latest.text}` : "No recent message was available.",
+      context.existingCustomerIssues.length
+        ? "Existing complaint cases are present. For every detected complaint, classify it as NEW, CONTINUATION, or FOLLOW_UP_TO_RESOLVED and include matchedIssueId for non-NEW matches."
+        : "No existing complaint cases are present. Any detected complaint should use matchType NEW and an empty matchedIssueId.",
     ].join("\n");
   },
 
@@ -605,6 +661,19 @@ export const aiPromptContextFormatter = {
     const messages = context.recentMessages.length
       ? context.recentMessages.map((message) => `- ${message.createdAt} ${message.senderType}/${message.direction}: ${message.text}`).join("\n")
       : "- No recent messages.";
+    const customerIssues = context.existingCustomerIssues.length
+      ? context.existingCustomerIssues.map((issue) => [
+        `- id: ${issue.id}`,
+        `  status: ${issue.status}`,
+        `  category: ${issue.category}${issue.subcategory ? ` / ${issue.subcategory}` : ""}`,
+        `  severity: ${issue.severity}`,
+        `  summary: ${issue.summary}`,
+        `  last customer excerpt: ${issue.customerMessageExcerpt ?? "none"}`,
+        `  reopen count: ${issue.reopenCount}`,
+        `  created: ${issue.createdAt}`,
+        `  resolved: ${issue.resolvedAt ?? "not resolved"}`,
+      ].join("\n")).join("\n")
+      : "- No existing complaint cases in this conversation.";
     const warnings = context.readiness.warnings.length ? context.readiness.warnings.map((warning) => `- ${warning}`).join("\n") : "- No readiness warnings.";
     return trimFormattedContext([
       "BUSINESS PROFILE",
@@ -645,6 +714,9 @@ export const aiPromptContextFormatter = {
       "",
       "RECENT CONVERSATION",
       messages,
+      "",
+      "EXISTING CUSTOMER ISSUES",
+      customerIssues,
       "",
       "PLAN CAPABILITIES",
       `Plan: ${context.planCapabilities.plan}, tone: ${context.planCapabilities.tone}, AI replies: ${context.planCapabilities.aiReplies ? "yes" : "no"}, team routing: ${context.planCapabilities.teamRouting ? "yes" : "no"}, safe auto-confirm: ${context.planCapabilities.safeAutoConfirm ? "yes" : "no"}, appointment mode: ${context.planCapabilities.appointmentAutoConfirmMode ?? "unknown"}`,
