@@ -483,6 +483,21 @@ enum CustomerIssueCreatedBy {
   MANUAL
 }
 
+enum CustomerIssueTimelineEventType {
+  CREATED_FROM_CUSTOMER_MESSAGE
+  MATCHED_FOLLOW_UP
+  REOPENED_BY_CUSTOMER_MESSAGE
+  STATUS_CHANGED
+  RESOLUTION_MESSAGE_SENT
+  INTERNAL_NOTE
+}
+
+enum CustomerIssueMessageRelationType {
+  CREATED_FROM
+  MATCHED_FOLLOW_UP
+  REOPENED_BY
+}
+
 enum PlanCode {
   BASIC
   PLUS
@@ -733,31 +748,34 @@ model Business {
   updatedAt                        DateTime                    @updatedAt
   deletedAt                        DateTime?
 
-  owner                   User                            @relation("BusinessOwner", fields: [ownerId], references: [id])
-  businessAccount         BusinessAccount                 @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  members                 BusinessMember[]
-  invitations             BusinessInvitation[]
-  usageRecords            BusinessUsageRecord[]
-  auditLogs               AuditLog[]
-  leads                   Lead[]
-  leadActivities          LeadActivity[]
-  conversations           Conversation[]
-  messages                Message[]
-  whatsAppIntegrations    WhatsAppIntegration[]
-  webhookEventLogs        WebhookEventLog[]
-  aiInteractionLogs       AiInteractionLog[]
-  services                Service[]
-  availability            BusinessAvailability[]
-  policies                BusinessPolicy[]
-  appointments            Appointment[]
-  appointmentActivities   AppointmentActivity[]
-  notifications           BusinessNotification[]
-  customerIssueLogs       CustomerIssueLog[]
-  knowledgeArticles       KnowledgeArticle[]
-  knowledgeDocuments      KnowledgeDocument[]
-  knowledgeAssetSendLogs  KnowledgeAssetSendLog[]
-  messageAttachments      ConversationMessageAttachment[]
-  knowledgeDocumentChunks KnowledgeDocumentChunk[]
+  owner                       User                            @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount             BusinessAccount                 @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members                     BusinessMember[]
+  invitations                 BusinessInvitation[]
+  usageRecords                BusinessUsageRecord[]
+  auditLogs                   AuditLog[]
+  leads                       Lead[]
+  leadActivities              LeadActivity[]
+  conversations               Conversation[]
+  messages                    Message[]
+  whatsAppIntegrations        WhatsAppIntegration[]
+  webhookEventLogs            WebhookEventLog[]
+  aiInteractionLogs           AiInteractionLog[]
+  services                    Service[]
+  availability                BusinessAvailability[]
+  policies                    BusinessPolicy[]
+  appointments                Appointment[]
+  appointmentActivities       AppointmentActivity[]
+  notifications               BusinessNotification[]
+  customerIssueLogs           CustomerIssueLog[]
+  knowledgeArticles           KnowledgeArticle[]
+  knowledgeDocuments          KnowledgeDocument[]
+  knowledgeAssetSendLogs      KnowledgeAssetSendLog[]
+  messageAttachments          ConversationMessageAttachment[]
+  knowledgeDocumentChunks     KnowledgeDocumentChunk[]
+  complaintInsightReports     ComplaintInsightReport[]
+  customerIssueTimelineEvents CustomerIssueTimelineEvent[]
+  customerIssueMessages       CustomerIssueMessage[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -902,26 +920,27 @@ model BusinessMember {
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  business                           Business                @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user                               User                    @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy                          User?                   @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
-  assignedLeads                      Lead[]                  @relation("LeadAssignee")
-  assignedConversations              Conversation[]          @relation("ConversationAssignee")
-  assignedAppointments               Appointment[]           @relation("AppointmentAssignee")
-  lastRescheduledAppointments        Appointment[]           @relation("AppointmentLastRescheduler")
-  outcomeConfirmedAppointments       Appointment[]           @relation("AppointmentOutcomeConfirmer")
-  appointmentActivities              AppointmentActivity[]   @relation("AppointmentActivityActorMembership")
+  business                           Business                     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user                               User                         @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy                          User?                        @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads                      Lead[]                       @relation("LeadAssignee")
+  assignedConversations              Conversation[]               @relation("ConversationAssignee")
+  assignedAppointments               Appointment[]                @relation("AppointmentAssignee")
+  lastRescheduledAppointments        Appointment[]                @relation("AppointmentLastRescheduler")
+  outcomeConfirmedAppointments       Appointment[]                @relation("AppointmentOutcomeConfirmer")
+  appointmentActivities              AppointmentActivity[]        @relation("AppointmentActivityActorMembership")
   notifications                      BusinessNotification[]
-  responsibleCustomerIssues          CustomerIssueLog[]      @relation("CustomerIssueResponsible")
-  suggestedCustomerIssues            CustomerIssueLog[]      @relation("CustomerIssueSuggestedResponsible")
-  clientOwnedCustomerIssues          CustomerIssueLog[]      @relation("CustomerIssueClientOwner")
-  conversationAssignedCustomerIssues CustomerIssueLog[]      @relation("CustomerIssueConversationAssignee")
-  createdKnowledgeArticles           KnowledgeArticle[]      @relation("KnowledgeArticleCreator")
-  updatedKnowledgeArticles           KnowledgeArticle[]      @relation("KnowledgeArticleUpdater")
-  reviewedKnowledgeArticles          KnowledgeArticle[]      @relation("KnowledgeArticleReviewer")
-  publishedKnowledgeArticles         KnowledgeArticle[]      @relation("KnowledgeArticlePublisher")
-  uploadedKnowledgeDocuments         KnowledgeDocument[]     @relation("KnowledgeDocumentUploader")
-  sentKnowledgeAssets                KnowledgeAssetSendLog[] @relation("KnowledgeAssetSender")
+  responsibleCustomerIssues          CustomerIssueLog[]           @relation("CustomerIssueResponsible")
+  suggestedCustomerIssues            CustomerIssueLog[]           @relation("CustomerIssueSuggestedResponsible")
+  clientOwnedCustomerIssues          CustomerIssueLog[]           @relation("CustomerIssueClientOwner")
+  conversationAssignedCustomerIssues CustomerIssueLog[]           @relation("CustomerIssueConversationAssignee")
+  createdKnowledgeArticles           KnowledgeArticle[]           @relation("KnowledgeArticleCreator")
+  updatedKnowledgeArticles           KnowledgeArticle[]           @relation("KnowledgeArticleUpdater")
+  reviewedKnowledgeArticles          KnowledgeArticle[]           @relation("KnowledgeArticleReviewer")
+  publishedKnowledgeArticles         KnowledgeArticle[]           @relation("KnowledgeArticlePublisher")
+  uploadedKnowledgeDocuments         KnowledgeDocument[]          @relation("KnowledgeDocumentUploader")
+  sentKnowledgeAssets                KnowledgeAssetSendLog[]      @relation("KnowledgeAssetSender")
+  customerIssueTimelineEvents        CustomerIssueTimelineEvent[]
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -1218,15 +1237,17 @@ model Message {
   updatedAt         DateTime              @updatedAt
   deletedAt         DateTime?
 
-  business               Business                        @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  conversation           Conversation                    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  lead                   Lead                            @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  senderUser             User?                           @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
-  sourceAiLogs           AiInteractionLog[]              @relation("AiInteractionSourceMessage")
-  replyAiLogs            AiInteractionLog[]              @relation("AiInteractionReplyMessage")
-  customerIssueLogs      CustomerIssueLog[]
-  knowledgeAssetSendLogs KnowledgeAssetSendLog[]
-  attachments            ConversationMessageAttachment[]
+  business                    Business                        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversation                Conversation                    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  lead                        Lead                            @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  senderUser                  User?                           @relation("MessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+  sourceAiLogs                AiInteractionLog[]              @relation("AiInteractionSourceMessage")
+  replyAiLogs                 AiInteractionLog[]              @relation("AiInteractionReplyMessage")
+  customerIssueLogs           CustomerIssueLog[]
+  customerIssueTimelineEvents CustomerIssueTimelineEvent[]
+  customerIssueMessages       CustomerIssueMessage[]
+  knowledgeAssetSendLogs      KnowledgeAssetSendLog[]
+  attachments                 ConversationMessageAttachment[]
 
   @@index([businessId])
   @@index([conversationId])
@@ -1411,22 +1432,26 @@ model CustomerIssueLog {
   status                           CustomerIssueStatus    @default(OPEN)
   createdBy                        CustomerIssueCreatedBy @default(AI)
   createdByUserId                  String?
+  complaintFingerprint             String?
   metadata                         Json?
   reopenCount                      Int                    @default(0)
   createdAt                        DateTime               @default(now())
   updatedAt                        DateTime               @updatedAt
   resolvedAt                       DateTime?
 
-  business                   Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  lead                       Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  conversation               Conversation?   @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  customerMessage            Message?        @relation(fields: [customerMessageId], references: [id], onDelete: SetNull)
-  clientOwner                BusinessMember? @relation("CustomerIssueClientOwner", fields: [clientOwnerMembershipId], references: [id], onDelete: SetNull)
-  conversationAssignedMember BusinessMember? @relation("CustomerIssueConversationAssignee", fields: [conversationAssignedMembershipId], references: [id], onDelete: SetNull)
-  suggestedResponsibleMember BusinessMember? @relation("CustomerIssueSuggestedResponsible", fields: [suggestedResponsibleMembershipId], references: [id], onDelete: SetNull)
-  responsibleMember          BusinessMember? @relation("CustomerIssueResponsible", fields: [responsibleMembershipId], references: [id], onDelete: SetNull)
-  createdByUser              User?           @relation("CustomerIssueActor", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  business                   Business                     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead                       Lead?                        @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation               Conversation?                @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customerMessage            Message?                     @relation(fields: [customerMessageId], references: [id], onDelete: SetNull)
+  clientOwner                BusinessMember?              @relation("CustomerIssueClientOwner", fields: [clientOwnerMembershipId], references: [id], onDelete: SetNull)
+  conversationAssignedMember BusinessMember?              @relation("CustomerIssueConversationAssignee", fields: [conversationAssignedMembershipId], references: [id], onDelete: SetNull)
+  suggestedResponsibleMember BusinessMember?              @relation("CustomerIssueSuggestedResponsible", fields: [suggestedResponsibleMembershipId], references: [id], onDelete: SetNull)
+  responsibleMember          BusinessMember?              @relation("CustomerIssueResponsible", fields: [responsibleMembershipId], references: [id], onDelete: SetNull)
+  createdByUser              User?                        @relation("CustomerIssueActor", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  timelineEvents             CustomerIssueTimelineEvent[]
+  issueMessages              CustomerIssueMessage[]
 
+  @@unique([businessId, conversationId, complaintFingerprint])
   @@index([businessId, status, createdAt])
   @@index([businessId, category, createdAt])
   @@index([businessId, severity, createdAt])
@@ -1434,6 +1459,82 @@ model CustomerIssueLog {
   @@index([businessId, leadId, createdAt])
   @@index([businessId, conversationId, createdAt])
   @@index([customerMessageId])
+}
+
+model CustomerIssueTimelineEvent {
+  id                String                         @id @default(cuid())
+  businessId        String
+  issueId           String
+  messageId         String?
+  actorMembershipId String?
+  type              CustomerIssueTimelineEventType
+  summary           String
+  metadata          Json?
+  createdAt         DateTime                       @default(now())
+
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  issue           CustomerIssueLog @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  message         Message?         @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  actorMembership BusinessMember?  @relation(fields: [actorMembershipId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, issueId, createdAt])
+  @@index([businessId, type, createdAt])
+  @@index([messageId])
+  @@index([actorMembershipId])
+}
+
+model CustomerIssueMessage {
+  id           String                           @id @default(cuid())
+  businessId   String
+  issueId      String
+  messageId    String
+  relationType CustomerIssueMessageRelationType
+  createdAt    DateTime                         @default(now())
+
+  business Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  issue    CustomerIssueLog @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  message  Message          @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([issueId, messageId, relationType])
+  @@index([businessId, issueId, createdAt])
+  @@index([businessId, messageId])
+  @@index([relationType])
+}
+
+model ComplaintInsightReport {
+  id                      String   @id @default(cuid())
+  businessId              String
+  timeframe               String
+  periodStart             DateTime
+  periodEnd               DateTime
+  totalComplaints         Int      @default(0)
+  openComplaints          Int      @default(0)
+  resolvedComplaints      Int      @default(0)
+  reopenedComplaints      Int      @default(0)
+  criticalComplaints      Int      @default(0)
+  averageResolutionTimeMs Int?
+  aiSummary               String
+  rootCauses              Json
+  trends                  Json
+  recommendations         Json
+  recurringIssues         Json
+  predictiveAlerts        Json
+  executiveSummary        Json
+  businessMemory          Json
+  sourceComplaintIds      String[] @default([])
+  provider                String?
+  model                   String?
+  promptTokens            Int?
+  completionTokens        Int?
+  totalTokens             Int?
+  generatedAt             DateTime @default(now())
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, timeframe, periodStart, periodEnd])
+  @@index([businessId, generatedAt])
 }
 
 model AiInteractionLog {

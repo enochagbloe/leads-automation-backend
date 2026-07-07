@@ -540,15 +540,22 @@ On these events, refetch:
 - affected lead/conversation/appointment lists
 - notification counts
 
-## Plus Customer Issue Routing
+## Customer Issue Routing
 
-Plus and Premium can now turn AI-detected customer complaints into lightweight internal issue records. Basic does not get complaint intelligence; Basic only receives safe human handoff behavior.
+All tiers can now turn AI-detected customer complaints into internal issue records.
+
+Tier behavior:
+
+- Basic: complaint detection, case creation, assignment/status/reopen tracking, resolution message, timeline, search, and basic counts.
+- Plus: Basic features plus staff specialty routing, timing metrics, intelligence editing, and dashboard breakdowns.
+- Premium: Plus features plus complaint insight reports, trends, recommendations, predictive alerts, and business memory.
 
 Customer-facing behavior:
 
 - AI replies politely and calmly.
 - AI must not mention internal routing, tickets, assignments, staff names, or issue logs.
 - Conversation assignment/client owner is not changed automatically.
+- When an issue is resolved, the backend sends a customer-facing resolution message. If the conversation was `CLOSED`, that outbound message reopens it as normal message activity. `PLAN_LIMIT_BLOCKED` conversations are not reopened for resolution messages.
 
 Issue endpoints:
 
@@ -563,6 +570,7 @@ X-Business-Id: <activeBusinessId>
 List query params:
 
 ```text
+search
 status
 category
 severity
@@ -588,6 +596,7 @@ Allowed statuses:
 ```text
 OPEN
 ACKNOWLEDGED
+REOPENED
 RESOLVED
 CLOSED
 ```
@@ -622,7 +631,7 @@ type CustomerIssue = {
   suggestedResponsibleMembershipId: string | null;
   responsibleMembershipId: string | null;
   routingReason: string | null;
-  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED" | "CLOSED";
+  status: "OPEN" | "ACKNOWLEDGED" | "REOPENED" | "RESOLVED" | "CLOSED";
   createdBy: "AI" | "MANUAL";
   createdAt: string;
   updatedAt: string;
@@ -632,7 +641,8 @@ type CustomerIssue = {
 
 Access:
 
-- Basic receives `PLAN_UPGRADE_REQUIRED` on customer issue endpoints.
+- Basic can access customer issue endpoints for core complaint handling and basic metrics.
+- Plus/Premium can access intelligence editing, advanced timing metrics, and richer dashboard breakdowns.
 - Owner/manager can view all customer issues in the selected business.
 - Staff can view customer issues assigned to them and unassigned issues.
 - Staff can acknowledge or resolve issues assigned to them.
