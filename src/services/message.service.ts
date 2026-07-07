@@ -19,6 +19,7 @@ import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./
 import { realtimeService } from "./realtime.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { reopenConversationFromMessageActivity, type ReopenState } from "./conversation-lifecycle.service";
+import { followUpCancellationService } from "./follow-up.service";
 
 export type ConversationActor = {
   userId: string;
@@ -299,6 +300,13 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
     return created;
   });
   await invalidateMessageCaches(input.businessId, input.conversationId);
+  await followUpCancellationService.evaluateInboundReply({
+    businessId: input.businessId,
+    conversationId: input.conversationId,
+    leadId: input.leadId,
+    inboundMessageId: message.id,
+    inboundMessageText: input.content,
+  });
   return message;
 }
 

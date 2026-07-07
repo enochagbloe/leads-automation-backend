@@ -33,6 +33,7 @@ import { aiReplyEngine } from "./ai-reply-engine.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { reopenConversationFromMessageActivity } from "./conversation-lifecycle.service";
 import { notificationService } from "./notification.service";
+import { followUpCancellationService } from "./follow-up.service";
 
 const PROVIDER_NAME = "META_WHATSAPP";
 const MOCK_VERIFY_TOKEN = "bizreplyai-mock-verify-token";
@@ -720,6 +721,13 @@ export const whatsappService = {
           logSystemActions(result, input),
           invalidateCaches(business.id, result.lead.id, result.conversation.id),
           notifyBlockedCustomerMessage(result),
+          result.conversationBlocked ? Promise.resolve() : followUpCancellationService.evaluateInboundReply({
+            businessId: business.id,
+            conversationId: result.conversation.id,
+            leadId: result.lead.id,
+            inboundMessageId: result.message.id,
+            inboundMessageText: input.text,
+          }),
         ]);
         if (result.leadCreated) {
           realtimeService.publish({

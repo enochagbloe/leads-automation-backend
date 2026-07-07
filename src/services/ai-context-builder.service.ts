@@ -17,6 +17,8 @@ import {
   CustomerIssueCategory,
   CustomerIssueSeverity,
   CustomerIssueStatus,
+  FollowUpContextType,
+  FollowUpJobStatus,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -142,6 +144,12 @@ export type AiBusinessContext = {
     reopenCount: number;
     createdAt: string;
     resolvedAt?: string | null;
+  }>;
+  pendingFollowUpContexts: Array<{
+    jobId: string;
+    contextType: FollowUpContextType;
+    pendingQuestion?: string | null;
+    expectedResponseType?: string | null;
   }>;
   planCapabilities: {
     plan: PlanCode;
@@ -289,7 +297,7 @@ export const aiBusinessContextService = {
     });
     if (!conversation) throw new AppError(404, "Conversation not found while building AI context.", "AI_CONTEXT_CONVERSATION_NOT_FOUND");
 
-    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages, existingCustomerIssues] = await Promise.all([
+    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages, existingCustomerIssues, pendingFollowUpContexts] = await Promise.all([
       prisma.service.findMany({
         where: { businessId: input.businessId, isActive: true, isArchived: false },
         orderBy: [
@@ -403,6 +411,21 @@ export const aiBusinessContextService = {
           reopenCount: true,
           createdAt: true,
           resolvedAt: true,
+        },
+      }),
+      prisma.followUpJob.findMany({
+        where: {
+          businessId: input.businessId,
+          conversationId: input.conversationId,
+          status: FollowUpJobStatus.SCHEDULED,
+        },
+        orderBy: { scheduledFor: "asc" },
+        take: 10,
+        select: {
+          id: true,
+          contextType: true,
+          pendingQuestion: true,
+          expectedResponseType: true,
         },
       }),
     ]);
@@ -559,6 +582,12 @@ export const aiBusinessContextService = {
         createdAt: issue.createdAt.toISOString(),
         resolvedAt: issue.resolvedAt?.toISOString() ?? null,
       })),
+      pendingFollowUpContexts: pendingFollowUpContexts.map((job) => ({
+        jobId: job.id,
+        contextType: job.contextType,
+        pendingQuestion: job.pendingQuestion,
+        expectedResponseType: job.expectedResponseType,
+      })),
       planCapabilities: {
         plan: input.plan,
         ...getAiPlanPermissions(input.plan),
@@ -599,6 +628,7 @@ export const aiPromptContextFormatter = {
       "For booking intent: if service, date, and time are present, use suggestedAction CREATE_BOOKING_REQUEST. If any required detail is missing, ask a clarifying question with SEND_REPLY.",
       "For booking intent locationType: use the service default appointment type when provided. Only choose a different locationType when the service says AI can choose location type and the customer clearly requested an allowed appointment type. Otherwise use TO_BE_CONFIRMED and ask a clarifying question when location details are required.",
       "Never say an appointment is confirmed. Booking requests require business confirmation.",
+      "Pending follow-up contexts may show what the business is waiting for. If the latest customer reply does not resolve a pending context, answer the customer’s new message and naturally remind them of the unresolved request.",
       "Complaint handling: detect dissatisfaction, delays, poor workmanship, staff behavior issues, missed appointments, payment problems, follow-up problems, communication breakdowns, missing work/items, and site/delivery issues.",
       "Complaint case matching is required. Before outputting a complaint, compare the latest customer message against EXISTING CUSTOMER ISSUES.",
       "For each complaint object, always include matchType. Use NEW when the complaint is unrelated to existing cases, CONTINUATION when it continues an active/open/acknowledged/reopened case, or FOLLOW_UP_TO_RESOLVED when it relates to a resolved case that should be reopened.",
@@ -620,6 +650,9 @@ export const aiPromptContextFormatter = {
       context.existingCustomerIssues.length
         ? "Existing complaint cases are present. For every detected complaint, classify it as NEW, CONTINUATION, or FOLLOW_UP_TO_RESOLVED and include matchedIssueId for non-NEW matches."
         : "No existing complaint cases are present. Any detected complaint should use matchType NEW and an empty matchedIssueId.",
+      context.pendingFollowUpContexts.length
+        ? "Pending follow-up contexts are present. If the latest customer message does not resolve them, keep the unresolved request naturally in the reply."
+        : "No pending follow-up contexts are present.",
     ].join("\n");
   },
 
@@ -674,6 +707,14 @@ export const aiPromptContextFormatter = {
         `  resolved: ${issue.resolvedAt ?? "not resolved"}`,
       ].join("\n")).join("\n")
       : "- No existing complaint cases in this conversation.";
+    const pendingFollowUps = context.pendingFollowUpContexts.length
+      ? context.pendingFollowUpContexts.map((job) => [
+        `- jobId: ${job.jobId}`,
+        `  context: ${job.contextType}`,
+        `  pending question: ${job.pendingQuestion ?? "none"}`,
+        `  expected response: ${job.expectedResponseType ?? "none"}`,
+      ].join("\n")).join("\n")
+      : "- No pending follow-up contexts.";
     const warnings = context.readiness.warnings.length ? context.readiness.warnings.map((warning) => `- ${warning}`).join("\n") : "- No readiness warnings.";
     return trimFormattedContext([
       "BUSINESS PROFILE",
@@ -717,6 +758,9 @@ export const aiPromptContextFormatter = {
       "",
       "EXISTING CUSTOMER ISSUES",
       customerIssues,
+      "",
+      "PENDING FOLLOW-UP CONTEXTS",
+      pendingFollowUps,
       "",
       "PLAN CAPABILITIES",
       `Plan: ${context.planCapabilities.plan}, tone: ${context.planCapabilities.tone}, AI replies: ${context.planCapabilities.aiReplies ? "yes" : "no"}, team routing: ${context.planCapabilities.teamRouting ? "yes" : "no"}, safe auto-confirm: ${context.planCapabilities.safeAutoConfirm ? "yes" : "no"}, appointment mode: ${context.planCapabilities.appointmentAutoConfirmMode ?? "unknown"}`,

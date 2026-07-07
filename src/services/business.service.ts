@@ -11,6 +11,7 @@ import { getAccountUsage, getPlanFeatures, getPlanLimits, subscriptionService } 
 import { accountPolicyService } from "./account-policy.service";
 import { permissionFlags } from "./permission.service";
 import { cacheService } from "./cache.service";
+import { followUpService } from "./follow-up.service";
 
 const INVITATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -82,6 +83,7 @@ export const businessService = {
           periodEnd: subscription.currentPeriodEnd,
         },
       });
+      await followUpService.seedDefaultRulesForBusiness(business.id, membership.id, tx);
       const accountUsage = await tx.accountUsageRecord.findUniqueOrThrow({ where: { id: usage.id } });
       return { business, membership, accountUsage };
     });

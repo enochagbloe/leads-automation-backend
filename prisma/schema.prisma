@@ -167,6 +167,48 @@ enum MessageDeliveryStatus {
   INTERNAL
 }
 
+enum FollowUpRuleType {
+  NO_RESPONSE_AFTER_MESSAGE
+  CONTACT_EMAIL_REQUEST
+  BEFORE_APPOINTMENT
+  AFTER_APPOINTMENT
+  AFTER_QUOTE_SENT
+  STALE_LEAD
+}
+
+enum FollowUpContextType {
+  GENERAL_NO_RESPONSE
+  MISSING_CUSTOMER_DETAIL
+  CONTACT_EMAIL_REQUEST
+  APPOINTMENT_CONFIRMATION
+  QUOTE_RESPONSE
+  PAYMENT_RESPONSE
+  SERVICE_SELECTION
+  LOCATION_REQUEST
+  DATE_TIME_REQUEST
+  POST_APPOINTMENT_FEEDBACK
+}
+
+enum FollowUpJobStatus {
+  SCHEDULED
+  PROCESSING
+  CANCELLED
+  SKIPPED
+  SENT
+  FAILED
+}
+
+enum FollowUpSendLogSentBy {
+  SYSTEM
+  AI
+}
+
+enum FollowUpSendLogDeliveryStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
 enum WhatsAppProvider {
   META
   MOCK_WHATSAPP
@@ -644,6 +686,18 @@ enum AuditAction {
   KNOWLEDGE_DOCUMENT_UPDATED
   KNOWLEDGE_DOCUMENT_ARCHIVED
   KNOWLEDGE_ASSET_SENT_TO_CUSTOMER
+  FOLLOW_UP_RULE_CREATED
+  FOLLOW_UP_RULE_UPDATED
+  FOLLOW_UP_RULE_DELETED
+  FOLLOW_UP_AUTOMATION_ENABLED
+  FOLLOW_UP_AUTOMATION_DISABLED
+  FOLLOW_UP_JOB_SCHEDULED
+  FOLLOW_UP_JOB_CANCELLED
+  FOLLOW_UP_JOB_RESCHEDULED
+  FOLLOW_UP_JOB_SKIPPED
+  FOLLOW_UP_JOB_SENT
+  FOLLOW_UP_JOB_FAILED
+  FOLLOW_UP_CONTEXT_EVALUATED
 }
 
 enum DayOfWeek {
@@ -740,6 +794,7 @@ model Business {
   aiRepliesEnabled                 Boolean                     @default(true)
   aiAutoReplyEnabled               Boolean                     @default(true)
   aiAutoConfirmAppointmentsEnabled Boolean                     @default(false)
+  followUpAutomationEnabled        Boolean                     @default(false)
   aiHandoffOnLowConfidence         Boolean                     @default(true)
   aiTone                           AiTone                      @default(PROFESSIONAL)
   aiMinConfidence                  Float?
@@ -776,6 +831,9 @@ model Business {
   complaintInsightReports     ComplaintInsightReport[]
   customerIssueTimelineEvents CustomerIssueTimelineEvent[]
   customerIssueMessages       CustomerIssueMessage[]
+  followUpAutomationRules     FollowUpAutomationRule[]
+  followUpJobs                FollowUpJob[]
+  followUpSendLogs            FollowUpSendLog[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -941,6 +999,8 @@ model BusinessMember {
   uploadedKnowledgeDocuments         KnowledgeDocument[]          @relation("KnowledgeDocumentUploader")
   sentKnowledgeAssets                KnowledgeAssetSendLog[]      @relation("KnowledgeAssetSender")
   customerIssueTimelineEvents        CustomerIssueTimelineEvent[]
+  createdFollowUpRules               FollowUpAutomationRule[]     @relation("FollowUpRuleCreator")
+  updatedFollowUpRules               FollowUpAutomationRule[]     @relation("FollowUpRuleUpdater")
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -1141,6 +1201,8 @@ model Lead {
   appointments           Appointment[]
   customerIssueLogs      CustomerIssueLog[]
   knowledgeAssetSendLogs KnowledgeAssetSendLog[]
+  followUpJobs           FollowUpJob[]
+  followUpSendLogs       FollowUpSendLog[]
 
   @@index([businessId])
   @@index([businessId, phone])
@@ -1204,6 +1266,8 @@ model Conversation {
   customerIssueLogs      CustomerIssueLog[]
   aiInteractionLogs      AiInteractionLog[]
   knowledgeAssetSendLogs KnowledgeAssetSendLog[]
+  followUpJobs           FollowUpJob[]
+  followUpSendLogs       FollowUpSendLog[]
 
   @@index([businessId])
   @@index([businessId, leadId])
@@ -1385,6 +1449,115 @@ model KnowledgeAssetSendLog {
   @@index([businessId, articleId])
   @@index([businessId, documentId])
   @@index([businessId, status])
+}
+
+model FollowUpAutomationRule {
+  id                      String           @id @default(cuid())
+  businessId              String
+  type                    FollowUpRuleType
+  name                    String
+  description             String?
+  enabled                 Boolean          @default(false)
+  delayMinutes            Int
+  messageTemplate         String
+  useAiRewrite            Boolean          @default(false)
+  maxSendsPerLead         Int              @default(1)
+  maxSendsPerConversation Int              @default(1)
+  cooldownMinutes         Int?
+  onlyDuringBusinessHours Boolean          @default(true)
+  planRequired            PlanCode         @default(BASIC)
+  deletedAt               DateTime?
+  createdByMembershipId   String
+  updatedByMembershipId   String?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+
+  business  Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy BusinessMember  @relation("FollowUpRuleCreator", fields: [createdByMembershipId], references: [id], onDelete: Restrict)
+  updatedBy BusinessMember? @relation("FollowUpRuleUpdater", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
+  jobs      FollowUpJob[]
+  sendLogs  FollowUpSendLog[]
+
+  @@index([businessId])
+  @@index([businessId, type])
+  @@index([businessId, enabled])
+  @@index([businessId, deletedAt])
+  @@unique([businessId, type])
+}
+
+model FollowUpJob {
+  id                   String              @id @default(cuid())
+  businessId           String
+  ruleId               String
+  leadId               String?
+  conversationId       String?
+  appointmentId        String?
+  quoteId              String?
+  contextType          FollowUpContextType
+  dedupeKey            String?
+  pendingQuestion      String?
+  expectedResponseType String?
+  relatedMessageId     String?
+  status               FollowUpJobStatus   @default(SCHEDULED)
+  scheduledFor         DateTime
+  cancelReason         String?
+  skipReason           String?
+  failureReason        String?
+  processingStartedAt  DateTime?
+  sentAt               DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  business     Business                 @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  rule         FollowUpAutomationRule    @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  lead         Lead?                     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  appointment  Appointment?              @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  sendLogs     FollowUpSendLog[]
+
+  @@index([businessId])
+  @@index([businessId, status, scheduledFor])
+  @@index([businessId, ruleId])
+  @@index([businessId, leadId])
+  @@index([businessId, conversationId])
+  @@index([businessId, appointmentId])
+  @@index([businessId, quoteId])
+  @@index([businessId, contextType])
+  @@index([businessId, dedupeKey])
+}
+
+model FollowUpSendLog {
+  id                String                        @id @default(cuid())
+  businessId        String
+  ruleId            String
+  jobId             String
+  leadId            String?
+  conversationId    String?
+  appointmentId     String?
+  quoteId           String?
+  messageText       String
+  sentBy            FollowUpSendLogSentBy         @default(SYSTEM)
+  deliveryStatus    FollowUpSendLogDeliveryStatus @default(QUEUED)
+  whatsappMessageId String?
+  failureReason     String?
+  createdAt         DateTime                      @default(now())
+
+  business     Business              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  rule         FollowUpAutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  job          FollowUpJob            @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  lead         Lead?                  @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  appointment  Appointment?           @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([businessId])
+  @@index([businessId, ruleId])
+  @@index([businessId, jobId])
+  @@index([businessId, leadId])
+  @@index([businessId, conversationId])
+  @@index([businessId, appointmentId])
+  @@index([businessId, quoteId])
+  @@index([businessId, deliveryStatus])
+  @@index([businessId, createdAt])
 }
 
 model ConversationMessageAttachment {
@@ -1713,6 +1886,8 @@ model Appointment {
   cancelledBy        User?                 @relation("AppointmentCanceller", fields: [cancelledById], references: [id], onDelete: SetNull)
   completedBy        User?                 @relation("AppointmentCompleter", fields: [completedById], references: [id], onDelete: SetNull)
   activities         AppointmentActivity[]
+  followUpJobs       FollowUpJob[]
+  followUpSendLogs   FollowUpSendLog[]
 
   @@index([businessId])
   @@index([businessAccountId])
