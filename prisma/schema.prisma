@@ -698,6 +698,15 @@ enum AuditAction {
   FOLLOW_UP_JOB_SENT
   FOLLOW_UP_JOB_FAILED
   FOLLOW_UP_CONTEXT_EVALUATED
+  BASIC_FOLLOW_UP_RULE_ENABLED
+  BASIC_FOLLOW_UP_RULE_DISABLED
+  BASIC_NO_RESPONSE_FOLLOW_UP_SCHEDULED
+  BASIC_NO_RESPONSE_FOLLOW_UP_SENT
+  BASIC_CONTACT_EMAIL_REQUEST_SCHEDULED
+  BASIC_CONTACT_EMAIL_REQUEST_SENT
+  BASIC_APPOINTMENT_REMINDER_SCHEDULED
+  BASIC_APPOINTMENT_REMINDER_SENT
+  BASIC_FOLLOW_UP_BLOCKED_BY_LIMIT
 }
 
 enum DayOfWeek {
@@ -1685,7 +1694,7 @@ model ComplaintInsightReport {
   resolvedComplaints      Int      @default(0)
   reopenedComplaints      Int      @default(0)
   criticalComplaints      Int      @default(0)
-  averageResolutionTimeMs Int?
+  averageResolutionTimeMs BigInt?
   aiSummary               String
   rootCauses              Json
   trends                  Json

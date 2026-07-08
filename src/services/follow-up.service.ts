@@ -3,17 +3,22 @@ import {
   AuditAction,
   BusinessRole,
   BusinessStatus,
+  ConversationChannel,
   ConversationStatus,
+  CustomerIssueStatus,
   DayOfWeek,
+  AppointmentStatus,
   FollowUpContextType,
   FollowUpJobStatus,
   FollowUpRuleType,
   FollowUpSendLogDeliveryStatus,
   FollowUpSendLogSentBy,
   LeadStatus,
-  // MembershipStatus,
-  // MessageDirection,
-  // MessageSenderType,
+  LeadActivityAction,
+  MessageDeliveryStatus,
+  MessageDirection,
+  MessageSenderType,
+  MessageType,
   PlanCode,
   Prisma,
   SubscriptionStatus,
@@ -22,6 +27,7 @@ import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import {
   FollowUpJobListQuery,
+  FollowUpJobRetryInput,
   FollowUpLogListQuery,
   FollowUpRuleCreateInput,
   FollowUpRuleListQuery,
@@ -32,6 +38,7 @@ import {
 import { auditService } from "./audit.service";
 import { realtimeService } from "./realtime.service";
 import { ACTIVE_SUBSCRIPTION_STATUSES, subscriptionService } from "./subscription.service";
+import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.service";
 
 export type FollowUpActor = {
   userId: string;
@@ -70,7 +77,7 @@ const jobInclude = {
   rule: { select: { id: true, type: true, name: true, enabled: true, planRequired: true } },
   lead: { select: { id: true, fullName: true, phone: true, email: true, status: true } },
   conversation: { select: { id: true, displayId: true, status: true, assignedStaffId: true, channel: true } },
-  appointment: { select: { id: true, title: true, status: true, startTime: true, endTime: true, timezone: true } },
+  appointment: { select: { id: true, title: true, status: true, startTime: true, endTime: true, timezone: true, service: { select: { name: true } } } },
 } satisfies Prisma.FollowUpJobInclude;
 
 const sendLogInclude = {
@@ -83,6 +90,10 @@ const sendLogInclude = {
 
 function json(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function jsonObject(value: Prisma.JsonValue | null | undefined): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...value } as Record<string, unknown> : {};
 }
 
 function isManager(actor: FollowUpActor) {
@@ -126,7 +137,7 @@ function planRank(plan: PlanCode) {
 function defaultMonthlyLimit(plan: PlanCode) {
   if (plan === PlanCode.PREMIUM) return 2_000;
   if (plan === PlanCode.PLUS) return 500;
-  return 100;
+  return 50;
 }
 
 function ruleTypesForPlan(plan: PlanCode): FollowUpRuleType[] {
@@ -143,7 +154,34 @@ function requiredPlanForRuleType(type: FollowUpRuleType): PlanCode {
   return PlanCode.BASIC;
 }
 
+function basicScheduledAuditAction(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return AuditAction.BASIC_CONTACT_EMAIL_REQUEST_SCHEDULED;
+  if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return AuditAction.BASIC_APPOINTMENT_REMINDER_SCHEDULED;
+  return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SCHEDULED;
+}
+
+function basicSentAuditAction(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return AuditAction.BASIC_CONTACT_EMAIL_REQUEST_SENT;
+  if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return AuditAction.BASIC_APPOINTMENT_REMINDER_SENT;
+  return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SENT;
+}
+
+function basicScheduledEventType(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return "business.follow_up.basic.contact_email.scheduled" as const;
+  if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return "business.follow_up.basic.appointment_reminder.scheduled" as const;
+  return "business.follow_up.basic.no_response.scheduled" as const;
+}
+
+function basicSentEventType(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return "business.follow_up.basic.contact_email.sent" as const;
+  if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return "business.follow_up.basic.appointment_reminder.sent" as const;
+  return "business.follow_up.basic.no_response.sent" as const;
+}
+
 const FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES = [FollowUpSendLogDeliveryStatus.QUEUED, FollowUpSendLogDeliveryStatus.SENT] as const;
+const FOLLOW_UP_PROCESSING_STALE_MS = 10 * 60 * 1000;
+const FOLLOW_UP_DELIVERED_MESSAGE_STATUSES: MessageDeliveryStatus[] = [MessageDeliveryStatus.SENT, MessageDeliveryStatus.DELIVERED, MessageDeliveryStatus.READ];
+
 async function lockFollowUpMonthlyQuotaScope(tx: Prisma.TransactionClient, businessAccountId: string) {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('follow_up_monthly_quota'), hashtext(${businessAccountId}))`;
 }
@@ -211,6 +249,23 @@ function zonedDateTimeToUtc(date: string, time: string, timezone: string) {
 
 function dayOfWeekFor(date: Date, timezone: string) {
   return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: timezone }).format(date).toUpperCase() as DayOfWeek;
+}
+
+function humanDate(date: Date, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: validTimezone(timezone) ? timezone : "Africa/Accra",
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function humanTime(date: Date, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: validTimezone(timezone) ? timezone : "Africa/Accra",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function extractEmail(text: string) {
@@ -284,6 +339,11 @@ async function validateRuleTargets(actor: FollowUpActor, input: {
   if (input.leadId && !lead) throw new AppError(404, "Lead not found.", "LEAD_NOT_FOUND");
   if (input.conversationId && !conversation) throw new AppError(404, "Conversation not found.", "CONVERSATION_NOT_FOUND");
   if (input.appointmentId && !appointment) throw new AppError(404, "Appointment not found.", "APPOINTMENT_NOT_FOUND");
+
+  //testing from enoch remove it if it is wrong
+  if(input.conversationId !== lead ) throw new AppError(404, "Conversation Id must match the lead")
+  if(input.appointmentId !== lead) throw new AppError(404,"appointment id should match the leadid")
+  if(input.appointmentId !== input.conversationId) throw new AppError(404,"appointment must match the conversaton")
 }
 
 async function audit(actor: FollowUpActor, action: AuditAction, metadata: Record<string, unknown>) {
@@ -357,6 +417,68 @@ async function nextFollowUpAllowedAfterCooldown(tx: Prisma.TransactionClient, jo
   return nextAllowedAt > now ? nextAllowedAt : null;
 }
 
+async function cancelNoResponseFollowUpIfCustomerReplied(tx: Prisma.TransactionClient, input: {
+  businessId: string;
+  jobId: string;
+  conversationId: string;
+  relatedMessageId: string;
+  messageId?: string | null;
+}) {
+  const relatedMessage = await tx.message.findFirst({
+    where: { id: input.relatedMessageId, businessId: input.businessId, conversationId: input.conversationId, deletedAt: null },
+    select: { createdAt: true },
+  });
+  if (!relatedMessage) return null;
+
+  const customerReply = await tx.message.findFirst({
+    where: {
+      businessId: input.businessId,
+      conversationId: input.conversationId,
+      senderType: MessageSenderType.CUSTOMER,
+      direction: MessageDirection.INBOUND,
+      createdAt: { gt: relatedMessage.createdAt },
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+  if (!customerReply) return null;
+
+  const cancelled = await tx.followUpJob.updateMany({
+    where: { id: input.jobId, businessId: input.businessId, status: FollowUpJobStatus.PROCESSING },
+    data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "CUSTOMER_REPLIED_BEFORE_SEND", processingStartedAt: null },
+  });
+  if (cancelled.count !== 1) return null;
+
+  if (input.messageId) {
+    const message = await tx.message.findFirst({
+      where: { id: input.messageId, businessId: input.businessId },
+      select: { id: true, metadata: true },
+    });
+    if (message) {
+      await tx.message.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.FAILED,
+          metadata: json({
+            ...jsonObject(message.metadata),
+            source: "FOLLOW_UP_AUTOMATION",
+            cancelledBeforeSend: true,
+            cancelReason: "CUSTOMER_REPLIED_BEFORE_SEND",
+            customerReplyId: customerReply.id,
+          }),
+        },
+      });
+    }
+  }
+
+  return {
+    job: await tx.followUpJob.findUniqueOrThrow({ where: { id: input.jobId } }),
+    sent: false as const,
+    reason: "CUSTOMER_REPLIED_BEFORE_SEND",
+    customerReplyId: customerReply.id,
+  };
+}
+
 async function businessHoursFollowUpDecision(tx: Prisma.TransactionClient, businessId: string, from: Date) {
   const business = await tx.business.findUnique({
     where: { id: businessId },
@@ -397,6 +519,174 @@ async function businessHoursFollowUpDecision(tx: Prisma.TransactionClient, busin
     return { allowedNow: false, nextOpening: zonedDateTimeToUtc(localDate, rule.openTime, timezone) };
   }
   return { allowedNow: false, nextOpening: null };
+}
+
+type BasicFollowUpScheduleInput = {
+  businessId: string;
+  type: FollowUpRuleType;
+  contextType: FollowUpContextType;
+  leadId: string | null;
+  conversationId: string | null;
+  appointmentId?: string | null;
+  relatedMessageId?: string | null;
+  scheduledFor?: Date;
+  pendingQuestion: string;
+  expectedResponseType: string;
+  replaceScheduledNoResponse?: boolean;
+};
+
+async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
+  const result = await prisma.$transaction(async (tx) => {
+    const business = await tx.business.findUnique({
+      where: { id: input.businessId },
+      select: { id: true, businessAccountId: true, followUpAutomationEnabled: true, status: true, deletedAt: true },
+    });
+    if (!business || business.deletedAt || business.status !== BusinessStatus.ACTIVE) return { scheduled: false, reason: "BUSINESS_INACTIVE" as const };
+    if (!business.followUpAutomationEnabled) return { scheduled: false, reason: "FOLLOW_UP_AUTOMATION_DISABLED" as const };
+
+    const subscription = await tx.subscription.findFirst({
+      where: { businessAccountId: business.businessAccountId, status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] } },
+      include: { plan: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!subscription) return { scheduled: false, reason: "SUBSCRIPTION_INACTIVE" as const };
+    if (!ruleTypesForPlan(subscription.plan.code).includes(input.type)) return { scheduled: false, reason: "PLAN_UPGRADE_REQUIRED" as const };
+
+    const rule = await tx.followUpAutomationRule.findFirst({
+      where: { businessId: input.businessId, type: input.type, enabled: true, deletedAt: null },
+    });
+    if (!rule) return { scheduled: false, reason: "FOLLOW_UP_RULE_DISABLED" as const };
+
+    const [lead, conversation, appointment] = await Promise.all([
+      input.leadId ? tx.lead.findFirst({ where: { id: input.leadId, businessId: input.businessId, deletedAt: null }, select: { id: true, status: true, email: true } }) : Promise.resolve(null),
+      input.conversationId ? tx.conversation.findFirst({
+        where: { id: input.conversationId, businessId: input.businessId, deletedAt: null },
+        select: { id: true, leadId: true, status: true, needsHumanReview: true, humanTakeover: true, assignedStaffId: true },
+      }) : Promise.resolve(null),
+      input.appointmentId ? tx.appointment.findFirst({
+        where: { id: input.appointmentId, businessId: input.businessId },
+        select: { id: true, status: true, startTime: true, leadId: true, conversationId: true },
+      }) : Promise.resolve(null),
+    ]);
+
+    if (input.leadId && !lead) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
+    if (input.conversationId && !conversation) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
+    if (input.appointmentId && !appointment) return { scheduled: false, reason: "APPOINTMENT_NOT_FOUND" as const };
+    if (lead && (lead.status === LeadStatus.WON || lead.status === LeadStatus.LOST)) return { scheduled: false, reason: "LEAD_CLOSED" as const };
+    if (conversation && (
+      conversation.status === ConversationStatus.CLOSED
+      || conversation.status === ConversationStatus.PLAN_LIMIT_BLOCKED
+      || conversation.needsHumanReview
+      || conversation.humanTakeover
+    )) return { scheduled: false, reason: "CONVERSATION_NOT_ELIGIBLE" as const };
+    if (input.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE && input.conversationId) {
+      const openIssue = await tx.customerIssueLog.findFirst({
+        where: {
+          businessId: input.businessId,
+          conversationId: input.conversationId,
+          status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED] },
+        },
+        select: { id: true },
+      });
+      if (openIssue) return { scheduled: false, reason: "UNRESOLVED_CUSTOMER_ISSUE" as const };
+    }
+    if (input.type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) {
+      if (!lead || lead.email) return { scheduled: false, reason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE" as const };
+      const existingContactRequest = await tx.followUpSendLog.findFirst({
+        where: {
+          businessId: input.businessId,
+          ruleId: rule.id,
+          deliveryStatus: { in: [...FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES] },
+          OR: [
+            ...(input.leadId ? [{ leadId: input.leadId }] : []),
+            ...(input.conversationId ? [{ conversationId: input.conversationId }] : []),
+          ],
+        },
+        select: { id: true },
+      });
+      if (existingContactRequest) return { scheduled: false, reason: "CONTACT_EMAIL_REQUEST_ALREADY_SENT" as const };
+    }
+    if (input.type === FollowUpRuleType.BEFORE_APPOINTMENT) {
+      if (!appointment || (appointment.status !== AppointmentStatus.CONFIRMED && appointment.status !== AppointmentStatus.RESCHEDULED)) return { scheduled: false, reason: "APPOINTMENT_NOT_CONFIRMED" as const };
+      if (appointment.startTime <= new Date()) return { scheduled: false, reason: "APPOINTMENT_ALREADY_STARTED" as const };
+    }
+
+    if (input.replaceScheduledNoResponse && input.conversationId) {
+      await tx.followUpJob.updateMany({
+        where: {
+          businessId: input.businessId,
+          ruleId: rule.id,
+          conversationId: input.conversationId,
+          contextType: FollowUpContextType.GENERAL_NO_RESPONSE,
+          status: FollowUpJobStatus.SCHEDULED,
+        },
+        data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "REPLACED_BY_NEW_OUTBOUND_MESSAGE" },
+      });
+    }
+
+    const scheduledFor = input.scheduledFor ?? new Date(Date.now() + rule.delayMinutes * 60_000);
+    const dedupeKey = followUpJobDedupeKey({
+      businessId: input.businessId,
+      ruleId: rule.id,
+      contextType: input.contextType,
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      appointmentId: input.appointmentId ?? null,
+      relatedMessageId: input.relatedMessageId ?? null,
+    });
+    const duplicate = await tx.followUpJob.findFirst({
+      where: { businessId: input.businessId, dedupeKey, status: FollowUpJobStatus.SCHEDULED },
+      select: { id: true },
+    });
+    if (duplicate) return { scheduled: false, reason: "FOLLOW_UP_DUPLICATE_JOB" as const, jobId: duplicate.id };
+
+    const job = await tx.followUpJob.create({
+      data: {
+        businessId: input.businessId,
+        ruleId: rule.id,
+        leadId: input.leadId,
+        conversationId: input.conversationId,
+        appointmentId: input.appointmentId ?? null,
+        contextType: input.contextType,
+        dedupeKey,
+        pendingQuestion: input.pendingQuestion,
+        expectedResponseType: input.expectedResponseType,
+        relatedMessageId: input.relatedMessageId ?? null,
+        scheduledFor,
+      },
+      include: jobInclude,
+    });
+    return { scheduled: true as const, job, rule };
+  }).catch((error: unknown) => {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return { scheduled: false as const, reason: "FOLLOW_UP_DUPLICATE_JOB" as const };
+    }
+    throw error;
+  });
+
+  if (result.scheduled && result.rule && result.job) {
+    await auditService.log({
+      action: basicScheduledAuditAction(result.rule.type),
+      businessId: input.businessId,
+      metadata: json({
+        ruleId: result.rule.id,
+        jobId: result.job.id,
+        leadId: result.job.leadId,
+        conversationId: result.job.conversationId,
+        appointmentId: result.job.appointmentId,
+        contextType: result.job.contextType,
+      }),
+    });
+    realtimeService.publish({
+      type: basicScheduledEventType(result.rule.type),
+      businessId: input.businessId,
+      conversationId: result.job.conversationId ?? undefined,
+      leadId: result.job.leadId ?? undefined,
+      payload: { job: result.job },
+      broadcastToStaff: true,
+    });
+  }
+  return result;
 }
 
 export const followUpPlanPolicyService = {
@@ -501,6 +791,12 @@ export const followUpEligibilityService = {
     if (!job.rule.enabled || job.rule.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "FOLLOW_UP_RULE_DISABLED" };
     if (!job.business.followUpAutomationEnabled) return { eligible: false, action: "CANCEL" as const, reason: "FOLLOW_UP_AUTOMATION_DISABLED" };
     if (job.business.status !== BusinessStatus.ACTIVE || job.business.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "BUSINESS_INACTIVE" };
+    if (job.rule.type === FollowUpRuleType.BEFORE_APPOINTMENT && (!job.appointment || job.appointment.startTime <= new Date())) {
+      return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_ALREADY_STARTED" };
+    }
+    if (job.rule.type === FollowUpRuleType.CONTACT_EMAIL_REQUEST && job.lead?.email) {
+      return { eligible: false, action: "CANCEL" as const, reason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE" };
+    }
     const subscription = await prisma.subscription.findFirst({
       where: { businessAccountId: job.business.businessAccountId, status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] } },
       include: { plan: true },
@@ -526,6 +822,11 @@ export const followUpEligibilityService = {
       || job.conversation.humanTakeover
     )) return { eligible: false, action: "CANCEL" as const, reason: "CONVERSATION_NOT_ELIGIBLE" };
     if (job.lead && (job.lead.status === LeadStatus.WON || job.lead.status === LeadStatus.LOST)) return { eligible: false, action: "CANCEL" as const, reason: "LEAD_CLOSED" };
+    if (job.appointment && (
+      job.appointment.status === AppointmentStatus.CANCELLED
+      || job.appointment.status === AppointmentStatus.NO_SHOW
+      || job.appointment.status === AppointmentStatus.MISSED
+    )) return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_NOT_ELIGIBLE" };
     const [leadSends, conversationSends] = await Promise.all([
       job.leadId ? prisma.followUpSendLog.count({ where: { businessId: job.businessId, ruleId: job.ruleId, leadId: job.leadId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
       job.conversationId ? prisma.followUpSendLog.count({ where: { businessId: job.businessId, ruleId: job.ruleId, conversationId: job.conversationId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
@@ -666,12 +967,9 @@ export const followUpService = {
 
   async seedDefaultRulesForBusiness(businessId: string, createdByMembershipId: string, db: FollowUpDb = prisma) {
     const defaults: Array<Pick<FollowUpRuleCreateInput, "type" | "name" | "delayMinutes" | "messageTemplate">> = [
-      { type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE, name: "No-response follow-up", delayMinutes: 1440, messageTemplate: "Hi {{customerName}}, just checking if you’d still like help with this." },
-      { type: FollowUpRuleType.CONTACT_EMAIL_REQUEST, name: "Contact email request", delayMinutes: 1440, messageTemplate: "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp." },
+      { type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE, name: "No response follow-up", delayMinutes: 1440, messageTemplate: "Hi {{customerName}}, just checking if you’d still like help with this." },
+      { type: FollowUpRuleType.CONTACT_EMAIL_REQUEST, name: "Ask for customer email", delayMinutes: 0, messageTemplate: "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp." },
       { type: FollowUpRuleType.BEFORE_APPOINTMENT, name: "Appointment reminder", delayMinutes: 1440, messageTemplate: "Reminder: your appointment is scheduled for {{appointmentDate}} at {{appointmentTime}}." },
-      { type: FollowUpRuleType.AFTER_APPOINTMENT, name: "Post-appointment follow-up", delayMinutes: 60, messageTemplate: "Thanks for your time today. Was everything okay with the appointment?" },
-      { type: FollowUpRuleType.STALE_LEAD, name: "Stale lead follow-up", delayMinutes: 4320, messageTemplate: "Hi {{customerName}}, are you still interested in this service?" },
-      { type: FollowUpRuleType.AFTER_QUOTE_SENT, name: "Quote/payment follow-up", delayMinutes: 1440, messageTemplate: "Hi {{customerName}}, just following up on the quote we sent earlier. Let us know if you’d like us to proceed." },
     ];
     await Promise.all(defaults.map((rule) => db.followUpAutomationRule.upsert({
       where: { businessId_type: { businessId, type: rule.type } },
@@ -763,10 +1061,25 @@ export const followUpService = {
       maxSendsPerLead: input.maxSendsPerLead,
       maxSendsPerConversation: input.maxSendsPerConversation,
     });
-    const { planRequired: _ignoredPlanRequired, ...data } = input;
+    const existingRule = await prisma.followUpAutomationRule.findFirst({
+      where: { businessId: actor.businessId, type: input.type },
+      select: { id: true, deletedAt: true },
+    });
+    if (existingRule) {
+      throw new AppError(409, "A follow-up rule for this type already exists.", "FOLLOW_UP_RULE_ALREADY_EXISTS", {
+        ruleId: existingRule.id,
+        type: input.type,
+        deleted: Boolean(existingRule.deletedAt),
+      });
+    }
     const rule = await prisma.followUpAutomationRule.create({
-      data: { ...data, planRequired: requiredPlanForRuleType(input.type), businessId: actor.businessId, createdByMembershipId: actor.membershipId },
+      data: { ...input, planRequired: requiredPlanForRuleType(input.type), businessId: actor.businessId, createdByMembershipId: actor.membershipId },
       include: ruleInclude,
+    }).catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        throw new AppError(409, "A follow-up rule for this type already exists.", "FOLLOW_UP_RULE_ALREADY_EXISTS", { type: input.type });
+      }
+      throw error;
     });
     await audit(actor, AuditAction.FOLLOW_UP_RULE_CREATED, { ruleId: rule.id, type: rule.type });
     realtimeService.publish({ type: "business.follow_up.rule.created", businessId: actor.businessId, payload: { rule }, broadcastToStaff: true });
@@ -783,10 +1096,9 @@ export const followUpService = {
       maxSendsPerLead: input.maxSendsPerLead ?? existing.maxSendsPerLead,
       maxSendsPerConversation: input.maxSendsPerConversation ?? existing.maxSendsPerConversation,
     });
-    const { planRequired: _ignoredPlanRequired, ...data } = input;
     const rule = await prisma.followUpAutomationRule.update({
       where: { id: existing.id },
-      data: { ...data, planRequired: requiredPlanForRuleType(type), updatedByMembershipId: actor.membershipId },
+      data: { ...input, planRequired: requiredPlanForRuleType(type), updatedByMembershipId: actor.membershipId },
       include: ruleInclude,
     });
     await audit(actor, AuditAction.FOLLOW_UP_RULE_UPDATED, { ruleId: rule.id, changes: Object.keys(input) });
@@ -828,14 +1140,60 @@ export const followUpService = {
     return { data, pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) } };
   },
 
-  async getJob(actor: FollowUpActor, jobId: string) {
-    assertCanView(actor);
-    const job = await prisma.followUpJob.findFirst({ where: { id: jobId, ...jobAccessWhere(actor) }, include: jobInclude });
-    if (!job) throw new AppError(404, "Follow-up job not found.", "FOLLOW_UP_JOB_NOT_FOUND");
-    return job;
-  },
+	  async getJob(actor: FollowUpActor, jobId: string) {
+	    assertCanView(actor);
+	    const job = await prisma.followUpJob.findFirst({ where: { id: jobId, ...jobAccessWhere(actor) }, include: jobInclude });
+	    if (!job) throw new AppError(404, "Follow-up job not found.", "FOLLOW_UP_JOB_NOT_FOUND");
+	    return job;
+	  },
 
-  async listLogs(actor: FollowUpActor, query: FollowUpLogListQuery) {
+	  async retryJob(actor: FollowUpActor, jobId: string, input: FollowUpJobRetryInput) {
+	    assertCanManage(actor);
+	    const job = await prisma.followUpJob.findFirst({ where: { id: jobId, businessId: actor.businessId }, include: jobInclude });
+	    if (!job) throw new AppError(404, "Follow-up job not found.", "FOLLOW_UP_JOB_NOT_FOUND");
+	    if (job.status !== FollowUpJobStatus.FAILED) {
+	      throw new AppError(409, "Only failed follow-up jobs can be retried.", "FOLLOW_UP_JOB_NOT_RETRYABLE", { status: job.status });
+	    }
+	    if (job.failureReason === "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION" || job.failureReason === "FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE") {
+	      throw new AppError(409, "This follow-up has an ambiguous pending delivery and cannot be retried safely yet.", "FOLLOW_UP_DELIVERY_RECONCILIATION_REQUIRED");
+	    }
+	    const existingMessage = await prisma.message.findFirst({
+	      where: { businessId: actor.businessId, deletedAt: null, metadata: { path: ["jobId"], equals: job.id } },
+	      orderBy: { createdAt: "desc" },
+	    });
+	    if (existingMessage?.deliveryStatus === MessageDeliveryStatus.PENDING && typeof jsonObject(existingMessage.metadata).deliveryAttemptStartedAt === "string") {
+	      throw new AppError(409, "This follow-up has an ambiguous pending delivery and cannot be retried safely yet.", "FOLLOW_UP_DELIVERY_RECONCILIATION_REQUIRED", { messageId: existingMessage.id });
+	    }
+	    const scheduledFor = input.scheduledFor ?? new Date();
+	    const updated = await prisma.followUpJob.update({
+	      where: { id: job.id },
+	      data: {
+	        status: FollowUpJobStatus.SCHEDULED,
+	        scheduledFor,
+	        failureReason: null,
+	        processingStartedAt: null,
+	        sentAt: null,
+	      },
+	      include: jobInclude,
+	    }).catch((error: unknown) => {
+	      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+	        throw new AppError(409, "A matching follow-up job is already scheduled.", "FOLLOW_UP_DUPLICATE_JOB");
+	      }
+	      throw error;
+	    });
+	    await audit(actor, AuditAction.FOLLOW_UP_JOB_RESCHEDULED, { jobId: updated.id, ruleId: updated.ruleId, reason: "MANUAL_RETRY", scheduledFor });
+	    realtimeService.publish({
+	      type: "business.follow_up.job.rescheduled",
+	      businessId: actor.businessId,
+	      conversationId: updated.conversationId ?? undefined,
+	      leadId: updated.leadId ?? undefined,
+	      payload: { job: updated, reason: "MANUAL_RETRY", retried: true },
+	      broadcastToStaff: true,
+	    });
+	    return updated;
+	  },
+
+	  async listLogs(actor: FollowUpActor, query: FollowUpLogListQuery) {
     assertCanView(actor);
     const where: Prisma.FollowUpSendLogWhereInput = {
       ...logAccessWhere(actor),
@@ -862,6 +1220,115 @@ export const followUpService = {
     return log;
   },
 
+  async scheduleNoResponseAfterOutboundMessage(input: {
+    businessId: string;
+    leadId: string;
+    conversationId: string;
+    messageId: string;
+    messageCreatedAt: Date;
+    deliveryStatus: MessageDeliveryStatus;
+  }) {
+    if (input.deliveryStatus === MessageDeliveryStatus.FAILED || input.deliveryStatus === MessageDeliveryStatus.INTERNAL) {
+      return { scheduled: false, reason: "MESSAGE_NOT_CUSTOMER_FACING" as const };
+    }
+    const rule = await prisma.followUpAutomationRule.findFirst({
+      where: { businessId: input.businessId, type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE, enabled: true, deletedAt: null },
+      select: { delayMinutes: true },
+    });
+    return scheduleBasicFollowUpJob({
+      businessId: input.businessId,
+      type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE,
+      contextType: FollowUpContextType.GENERAL_NO_RESPONSE,
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      relatedMessageId: input.messageId,
+      scheduledFor: new Date(input.messageCreatedAt.getTime() + (rule?.delayMinutes ?? 1440) * 60_000),
+      pendingQuestion: "Customer has not responded to the last message.",
+      expectedResponseType: "CUSTOMER_REPLY",
+      replaceScheduledNoResponse: true,
+    });
+  },
+
+  async scheduleContactEmailRequestForAppointment(appointment: {
+    businessId: string;
+    leadId: string | null;
+    conversationId: string | null;
+  }) {
+    if (!appointment.leadId) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
+    const rule = await prisma.followUpAutomationRule.findFirst({
+      where: { businessId: appointment.businessId, type: FollowUpRuleType.CONTACT_EMAIL_REQUEST, enabled: true, deletedAt: null },
+      select: { delayMinutes: true },
+    });
+    return scheduleBasicFollowUpJob({
+      businessId: appointment.businessId,
+      type: FollowUpRuleType.CONTACT_EMAIL_REQUEST,
+      contextType: FollowUpContextType.CONTACT_EMAIL_REQUEST,
+      leadId: appointment.leadId,
+      conversationId: appointment.conversationId,
+      scheduledFor: new Date(Date.now() + (rule?.delayMinutes ?? 0) * 60_000),
+      pendingQuestion: "Customer may share email for booking details or formal documents.",
+      expectedResponseType: "EMAIL",
+    });
+  },
+
+  async scheduleAppointmentReminder(appointment: {
+    businessId: string;
+    id: string;
+    leadId: string | null;
+    conversationId: string | null;
+    status: AppointmentStatus;
+    startTime: Date;
+  }) {
+    if ((appointment.status !== AppointmentStatus.CONFIRMED && appointment.status !== AppointmentStatus.RESCHEDULED) || !appointment.leadId) return { scheduled: false, reason: "APPOINTMENT_NOT_CONFIRMED" as const };
+    const rule = await prisma.followUpAutomationRule.findFirst({
+      where: { businessId: appointment.businessId, type: FollowUpRuleType.BEFORE_APPOINTMENT, enabled: true, deletedAt: null },
+      select: { delayMinutes: true },
+    });
+    const now = new Date();
+    const primary = new Date(appointment.startTime.getTime() - (rule?.delayMinutes ?? 1440) * 60_000);
+    const fallback = new Date(appointment.startTime.getTime() - 2 * 60 * 60 * 1000);
+    const scheduledFor = primary > now ? primary : fallback > now ? fallback : null;
+    if (!scheduledFor) {
+      await auditService.log({
+        action: AuditAction.FOLLOW_UP_JOB_SKIPPED,
+        businessId: appointment.businessId,
+        metadata: json({ appointmentId: appointment.id, reason: "APPOINTMENT_TOO_SOON_FOR_REMINDER" }),
+      });
+      return { scheduled: false, reason: "APPOINTMENT_TOO_SOON_FOR_REMINDER" as const };
+    }
+    return scheduleBasicFollowUpJob({
+      businessId: appointment.businessId,
+      type: FollowUpRuleType.BEFORE_APPOINTMENT,
+      contextType: FollowUpContextType.APPOINTMENT_CONFIRMATION,
+      leadId: appointment.leadId,
+      conversationId: appointment.conversationId,
+      appointmentId: appointment.id,
+      scheduledFor,
+      pendingQuestion: "Customer should be reminded of upcoming appointment.",
+      expectedResponseType: "APPOINTMENT_ACKNOWLEDGEMENT",
+    });
+  },
+
+  async cancelAppointmentReminderJobs(input: { businessId: string; appointmentId: string; reason: string }) {
+    const cancelled = await prisma.followUpJob.updateMany({
+      where: {
+        businessId: input.businessId,
+        appointmentId: input.appointmentId,
+        contextType: FollowUpContextType.APPOINTMENT_CONFIRMATION,
+        status: FollowUpJobStatus.SCHEDULED,
+      },
+      data: { status: FollowUpJobStatus.CANCELLED, cancelReason: input.reason },
+    });
+    if (cancelled.count > 0) {
+      await auditService.log({
+        action: AuditAction.FOLLOW_UP_JOB_CANCELLED,
+        businessId: input.businessId,
+        metadata: json({ appointmentId: input.appointmentId, reason: input.reason, cancelledJobCount: cancelled.count }),
+      });
+    }
+    return cancelled;
+  },
+
   async testTrigger(actor: FollowUpActor, input: FollowUpTestTriggerInput) {
     assertCanManage(actor);
     if (process.env.NODE_ENV === "production") throw new AppError(404, "Follow-up test trigger is not available.", "NOT_FOUND");
@@ -869,14 +1336,123 @@ export const followUpService = {
   },
 };
 
+async function recoverStaleProcessingJobs(businessId: string, now = new Date()) {
+  const staleBefore = new Date(now.getTime() - FOLLOW_UP_PROCESSING_STALE_MS);
+  const staleJobs = await prisma.followUpJob.findMany({
+    where: {
+      businessId,
+      status: FollowUpJobStatus.PROCESSING,
+      processingStartedAt: { lt: staleBefore },
+    },
+    orderBy: { processingStartedAt: "asc" },
+    take: 100,
+  });
+  for (const job of staleJobs) {
+    const sendLog = await prisma.followUpSendLog.findFirst({
+      where: { businessId, jobId: job.id },
+      orderBy: { createdAt: "desc" },
+    });
+    if (sendLog?.deliveryStatus === FollowUpSendLogDeliveryStatus.SENT) {
+      const changed = await prisma.followUpJob.updateMany({
+        where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+        data: { status: FollowUpJobStatus.SENT, sentAt: sendLog.createdAt, processingStartedAt: null, failureReason: null },
+      });
+      if (changed.count === 1) {
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, recoveredFromStaleProcessing: true, sendLogId: sendLog.id }) });
+      }
+      continue;
+    }
+    if (sendLog?.deliveryStatus === FollowUpSendLogDeliveryStatus.FAILED) {
+      const changed = await prisma.followUpJob.updateMany({
+        where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+        data: { status: FollowUpJobStatus.FAILED, failureReason: sendLog.failureReason ?? "FOLLOW_UP_SEND_FAILED", processingStartedAt: null },
+      });
+      if (changed.count === 1) {
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_FAILED, businessId, metadata: json({ jobId: job.id, recoveredFromStaleProcessing: true, sendLogId: sendLog.id, reason: sendLog.failureReason ?? "FOLLOW_UP_SEND_FAILED" }) });
+      }
+      continue;
+    }
+
+    const message = await prisma.message.findFirst({
+      where: {
+        businessId,
+        deletedAt: null,
+        metadata: { path: ["jobId"], equals: job.id },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!message) {
+      const changed = await prisma.followUpJob.updateMany({
+        where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+        data: { status: FollowUpJobStatus.SCHEDULED, processingStartedAt: null, failureReason: null },
+      });
+      if (changed.count === 1) {
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_RESCHEDULED, businessId, metadata: json({ jobId: job.id, reason: "STALE_PROCESSING_RECOVERED", processingStartedAt: job.processingStartedAt }) });
+      }
+      continue;
+    }
+
+	    if (FOLLOW_UP_DELIVERED_MESSAGE_STATUSES.includes(message.deliveryStatus)) {
+	      const changed = await prisma.followUpJob.updateMany({
+	        where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+	        data: { status: FollowUpJobStatus.SENT, sentAt: message.createdAt, processingStartedAt: null, failureReason: null },
+      });
+      if (changed.count === 1) {
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, recoveredFromStaleProcessing: true, messageId: message.id, deliveryStatus: message.deliveryStatus }) });
+	      }
+	      continue;
+	    }
+
+	    const messageMetadata = jsonObject(message.metadata);
+	    if (message.deliveryStatus === MessageDeliveryStatus.PENDING && typeof messageMetadata.deliveryAttemptStartedAt !== "string") {
+	      const changed = await prisma.followUpJob.updateMany({
+	        where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+	        data: { status: FollowUpJobStatus.SCHEDULED, processingStartedAt: null, failureReason: null },
+	      });
+	      if (changed.count === 1) {
+	        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_RESCHEDULED, businessId, metadata: json({ jobId: job.id, reason: "STALE_PROCESSING_RECOVERED_BEFORE_DELIVERY_ATTEMPT", processingStartedAt: job.processingStartedAt, messageId: message.id }) });
+	      }
+	      continue;
+	    }
+
+	    const reason = message.deliveryStatus === MessageDeliveryStatus.FAILED
+	      ? "FOLLOW_UP_MESSAGE_FAILED"
+      : "FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE";
+    const changed = await prisma.followUpJob.updateMany({
+      where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING, processingStartedAt: job.processingStartedAt },
+      data: { status: FollowUpJobStatus.FAILED, failureReason: reason, processingStartedAt: null },
+    });
+    if (changed.count === 1) {
+      await auditService.log({
+        action: AuditAction.FOLLOW_UP_JOB_FAILED,
+        businessId,
+        metadata: json({
+          jobId: job.id,
+          recoveredFromStaleProcessing: true,
+          messageId: message.id,
+          deliveryStatus: message.deliveryStatus,
+          reason,
+        }),
+      });
+    }
+  }
+}
+
 export const followUpJobProcessorService = {
   async processDueJobs(businessId: string, limit = 25) {
     const now = new Date();
+    await recoverStaleProcessingJobs(businessId, now);
     const jobs = await prisma.followUpJob.findMany({
       where: { businessId, status: FollowUpJobStatus.SCHEDULED, scheduledFor: { lte: now } },
       orderBy: { scheduledFor: "asc" },
       take: limit,
-      include: { rule: true, lead: true, conversation: true, appointment: true, business: true },
+      include: {
+        rule: true,
+        lead: true,
+        conversation: true,
+        appointment: { include: { service: { select: { name: true } } } },
+        business: true,
+      },
     });
     const results = [];
     for (const job of jobs) {
@@ -973,11 +1549,79 @@ export const followUpJobProcessorService = {
       const messageText = followUpTemplateRendererService.render(job.rule.messageTemplate, {
         customerName: job.lead?.fullName,
         businessName: job.business.name,
-        appointmentDate: job.appointment?.startTime.toISOString().slice(0, 10),
-        appointmentTime: job.appointment?.startTime.toISOString().slice(11, 16),
+        serviceName: job.appointment?.service?.name,
+        appointmentDate: job.appointment ? humanDate(job.appointment.startTime, job.appointment.timezone) : null,
+        appointmentTime: job.appointment ? humanTime(job.appointment.startTime, job.appointment.timezone) : null,
       });
-      const sentAt = new Date();
-      const outcome = await prisma.$transaction(async (tx) => {
+      if (!job.conversationId || !job.leadId || !job.lead?.phone || job.conversation?.channel !== ConversationChannel.WHATSAPP) {
+        const failed = await prisma.$transaction(async (tx) => {
+          const markedFailed = await tx.followUpJob.updateMany({
+            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+            data: { status: FollowUpJobStatus.FAILED, failureReason: "WHATSAPP_NOT_CONNECTED", processingStartedAt: null },
+          });
+          if (markedFailed.count !== 1) return null;
+          await tx.followUpSendLog.create({
+            data: {
+              businessId,
+              ruleId: job.ruleId,
+              jobId: job.id,
+              leadId: job.leadId,
+              conversationId: job.conversationId,
+              appointmentId: job.appointmentId,
+              quoteId: job.quoteId,
+              messageText,
+              sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
+              deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
+              failureReason: "WHATSAPP_NOT_CONNECTED",
+            },
+          });
+          return tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } });
+        });
+        if (!failed) continue;
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_FAILED, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, reason: "WHATSAPP_NOT_CONNECTED" }) });
+        realtimeService.publish({ type: "business.follow_up.job.failed", businessId, conversationId: job.conversationId ?? undefined, leadId: job.leadId ?? undefined, payload: { job: failed, reason: "WHATSAPP_NOT_CONNECTED" }, broadcastToStaff: true });
+        results.push(failed);
+        continue;
+      }
+      const conversationId = job.conversationId;
+      const leadId = job.leadId;
+      const destinationPhone = job.lead.phone;
+
+      let integration;
+      try {
+        integration = await getWhatsAppIntegration(businessId);
+      } catch {
+        const failed = await prisma.$transaction(async (tx) => {
+          const markedFailed = await tx.followUpJob.updateMany({
+            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+            data: { status: FollowUpJobStatus.FAILED, failureReason: "WHATSAPP_NOT_CONNECTED", processingStartedAt: null },
+          });
+          if (markedFailed.count !== 1) return null;
+          await tx.followUpSendLog.create({
+            data: {
+              businessId,
+              ruleId: job.ruleId,
+              jobId: job.id,
+              leadId: job.leadId,
+              conversationId: job.conversationId,
+              appointmentId: job.appointmentId,
+              quoteId: job.quoteId,
+              messageText,
+              sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
+              deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
+              failureReason: "WHATSAPP_NOT_CONNECTED",
+            },
+          });
+          return tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } });
+        });
+        if (!failed) continue;
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_FAILED, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, reason: "WHATSAPP_NOT_CONNECTED" }) });
+        realtimeService.publish({ type: "business.follow_up.job.failed", businessId, conversationId: job.conversationId, leadId: job.leadId, payload: { job: failed, reason: "WHATSAPP_NOT_CONNECTED" }, broadcastToStaff: true });
+        results.push(failed);
+        continue;
+      }
+
+      const prepared = await prisma.$transaction(async (tx) => {
         await lockFollowUpMonthlyQuotaScope(tx, job.business.businessAccountId);
         const subscription = await tx.subscription.findFirst({
           where: { businessAccountId: job.business.businessAccountId, status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] } },
@@ -1006,51 +1650,298 @@ export const followUpJobProcessorService = {
           });
           if (skipped.count !== 1) return null;
           return { job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }), sent: false, reason: "FOLLOW_UP_MONTHLY_LIMIT_REACHED" };
-        }
-        const nextAllowedAt = await nextFollowUpAllowedAfterCooldown(tx, job, sentAt);
-        if (nextAllowedAt) {
-          const rescheduled = await tx.followUpJob.updateMany({
-            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
-            data: { status: FollowUpJobStatus.SCHEDULED, scheduledFor: nextAllowedAt, processingStartedAt: null },
-          });
-          if (rescheduled.count !== 1) return null;
-          return { job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }), sent: false, reason: "FOLLOW_UP_COOLDOWN_ACTIVE", rescheduledFor: nextAllowedAt };
-        }
-        const markedSent = await tx.followUpJob.updateMany({
-          where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
-          data: { status: FollowUpJobStatus.SENT, sentAt, processingStartedAt: null },
+	        }
+	        const nextAllowedAt = await nextFollowUpAllowedAfterCooldown(tx, job, new Date());
+	        if (nextAllowedAt) {
+	          const rescheduled = await tx.followUpJob.updateMany({
+	            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+	            data: { status: FollowUpJobStatus.SCHEDULED, scheduledFor: nextAllowedAt, processingStartedAt: null },
+	          });
+	          if (rescheduled.count !== 1) return null;
+	          return { job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }), sent: false, reason: "FOLLOW_UP_COOLDOWN_ACTIVE", rescheduledFor: nextAllowedAt };
+	        }
+	        if (job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE && job.relatedMessageId) {
+	          const cancelled = await cancelNoResponseFollowUpIfCustomerReplied(tx, {
+	            businessId,
+	            jobId: job.id,
+	            conversationId,
+	            relatedMessageId: job.relatedMessageId,
+	          });
+	          if (cancelled) return cancelled;
+	        }
+	        if (job.rule.type === FollowUpRuleType.BEFORE_APPOINTMENT) {
+	          const appointment = job.appointmentId
+	            ? await tx.appointment.findFirst({
+	              where: { id: job.appointmentId, businessId },
+	              select: { id: true, startTime: true },
+	            })
+	            : null;
+	          if (!appointment || appointment.startTime <= new Date()) {
+	            const cancelled = await tx.followUpJob.updateMany({
+	              where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+	              data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "APPOINTMENT_ALREADY_STARTED", processingStartedAt: null },
+	            });
+	            if (cancelled.count !== 1) return null;
+	            return {
+	              job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }),
+	              sent: false,
+	              reason: "APPOINTMENT_ALREADY_STARTED",
+	            };
+	          }
+	        }
+	        if (job.rule.type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) {
+	          const lead = await tx.lead.findFirst({
+	            where: { id: leadId, businessId, deletedAt: null },
+	            select: { email: true },
+	          });
+	          if (lead?.email) {
+	            const cancelled = await tx.followUpJob.updateMany({
+	              where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+	              data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE", processingStartedAt: null },
+	            });
+	            if (cancelled.count !== 1) return null;
+	            return {
+	              job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }),
+	              sent: false,
+	              reason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE",
+	            };
+	          }
+	        }
+	        const existingMessage = await tx.message.findFirst({
+          where: {
+            businessId,
+            deletedAt: null,
+            metadata: { path: ["jobId"], equals: job.id },
+          },
+          orderBy: { createdAt: "desc" },
         });
-        if (markedSent.count !== 1) return null;
+        if (existingMessage) {
+          if (FOLLOW_UP_DELIVERED_MESSAGE_STATUSES.includes(existingMessage.deliveryStatus)) {
+            const updatedJob = await tx.followUpJob.update({
+              where: { id: job.id },
+              data: { status: FollowUpJobStatus.SENT, sentAt: existingMessage.createdAt, processingStartedAt: null, failureReason: null },
+            });
+            return { job: updatedJob, message: existingMessage, sent: false, reason: "FOLLOW_UP_ALREADY_DELIVERED" };
+          }
+          const existingMetadata = jsonObject(existingMessage.metadata);
+          if (existingMessage.deliveryStatus === MessageDeliveryStatus.PENDING && typeof existingMetadata.deliveryAttemptStartedAt === "string") {
+            const updatedJob = await tx.followUpJob.update({
+              where: { id: job.id },
+              data: { status: FollowUpJobStatus.FAILED, failureReason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION", processingStartedAt: null },
+            });
+            return { job: updatedJob, message: existingMessage, sent: false, reason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION" };
+          }
+          const message = await tx.message.update({
+            where: { id: existingMessage.id },
+            data: {
+              deliveryStatus: MessageDeliveryStatus.PENDING,
+              provider: null,
+              providerMessageId: null,
+              metadata: json({
+                ...existingMetadata,
+                source: "FOLLOW_UP_AUTOMATION",
+                jobId: job.id,
+                ruleId: job.ruleId,
+                contextType: job.contextType,
+                retryingExistingFollowUpMessage: true,
+                retryStartedAt: new Date().toISOString(),
+              }),
+            },
+          });
+          return { message, sent: true as const, reusedMessage: true as const };
+        }
+        const message = await tx.message.create({
+          data: {
+            businessId,
+            leadId,
+            conversationId,
+            senderType: MessageSenderType.SYSTEM,
+            messageType: MessageType.TEXT,
+            direction: MessageDirection.OUTBOUND,
+            deliveryStatus: MessageDeliveryStatus.PENDING,
+            content: messageText,
+            metadata: json({ source: "FOLLOW_UP_AUTOMATION", jobId: job.id, ruleId: job.ruleId, contextType: job.contextType }),
+          },
+        });
+        await tx.conversation.update({
+          where: { id: conversationId },
+          data: { lastMessagePreview: messageText.slice(0, 240), lastMessageAt: message.createdAt },
+        });
+        await tx.leadActivity.create({
+          data: {
+            businessId,
+            leadId,
+            action: LeadActivityAction.MESSAGE_CREATED,
+            metadata: json({ conversationId, messageId: message.id, senderType: MessageSenderType.SYSTEM, source: "FOLLOW_UP_AUTOMATION", jobId: job.id }),
+          },
+        });
+        return { message, sent: true as const, reusedMessage: false as const };
+      });
+	      if (!prepared) continue;
+	      if (!prepared.sent) {
+	        const action = prepared.job.status === FollowUpJobStatus.CANCELLED
+	          ? AuditAction.FOLLOW_UP_JOB_CANCELLED
+	          : prepared.job.status === FollowUpJobStatus.FAILED
+	            ? AuditAction.FOLLOW_UP_JOB_FAILED
+	            : prepared.job.status === FollowUpJobStatus.SENT
+	              ? AuditAction.FOLLOW_UP_JOB_SENT
+		              : "rescheduledFor" in prepared && prepared.rescheduledFor
+		                ? AuditAction.FOLLOW_UP_JOB_RESCHEDULED
+		                : AuditAction.FOLLOW_UP_JOB_SKIPPED;
+	        await auditService.log({
+	          action,
+	          businessId,
+	          metadata: json({
+	            jobId: job.id,
+	            reason: prepared.reason,
+	            rescheduledFor: "rescheduledFor" in prepared ? prepared.rescheduledFor : null,
+	            messageId: "message" in prepared ? prepared.message?.id ?? null : null,
+	            customerReplyId: "customerReplyId" in prepared ? prepared.customerReplyId : null,
+	          }),
+	        });
+	        results.push(prepared.job);
+	        continue;
+	      }
+	      const followUpMessage = prepared.message;
+	      if (!followUpMessage) continue;
+
+	      if (job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE && job.relatedMessageId) {
+	        const relatedMessageId = job.relatedMessageId;
+	        const cancelledBeforeSend = await prisma.$transaction((tx) => cancelNoResponseFollowUpIfCustomerReplied(tx, {
+	          businessId,
+	          jobId: job.id,
+	          conversationId,
+	          relatedMessageId,
+	          messageId: followUpMessage.id,
+	        }));
+	        if (cancelledBeforeSend) {
+	          await auditService.log({
+	            action: AuditAction.FOLLOW_UP_JOB_CANCELLED,
+	            businessId,
+	            metadata: json({
+	              jobId: job.id,
+	              reason: cancelledBeforeSend.reason,
+	              messageId: followUpMessage.id,
+	              customerReplyId: cancelledBeforeSend.customerReplyId,
+	            }),
+	          });
+	          results.push(cancelledBeforeSend.job);
+	          continue;
+	        }
+	      }
+
+	      if (!prepared.reusedMessage) {
+	        realtimeService.publish({
+	          type: "message.created",
+	          businessId,
+	          conversationId,
+	          leadId,
+	          messageId: followUpMessage.id,
+	          assignedStaffId: job.conversation?.assignedStaffId,
+	          payload: { message: followUpMessage },
+	        });
+	      }
+
+	      const deliveryAttemptStartedAt = new Date().toISOString();
+	      await prisma.message.update({
+	        where: { id: followUpMessage.id },
+	        data: {
+	          metadata: json({
+	            ...jsonObject(followUpMessage.metadata),
+	            source: "FOLLOW_UP_AUTOMATION",
+	            jobId: job.id,
+	            ruleId: job.ruleId,
+	            contextType: job.contextType,
+	            deliveryAttemptStartedAt,
+	          }),
+	        },
+	      });
+
+	      const providerResult = await sendWhatsAppText(integration, {
+	        phoneNumberId: integration.phoneNumberId,
+	        to: destinationPhone,
+	        message: messageText,
+	        businessId,
+	        conversationId,
+	        messageId: followUpMessage.id,
+	      });
+      const deliveryStatus = providerResult.success ? MessageDeliveryStatus.SENT : MessageDeliveryStatus.FAILED;
+      const followUpDeliveryStatus = providerResult.success ? FollowUpSendLogDeliveryStatus.SENT : FollowUpSendLogDeliveryStatus.FAILED;
+      const completed = await prisma.$transaction(async (tx) => {
+        const updatedMessage = await tx.message.update({
+	          where: { id: followUpMessage.id },
+          data: {
+            deliveryStatus,
+            provider: providerResult.provider,
+            providerMessageId: providerResult.providerMessageId,
+            metadata: json({
+              source: "FOLLOW_UP_AUTOMATION",
+              jobId: job.id,
+              ruleId: job.ruleId,
+	              contextType: job.contextType,
+	              deliveryAttemptStartedAt,
+	              provider: providerResult.provider,
+              providerMessageId: providerResult.providerMessageId ?? null,
+              deliveryStatus,
+              ...(providerResult.success ? {} : { error: providerResult.error ?? "WhatsApp follow-up send failed" }),
+            }),
+          },
+        });
+        const updatedJob = await tx.followUpJob.update({
+          where: { id: job.id },
+          data: {
+            status: providerResult.success ? FollowUpJobStatus.SENT : FollowUpJobStatus.FAILED,
+            sentAt: providerResult.success ? new Date() : null,
+            failureReason: providerResult.success ? null : providerResult.error ?? "WHATSAPP_SEND_FAILED",
+            processingStartedAt: null,
+          },
+        });
         await tx.followUpSendLog.create({
           data: {
             businessId,
             ruleId: job.ruleId,
             jobId: job.id,
-            leadId: job.leadId,
-            conversationId: job.conversationId,
+	            leadId,
+	            conversationId,
             appointmentId: job.appointmentId,
             quoteId: job.quoteId,
             messageText,
             sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
-            deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
+            deliveryStatus: followUpDeliveryStatus,
+            whatsappMessageId: providerResult.providerMessageId,
+            failureReason: providerResult.success ? null : providerResult.error ?? "WHATSAPP_SEND_FAILED",
           },
         });
-        return { job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }), sent: true };
-      });
-      if (!outcome) continue;
-      if (!outcome.sent) {
-        await auditService.log({
-          action: outcome.rescheduledFor ? AuditAction.FOLLOW_UP_JOB_RESCHEDULED : AuditAction.FOLLOW_UP_JOB_SKIPPED,
-          businessId,
-          metadata: json({ jobId: job.id, reason: outcome.reason, rescheduledFor: outcome.rescheduledFor }),
+        await tx.leadActivity.create({
+	          data: {
+	            businessId,
+	            leadId,
+	            action: providerResult.success ? LeadActivityAction.MESSAGE_SENT : LeadActivityAction.MESSAGE_SEND_FAILED,
+	            metadata: json({ conversationId, messageId: followUpMessage.id, jobId: job.id, provider: providerResult.provider, providerMessageId: providerResult.providerMessageId ?? null }),
+          },
         });
-        results.push(outcome.job);
+        return { job: updatedJob, message: updatedMessage };
+      });
+      realtimeService.publish({
+	        type: "message.status.updated",
+	        businessId,
+	        conversationId,
+	        leadId,
+	        messageId: followUpMessage.id,
+	        assignedStaffId: job.conversation?.assignedStaffId,
+	        payload: { messageId: followUpMessage.id, conversationId, previousStatus: MessageDeliveryStatus.PENDING, newStatus: deliveryStatus, updatedAt: completed.message.updatedAt },
+      });
+      if (!providerResult.success) {
+        await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_FAILED, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, reason: providerResult.error ?? "WHATSAPP_SEND_FAILED" }) });
+	        realtimeService.publish({ type: "business.follow_up.job.failed", businessId, conversationId, leadId, payload: { job: completed.job, reason: providerResult.error ?? "WHATSAPP_SEND_FAILED" }, broadcastToStaff: true });
+        results.push(completed.job);
         continue;
       }
-      const updated = outcome.job;
-      await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, queuedOnly: true }) });
-      realtimeService.publish({ type: "business.follow_up.job.sent", businessId, conversationId: job.conversationId ?? undefined, leadId: job.leadId ?? undefined, payload: { job: updated }, broadcastToStaff: true });
-      results.push(updated);
+	      await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id }) });
+	      await auditService.log({ action: basicSentAuditAction(job.rule.type), businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id, conversationId, leadId, appointmentId: job.appointmentId }) });
+	      realtimeService.publish({ type: "business.follow_up.job.sent", businessId, conversationId, leadId, payload: { job: completed.job }, broadcastToStaff: true });
+	      realtimeService.publish({ type: basicSentEventType(job.rule.type), businessId, conversationId, leadId, payload: { job: completed.job, message: completed.message }, broadcastToStaff: true });
+      results.push(completed.job);
     }
     return results;
   },

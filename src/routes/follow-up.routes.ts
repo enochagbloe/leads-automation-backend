@@ -7,6 +7,7 @@ import { validate, validateQuery } from "../middleware/validate";
 import {
   followUpJobCancelSchema,
   followUpJobListQuerySchema,
+  followUpJobRetrySchema,
   followUpLogListQuerySchema,
   followUpRuleCreateSchema,
   followUpRuleListQuerySchema,
@@ -31,6 +32,7 @@ followUpRouter.delete("/rules/:ruleId", mutationLimiter, followUpController.dele
 followUpRouter.get("/jobs", validateQuery(followUpJobListQuerySchema), followUpController.listJobs);
 followUpRouter.get("/jobs/:jobId", followUpController.getJob);
 followUpRouter.patch("/jobs/:jobId/cancel", mutationLimiter, validate(followUpJobCancelSchema), followUpController.cancelJob);
+followUpRouter.patch("/jobs/:jobId/retry", mutationLimiter, validate(followUpJobRetrySchema), followUpController.retryJob);
 
 followUpRouter.get("/logs", validateQuery(followUpLogListQuerySchema), followUpController.listLogs);
 followUpRouter.get("/logs/:logId", followUpController.getLog);

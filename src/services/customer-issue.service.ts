@@ -421,7 +421,7 @@ async function findMatchingIssue(input: {
     if (issue) return {
       issue,
       score: 100,
-      matchType: issue.status === CustomerIssueStatus.RESOLVED ? "FOLLOW_UP_TO_RESOLVED" as const : "CONTINUATION" as const,
+      matchType: "IDEMPOTENT_RETRY" as const,
       match: {
         score: 100,
         overlap: null,
@@ -430,7 +430,7 @@ async function findMatchingIssue(input: {
         hasMeaningfulOverlap: null,
         resolvedAgeDays: issue.resolvedAt ? daysBetween(issue.resolvedAt) : null,
         isMatch: true,
-        source: "COMPLAINT_FINGERPRINT",
+        source: "COMPLAINT_FINGERPRINT_RETRY",
       },
     };
   }
@@ -995,6 +995,12 @@ export const customerIssueService = {
           complaintFingerprint: fingerprint,
         }, tx);
         if (match) {
+          if (match.matchType === "IDEMPOTENT_RETRY") {
+            return {
+              type: "idempotent" as const,
+              issue: match.issue,
+            };
+          }
           const reopened = match.issue.status === CustomerIssueStatus.RESOLVED;
           const severityEscalated = severityRank[severity] > severityRank[match.issue.severity];
           const metadata = issueMetadata(match.issue.metadata);
@@ -1154,6 +1160,11 @@ export const customerIssueService = {
         });
         return { type: "created" as const, issue, routing, now };
       }, { maxWait: 10_000, timeout: 30_000 });
+
+      if (mutation.type === "idempotent") {
+        results.push({ issue: mutation.issue, emailSent: false, matchedExisting: true, reopened: false });
+        continue;
+      }
 
       if (mutation.type === "matched") {
         const updated = mutation.issue;

@@ -70,11 +70,11 @@ function addDays(date: Date, days: number) {
 }
 
 function defaultPeriod(timeframe: InsightTimeframe, now = new Date()) {
-  const end = now;
-  if (timeframe === "DAILY") return { periodStart: startOfDay(now), periodEnd: end };
-  if (timeframe === "WEEKLY") return { periodStart: addDays(startOfDay(now), -7), periodEnd: end };
-  if (timeframe === "QUARTERLY") return { periodStart: addDays(startOfDay(now), -90), periodEnd: end };
-  return { periodStart: addDays(startOfDay(now), -30), periodEnd: end };
+  const periodEnd = addDays(startOfDay(now), 1);
+  if (timeframe === "DAILY") return { periodStart: addDays(periodEnd, -1), periodEnd };
+  if (timeframe === "WEEKLY") return { periodStart: addDays(periodEnd, -7), periodEnd };
+  if (timeframe === "QUARTERLY") return { periodStart: addDays(periodEnd, -90), periodEnd };
+  return { periodStart: addDays(periodEnd, -30), periodEnd };
 }
 
 function resolvePeriod(input: { timeframe: InsightTimeframe; periodStart?: Date; periodEnd?: Date }) {
@@ -94,6 +94,17 @@ function resolutionDurationMs(issue: { createdAt: Date; resolvedAt: Date | null 
 function average(values: number[]) {
   if (values.length === 0) return null;
   return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function averageResolutionTimeForDb(value: number | null) {
+  return value === null ? null : BigInt(value);
+}
+
+function serializeInsightReport<T extends { averageResolutionTimeMs: bigint | number | null }>(report: T) {
+  return {
+    ...report,
+    averageResolutionTimeMs: report.averageResolutionTimeMs === null ? null : Number(report.averageResolutionTimeMs),
+  };
 }
 
 function percent(part: number, total: number) {
@@ -311,7 +322,7 @@ export const premiumComplaintInsightsService = {
       orderBy: { generatedAt: "desc" },
       take: 20,
     });
-    return { reports };
+    return { reports: reports.map(serializeInsightReport) };
   },
 
   async latest(actor: CustomerIssueActor, query: ComplaintInsightQuery) {
@@ -321,7 +332,7 @@ export const premiumComplaintInsightsService = {
       where: { businessId: actor.businessId, timeframe: query.timeframe },
       orderBy: { generatedAt: "desc" },
     });
-    return { report };
+    return { report: report ? serializeInsightReport(report) : null };
   },
 
   async memory(actor: CustomerIssueActor) {
@@ -359,10 +370,9 @@ export const premiumComplaintInsightsService = {
         include: {
           lead: { select: { id: true } },
           responsibleMember: { select: { id: true, role: true } },
-        },
-        orderBy: { createdAt: "asc" },
-        take: 500,
-      }),
+	        },
+	        orderBy: { createdAt: "asc" },
+	      }),
       prisma.customerIssueLog.findMany({
         where: { businessId: actor.businessId, createdAt: { gte: previousStart, lt: periodStart } },
         select: { id: true },
@@ -408,7 +418,8 @@ export const premiumComplaintInsightsService = {
       recurringCustomers: customerCounts.filter((item) => item.count > 1).map((item) => ({ customerName: item.key, count: item.count })),
       averageResolutionTimeMs,
     });
-    const samples = issues.map((issue) => ({
+	    const promptIssues = issues.slice(-500);
+	    const samples = promptIssues.map((issue) => ({
       id: issue.id,
       category: issue.category,
       severity: issue.severity,
@@ -460,7 +471,7 @@ export const premiumComplaintInsightsService = {
       resolvedComplaints: metrics.resolvedComplaints,
       reopenedComplaints: metrics.reopenedComplaints,
       criticalComplaints: metrics.criticalComplaints,
-      averageResolutionTimeMs,
+      averageResolutionTimeMs: averageResolutionTimeForDb(averageResolutionTimeMs),
       aiSummary: ai.aiSummary,
       rootCauses: json(ai.rootCauses),
       trends: json(ai.trends),
@@ -504,6 +515,6 @@ export const premiumComplaintInsightsService = {
         alerts: ai.predictiveAlerts,
       }) : Promise.resolve(),
     ]);
-    return { report };
+    return { report: serializeInsightReport(report) };
   },
 };

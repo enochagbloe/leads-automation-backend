@@ -3,6 +3,7 @@ import { Request, RequestHandler } from "express";
 import { followUpCancellationService, followUpService } from "../services/follow-up.service";
 import {
   FollowUpJobListQuery,
+  FollowUpJobRetryInput,
   FollowUpLogListQuery,
   FollowUpRuleListQuery,
 } from "../validation/follow-up.schemas";
@@ -33,6 +34,7 @@ export const followUpController = {
   listJobs: async (req, res) => res.json(await followUpService.listJobs(actor(req), res.locals.validatedQuery as FollowUpJobListQuery)),
   getJob: async (req, res) => res.json(await followUpService.getJob(actor(req), param(req, "jobId"))),
   cancelJob: async (req, res) => res.json(await followUpCancellationService.cancelJob(actor(req), param(req, "jobId"), req.body.reason)),
+  retryJob: async (req, res) => res.json(await followUpService.retryJob(actor(req), param(req, "jobId"), req.body as FollowUpJobRetryInput)),
   listLogs: async (req, res) => res.json(await followUpService.listLogs(actor(req), res.locals.validatedQuery as FollowUpLogListQuery)),
   getLog: async (req, res) => res.json(await followUpService.getLog(actor(req), param(req, "logId"))),
   testTrigger: async (req, res) => res.status(201).json(await followUpService.testTrigger(actor(req), req.body)),

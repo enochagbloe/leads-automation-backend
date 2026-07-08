@@ -29,6 +29,7 @@ import { getWhatsAppIntegration, sendWhatsAppText } from "./whatsapp-provider.se
 import { appointmentInternalService } from "./appointment.service";
 import { aiHumanReviewService, humanReviewTypeForBlockedAi } from "./ai-human-review.service";
 import { customerIssueService } from "./customer-issue.service";
+import { followUpService } from "./follow-up.service";
 
 export type AiReplyActor = {
   userId: string;
@@ -927,9 +928,9 @@ export const aiReplyEngine = {
         }
       }
 
-      const settledMessage = await prisma.message.update({
-        where: { id: aiMessage.id },
-        data: {
+	      const settledMessage = await prisma.message.update({
+	        where: { id: aiMessage.id },
+	        data: {
           deliveryStatus,
           provider,
           providerMessageId,
@@ -940,10 +941,25 @@ export const aiReplyEngine = {
             providerMessageId,
             ...(sendError ? { error: sendError } : {}),
           }),
-        },
-      });
+	        },
+	      });
+	      await followUpService.scheduleNoResponseAfterOutboundMessage({
+	        businessId: conversation.businessId,
+	        conversationId: conversation.id,
+	        leadId: conversation.leadId,
+	        messageId: settledMessage.id,
+	        messageCreatedAt: settledMessage.createdAt,
+	        deliveryStatus: settledMessage.deliveryStatus,
+	      }).catch((error) => {
+	        console.error("Basic no-response follow-up scheduling failed after AI reply", {
+	          businessId: conversation.businessId,
+	          conversationId: conversation.id,
+	          messageId: settledMessage.id,
+	          error,
+	        });
+	      });
 
-      const customerIssueResult = isComplaintDecision(safety.decision)
+	      const customerIssueResult = isComplaintDecision(safety.decision)
         ? await customerIssueService.createFromAiDecision({
           businessId: conversation.businessId,
           businessAccountId: conversation.business.businessAccountId,

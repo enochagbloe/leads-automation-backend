@@ -3,7 +3,6 @@ import {
   FollowUpJobStatus,
   FollowUpRuleType,
   FollowUpSendLogDeliveryStatus,
-  PlanCode,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -23,7 +22,6 @@ export const followUpRuleCreateSchema = z.object({
   maxSendsPerConversation: z.number().int().min(1).max(20).default(1),
   cooldownMinutes: z.number().int().min(0).max(525_600).nullable().optional(),
   onlyDuringBusinessHours: z.boolean().default(true),
-  planRequired: z.nativeEnum(PlanCode).optional(),
 }).strict();
 
 export const followUpRuleUpdateSchema = followUpRuleCreateSchema.partial().strict().refine((value) => Object.keys(value).length > 0, {
@@ -54,6 +52,10 @@ export const followUpJobListQuerySchema = z.object({
 
 export const followUpJobCancelSchema = z.object({
   reason: z.string().trim().min(1).max(500).default("Cancelled by user."),
+}).strict();
+
+export const followUpJobRetrySchema = z.object({
+  scheduledFor: z.coerce.date().optional(),
 }).strict();
 
 export const followUpLogListQuerySchema = z.object({
@@ -88,5 +90,6 @@ export type FollowUpRuleCreateInput = z.infer<typeof followUpRuleCreateSchema>;
 export type FollowUpRuleUpdateInput = z.infer<typeof followUpRuleUpdateSchema>;
 export type FollowUpRuleListQuery = z.infer<typeof followUpRuleListQuerySchema>;
 export type FollowUpJobListQuery = z.infer<typeof followUpJobListQuerySchema>;
+export type FollowUpJobRetryInput = z.infer<typeof followUpJobRetrySchema>;
 export type FollowUpLogListQuery = z.infer<typeof followUpLogListQuerySchema>;
 export type FollowUpTestTriggerInput = z.infer<typeof followUpTestTriggerSchema>;

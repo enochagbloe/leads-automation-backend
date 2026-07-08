@@ -19,7 +19,7 @@ import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./
 import { realtimeService } from "./realtime.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { reopenConversationFromMessageActivity, type ReopenState } from "./conversation-lifecycle.service";
-import { followUpCancellationService } from "./follow-up.service";
+import { followUpCancellationService, followUpService } from "./follow-up.service";
 
 export type ConversationActor = {
   userId: string;
@@ -410,8 +410,27 @@ export const messageService = {
         assignedStaffId: conversation.assignedStaffId,
         payload: { conversationId, changes: { lastMessagePreview: message.content.slice(0, 240), lastMessageAt: message.createdAt } },
       });
-      if (integration) return settleWhatsAppMessage(actor, message, integration, conversation.lead.phone, conversation.assignedStaffId, context);
+      if (integration) {
+        const settled = await settleWhatsAppMessage(actor, message, integration, conversation.lead.phone, conversation.assignedStaffId, context);
+        await followUpService.scheduleNoResponseAfterOutboundMessage({
+          businessId: actor.businessId,
+          leadId: conversation.leadId,
+          conversationId,
+          messageId: settled.id,
+          messageCreatedAt: settled.createdAt,
+          deliveryStatus: settled.deliveryStatus,
+        });
+        return settled;
+      }
       await invalidateOutboundCaches(actor.businessId, conversationId, conversation.leadId);
+      await followUpService.scheduleNoResponseAfterOutboundMessage({
+        businessId: actor.businessId,
+        leadId: conversation.leadId,
+        conversationId,
+        messageId: message.id,
+        messageCreatedAt: message.createdAt,
+        deliveryStatus: message.deliveryStatus,
+      });
       return message;
     } catch (error) {
       await auditService.log({

@@ -85,6 +85,12 @@ export type RealtimeEventType =
   | "business.follow_up.job.sent"
   | "business.follow_up.job.failed"
   | "business.follow_up.context.evaluated"
+  | "business.follow_up.basic.no_response.scheduled"
+  | "business.follow_up.basic.no_response.sent"
+  | "business.follow_up.basic.contact_email.scheduled"
+  | "business.follow_up.basic.contact_email.sent"
+  | "business.follow_up.basic.appointment_reminder.scheduled"
+  | "business.follow_up.basic.appointment_reminder.sent"
   | "business.conversation.human_takeover.started"
   | "business.conversation.ai_resumed"
   | "business.conversation.updated";
