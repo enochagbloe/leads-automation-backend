@@ -23,17 +23,17 @@ export const ruleInclude = {
 
 export const jobInclude = {
   rule: { select: { id: true, type: true, name: true, enabled: true, planRequired: true } },
-  lead: { select: { id: true, fullName: true, phone: true, email: true, status: true } },
+  lead: { select: { id: true, fullName: true, phone: true, email: true, status: true, assignedStaffId: true } },
   conversation: { select: { id: true, displayId: true, status: true, assignedStaffId: true, channel: true } },
-  appointment: { select: { id: true, title: true, status: true, startTime: true, endTime: true, timezone: true, service: { select: { name: true } } } },
+  appointment: { select: { id: true, title: true, status: true, startTime: true, endTime: true, timezone: true, assignedStaffId: true, service: { select: { name: true } } } },
 } satisfies Prisma.FollowUpJobInclude;
 
 export const sendLogInclude = {
   rule: { select: { id: true, type: true, name: true } },
   job: { select: { id: true, status: true, contextType: true, scheduledFor: true } },
-  lead: { select: { id: true, fullName: true, phone: true, email: true } },
+  lead: { select: { id: true, fullName: true, phone: true, email: true, assignedStaffId: true } },
   conversation: { select: { id: true, displayId: true, status: true, assignedStaffId: true } },
-  appointment: { select: { id: true, title: true, status: true, startTime: true, timezone: true } },
+  appointment: { select: { id: true, title: true, status: true, startTime: true, timezone: true, assignedStaffId: true } },
 } satisfies Prisma.FollowUpSendLogInclude;
 
 export const FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES = [FollowUpSendLogDeliveryStatus.QUEUED, FollowUpSendLogDeliveryStatus.SENT] as const;
@@ -69,14 +69,30 @@ export function staffScopedConversationWhere(actor: FollowUpActor): Prisma.Conve
 export function jobAccessWhere(actor: FollowUpActor): Prisma.FollowUpJobWhereInput {
   return {
     businessId: actor.businessId,
-    ...(actor.role === BusinessRole.STAFF ? { conversation: staffScopedConversationWhere(actor) } : {}),
+    ...(actor.role === BusinessRole.STAFF
+      ? {
+        OR: [
+          { conversation: staffScopedConversationWhere(actor) },
+          { conversationId: null, lead: { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } },
+          { conversationId: null, leadId: null, appointment: { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } },
+        ],
+      }
+      : {}),
   };
 }
 
 export function logAccessWhere(actor: FollowUpActor): Prisma.FollowUpSendLogWhereInput {
   return {
     businessId: actor.businessId,
-    ...(actor.role === BusinessRole.STAFF ? { conversation: staffScopedConversationWhere(actor) } : {}),
+    ...(actor.role === BusinessRole.STAFF
+      ? {
+        OR: [
+          { conversation: staffScopedConversationWhere(actor) },
+          { conversationId: null, lead: { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } },
+          { conversationId: null, leadId: null, appointment: { OR: [{ assignedStaffId: actor.membershipId }, { assignedStaffId: null }] } },
+        ],
+      }
+      : {}),
   };
 }
 

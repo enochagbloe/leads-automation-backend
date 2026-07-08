@@ -76,6 +76,13 @@ export const followUpPlanPolicyService = {
   async assertRuleAllowed(actor: FollowUpActor, rule: { type: FollowUpRuleType }) {
     const policy = await this.policy(actor);
     const requiredPlan = requiredPlanForRuleType(rule.type);
+    if (rule.type === FollowUpRuleType.AFTER_QUOTE_SENT) {
+      throw new AppError(422, "Quote/payment follow-up requires the quote/payment request module.", "FOLLOW_UP_DEPENDENCY_NOT_READY", {
+        currentPlan: policy.plan,
+        requiredPlan,
+        ruleType: rule.type,
+      });
+    }
     if (policy.subscription.status !== SubscriptionStatus.ACTIVE && policy.subscription.status !== SubscriptionStatus.TRIALING) {
       throw new AppError(403, "Subscription is inactive.", "SUBSCRIPTION_INACTIVE");
     }

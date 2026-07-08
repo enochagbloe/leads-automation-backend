@@ -2,7 +2,9 @@ import {
   AuditAction,
   FollowUpJobStatus,
   FollowUpRuleType,
+  PlanCode,
   Prisma,
+  SubscriptionStatus,
 } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
@@ -21,6 +23,7 @@ import { followUpBasicService } from "./follow-up/follow-up-basic.service";
 import { followUpCancellationService } from "./follow-up/follow-up-cancellation.service";
 import { followUpEligibilityService } from "./follow-up/follow-up-eligibility.service";
 import { followUpJobProcessorService } from "./follow-up/follow-up-processor.service";
+import { followUpPlusService } from "./follow-up/follow-up-plus.service";
 import {
   assertFollowUpRuleSettingsWithinPolicy,
   followUpPlanPolicyService,
@@ -48,20 +51,71 @@ export { followUpEligibilityService } from "./follow-up/follow-up-eligibility.se
 export { followUpJobProcessorService } from "./follow-up/follow-up-processor.service";
 export { followUpJobSchedulerService } from "./follow-up/follow-up-scheduler.service";
 export { followUpPlanPolicyService } from "./follow-up/follow-up-policy.service";
+export { followUpPlusService } from "./follow-up/follow-up-plus.service";
 export { followUpTemplateRendererService } from "./follow-up/follow-up-template.service";
 
 export const followUpService = {
   async ensureDefaultRulesForBusiness(actor: FollowUpActor) {
     if (!isManager(actor)) return;
-    const count = await prisma.followUpAutomationRule.count({ where: { businessId: actor.businessId } });
-    if (count === 0) await this.seedDefaultRulesForBusiness(actor.businessId, actor.membershipId);
+    await this.seedDefaultRulesForBusiness(actor.businessId, actor.membershipId);
   },
 
   async seedDefaultRulesForBusiness(businessId: string, createdByMembershipId: string, db: FollowUpDb = prisma) {
-    const defaults: Array<Pick<FollowUpRuleCreateInput, "type" | "name" | "delayMinutes" | "messageTemplate">> = [
-      { type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE, name: "No response follow-up", delayMinutes: 1440, messageTemplate: "Hi {{customerName}}, just checking if you’d still like help with this." },
-      { type: FollowUpRuleType.CONTACT_EMAIL_REQUEST, name: "Ask for customer email", delayMinutes: 0, messageTemplate: "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp." },
-      { type: FollowUpRuleType.BEFORE_APPOINTMENT, name: "Appointment reminder", delayMinutes: 1440, messageTemplate: "Reminder: your appointment is scheduled for {{appointmentDate}} at {{appointmentTime}}." },
+    const business = await db.business.findUnique({ where: { id: businessId }, select: { businessAccountId: true } });
+    const subscription = business
+      ? await db.subscription.findFirst({
+        where: { businessAccountId: business.businessAccountId, status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] } },
+        include: { plan: true },
+        orderBy: { createdAt: "desc" },
+      })
+      : null;
+    const plusDefaults = subscription?.plan.code === PlanCode.PLUS || subscription?.plan.code === PlanCode.PREMIUM;
+    const defaults: Array<Pick<FollowUpRuleCreateInput, "type" | "name" | "delayMinutes" | "messageTemplate" | "useAiRewrite" | "maxSendsPerLead" | "maxSendsPerConversation">> = [
+      {
+        type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE,
+        name: "No response follow-up",
+        delayMinutes: 1440,
+        messageTemplate: plusDefaults ? "Hi, just checking if you’d still like help with this." : "Hi {{customerName}}, just checking if you’d still like help with this.",
+        useAiRewrite: plusDefaults,
+        maxSendsPerLead: plusDefaults ? 2 : 1,
+        maxSendsPerConversation: plusDefaults ? 2 : 1,
+      },
+      {
+        type: FollowUpRuleType.CONTACT_EMAIL_REQUEST,
+        name: "Ask for customer email",
+        delayMinutes: 0,
+        messageTemplate: "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp.",
+        useAiRewrite: plusDefaults,
+        maxSendsPerLead: 1,
+        maxSendsPerConversation: 1,
+      },
+      {
+        type: FollowUpRuleType.BEFORE_APPOINTMENT,
+        name: "Appointment reminder",
+        delayMinutes: 1440,
+        messageTemplate: "Reminder: your {{serviceName}} appointment is scheduled for {{appointmentDate}} at {{appointmentTime}}.",
+        useAiRewrite: plusDefaults,
+        maxSendsPerLead: 1,
+        maxSendsPerConversation: 1,
+      },
+      {
+        type: FollowUpRuleType.AFTER_APPOINTMENT,
+        name: "Post-appointment follow-up",
+        delayMinutes: 120,
+        messageTemplate: "Thanks for your time today. Was everything okay with the {{serviceName}} appointment?",
+        useAiRewrite: true,
+        maxSendsPerLead: 1,
+        maxSendsPerConversation: 1,
+      },
+      {
+        type: FollowUpRuleType.STALE_LEAD,
+        name: "Stale lead follow-up",
+        delayMinutes: 4320,
+        messageTemplate: "Hi, are you still interested in this service?",
+        useAiRewrite: true,
+        maxSendsPerLead: 1,
+        maxSendsPerConversation: 1,
+      },
     ];
     await Promise.all(defaults.map((rule) => db.followUpAutomationRule.upsert({
       where: { businessId_type: { businessId, type: rule.type } },
@@ -73,9 +127,9 @@ export const followUpService = {
         enabled: false,
         delayMinutes: rule.delayMinutes,
         messageTemplate: rule.messageTemplate,
-        useAiRewrite: false,
-        maxSendsPerLead: 1,
-        maxSendsPerConversation: 1,
+        useAiRewrite: rule.useAiRewrite,
+        maxSendsPerLead: rule.maxSendsPerLead,
+        maxSendsPerConversation: rule.maxSendsPerConversation,
         onlyDuringBusinessHours: true,
         planRequired: requiredPlanForRuleType(rule.type),
       },
@@ -315,6 +369,8 @@ export const followUpService = {
   scheduleNoResponseAfterOutboundMessage: followUpBasicService.scheduleNoResponseAfterOutboundMessage,
   scheduleContactEmailRequestForAppointment: followUpBasicService.scheduleContactEmailRequestForAppointment,
   scheduleAppointmentReminder: followUpBasicService.scheduleAppointmentReminder,
+  schedulePostAppointmentFollowUp: followUpPlusService.schedulePostAppointmentFollowUp,
+  scheduleStaleLeadFollowUp: followUpPlusService.scheduleStaleLeadFollowUp,
   cancelAppointmentReminderJobs: followUpCancellationService.cancelAppointmentReminderJobs,
 
   async testTrigger(actor: FollowUpActor, input: FollowUpTestTriggerInput) {
