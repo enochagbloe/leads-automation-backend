@@ -44,6 +44,7 @@ import { createSystemMessage } from "./message.service";
 import { realtimeService, RealtimeEventType } from "./realtime.service";
 import { notificationService } from "./notification.service";
 import { evaluatePremiumAppointmentAutoConfirmation } from "./premium-appointment-auto-confirm.service";
+import { followUpService } from "./follow-up.service";
 
 export type AppointmentActor = {
   userId: string;
@@ -1669,6 +1670,10 @@ async function createAppointmentFromValidatedInput(actor: AppointmentActor, inpu
   ]);
   await publishNotificationEvents(actor, appointment, confirmationNotifications);
   await publishNotificationEvents(actor, appointment, assignmentNotifications);
+  await followUpService.scheduleContactEmailRequestForAppointment(appointment);
+  if (appointment.status === AppointmentStatus.CONFIRMED || appointment.status === AppointmentStatus.RESCHEDULED) {
+    await followUpService.scheduleAppointmentReminder(appointment);
+  }
   return withAvailableActions(appointment);
 }
 
@@ -1787,6 +1792,8 @@ async function rescheduleAppointmentFromValidatedInput(actor: AppointmentActor, 
     }),
     publishAndInvalidate(actor, "business.appointment.rescheduled", updated),
   ]);
+  await followUpService.cancelAppointmentReminderJobs({ businessId: actor.businessId, appointmentId, reason: "APPOINTMENT_RESCHEDULED" });
+  await followUpService.scheduleAppointmentReminder(updated);
   return withAvailableActions(updated);
 }
 
@@ -2133,6 +2140,8 @@ export const appointmentService = {
       }),
       publishAndInvalidate(actor, "business.appointment.confirmed", updated),
     ]);
+    await followUpService.scheduleContactEmailRequestForAppointment(updated);
+    await followUpService.scheduleAppointmentReminder(updated);
     return withAvailableActions(updated);
   },
 
@@ -2169,6 +2178,7 @@ export const appointmentService = {
       audit(actor, AuditAction.APPOINTMENT_CANCELLED, updated.id, context, { previousValues: { status: existing.status }, newValues: { status: updated.status }, reasonProvided: true }),
       publishAndInvalidate(actor, "business.appointment.cancelled", updated),
     ]);
+    await followUpService.cancelAppointmentReminderJobs({ businessId: actor.businessId, appointmentId, reason: "APPOINTMENT_CANCELLED" });
     return withAvailableActions(updated);
   },
 

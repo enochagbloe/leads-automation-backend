@@ -26,6 +26,7 @@ import { businessMemberRouter } from "./routes/business-member.routes";
 import { meRouter } from "./routes/me.routes";
 import { customerIssueRouter } from "./routes/customer-issue.routes";
 import { knowledgeRouter } from "./routes/knowledge.routes";
+import { followUpRouter } from "./routes/follow-up.routes";
 
 export const app = express();
 
@@ -59,6 +60,7 @@ app.get("/api", (_req, res) => res.json({
     businessNotifications: "/api/business/notifications",
     businessMembers: "/api/business/members",
     businessCustomerIssues: "/api/business/customer-issues",
+    businessFollowUp: "/api/business/follow-up",
     businessKnowledge: "/api/business/knowledge",
     businessLeads: "/api/business/leads",
     businessConversations: "/api/business/conversations",
@@ -99,6 +101,7 @@ app.use("/api/business/appointments", appointmentRouter);
 app.use("/api/business/notifications", notificationRouter);
 app.use("/api/business/members", businessMemberRouter);
 app.use("/api/business/customer-issues", customerIssueRouter);
+app.use("/api/business/follow-up", followUpRouter);
 app.use("/api/business/knowledge", knowledgeRouter);
 app.use("/api/business/leads", leadRouter);
 app.use("/api/business/conversations", conversationRouter);
