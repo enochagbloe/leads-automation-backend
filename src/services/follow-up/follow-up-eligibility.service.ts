@@ -2,6 +2,7 @@ import {
   AppointmentStatus,
   BusinessStatus,
   ConversationStatus,
+  CustomerIssueStatus,
   FollowUpJobStatus,
   FollowUpRuleType,
   FollowUpSendLogDeliveryStatus,
@@ -20,11 +21,15 @@ export const followUpEligibilityService = {
     if (!job.rule.enabled || job.rule.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "FOLLOW_UP_RULE_DISABLED" };
     if (!job.business.followUpAutomationEnabled) return { eligible: false, action: "CANCEL" as const, reason: "FOLLOW_UP_AUTOMATION_DISABLED" };
     if (job.business.status !== BusinessStatus.ACTIVE || job.business.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "BUSINESS_INACTIVE" };
+    if (job.rule.type === FollowUpRuleType.AFTER_QUOTE_SENT) return { eligible: false, action: "SKIP" as const, reason: "FOLLOW_UP_DEPENDENCY_NOT_READY" };
     if (job.rule.type === FollowUpRuleType.BEFORE_APPOINTMENT && (!job.appointment || job.appointment.startTime <= new Date())) {
       return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_ALREADY_STARTED" };
     }
     if (job.rule.type === FollowUpRuleType.CONTACT_EMAIL_REQUEST && job.lead?.email) {
       return { eligible: false, action: "CANCEL" as const, reason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE" };
+    }
+    if (job.rule.type === FollowUpRuleType.AFTER_APPOINTMENT && (!job.appointment || job.appointment.status !== AppointmentStatus.COMPLETED)) {
+      return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_NOT_COMPLETED" };
     }
 
     const subscription = await prisma.subscription.findFirst({
@@ -58,6 +63,21 @@ export const followUpEligibilityService = {
       || job.appointment.status === AppointmentStatus.NO_SHOW
       || job.appointment.status === AppointmentStatus.MISSED
     )) return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_NOT_ELIGIBLE" };
+
+    if (job.conversationId || job.leadId) {
+      const openIssue = await prisma.customerIssueLog.findFirst({
+        where: {
+          businessId: job.businessId,
+          OR: [
+            ...(job.conversationId ? [{ conversationId: job.conversationId }] : []),
+            ...(job.leadId ? [{ leadId: job.leadId }] : []),
+          ],
+          status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED] },
+        },
+        select: { id: true },
+      });
+      if (openIssue) return { eligible: false, action: "CANCEL" as const, reason: "UNRESOLVED_CUSTOMER_ISSUE" };
+    }
 
     const [leadSends, conversationSends] = await Promise.all([
       job.leadId ? prisma.followUpSendLog.count({ where: { businessId: job.businessId, ruleId: job.ruleId, leadId: job.leadId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),

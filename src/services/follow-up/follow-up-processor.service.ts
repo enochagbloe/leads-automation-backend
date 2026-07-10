@@ -1,4 +1,4 @@
-import { AuditAction, ConversationChannel, FollowUpJobStatus, FollowUpRuleType, FollowUpSendLogDeliveryStatus, FollowUpSendLogSentBy, LeadActivityAction, MessageDeliveryStatus, MessageDirection, MessageSenderType, MessageType, SubscriptionStatus } from "@prisma/client";
+import { AppointmentStatus, AuditAction, ConversationChannel, FollowUpJobStatus, FollowUpRuleType, FollowUpSendLogDeliveryStatus, FollowUpSendLogSentBy, LeadActivityAction, MessageDeliveryStatus, MessageDirection, MessageSenderType, MessageType, SubscriptionStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { auditService } from "../audit.service";
 import { realtimeService } from "../realtime.service";
@@ -7,17 +7,28 @@ import { followUpEligibilityService } from "./follow-up-eligibility.service";
 import { defaultMonthlyLimit } from "./follow-up-policy.service";
 import { followUpTemplateRendererService } from "./follow-up-template.service";
 import { FOLLOW_UP_PROCESSING_STALE_MS, FOLLOW_UP_DELIVERED_MESSAGE_STATUSES, jsonObject, businessHoursFollowUpDecision, nextFollowUpAllowedAfterCooldown, humanDate, humanTime, lockFollowUpMonthlyQuotaScope, FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES, cancelNoResponseFollowUpIfCustomerReplied, json } from "./follow-up.shared";
+import { followUpAiRewriteService } from "./follow-up-ai-rewrite.service";
+import { followUpBasicService } from "./follow-up-basic.service";
 
 function basicSentAuditAction(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return AuditAction.BASIC_CONTACT_EMAIL_REQUEST_SENT;
   if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return AuditAction.BASIC_APPOINTMENT_REMINDER_SENT;
-  return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SENT;
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SENT;
+  return AuditAction.FOLLOW_UP_JOB_SENT;
 }
 
 function basicSentEventType(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return "business.follow_up.basic.contact_email.sent" as const;
   if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return "business.follow_up.basic.appointment_reminder.sent" as const;
-  return "business.follow_up.basic.no_response.sent" as const;
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return "business.follow_up.basic.no_response.sent" as const;
+  return "business.follow_up.job.sent" as const;
+}
+
+function sentUsageEvent(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return "PLUS_FOLLOW_UP_NO_RESPONSE_SENT";
+  if (type === FollowUpRuleType.AFTER_APPOINTMENT) return "PLUS_POST_APPOINTMENT_FOLLOW_UP_SENT";
+  if (type === FollowUpRuleType.STALE_LEAD) return "PLUS_STALE_LEAD_FOLLOW_UP_SENT";
+  return "FOLLOW_UP_JOB_SENT";
 }
 
 // Base/shared section: crash recovery for jobs claimed by a previous processor run.
@@ -233,13 +244,36 @@ export const followUpJobProcessorService = {
         results.push(record);
         continue;
       }
-      const messageText = followUpTemplateRendererService.render(job.rule.messageTemplate, {
+      const renderedMessageText = followUpTemplateRendererService.render(job.rule.messageTemplate, {
         customerName: job.lead?.fullName,
         businessName: job.business.name,
         serviceName: job.appointment?.service?.name,
         appointmentDate: job.appointment ? humanDate(job.appointment.startTime, job.appointment.timezone) : null,
         appointmentTime: job.appointment ? humanTime(job.appointment.startTime, job.appointment.timezone) : null,
       });
+      const rewrite = job.rule.useAiRewrite
+        ? await followUpAiRewriteService.rewrite({
+          businessId,
+          businessAccountId: job.business.businessAccountId,
+          businessName: job.business.name,
+          ruleType: job.rule.type,
+          contextType: job.contextType,
+          renderedTemplate: renderedMessageText,
+        })
+        : { text: renderedMessageText, usedAiRewrite: false, failed: false, reason: null };
+      const messageText = rewrite.text;
+      if (rewrite.usedAiRewrite || rewrite.failed) {
+        await auditService.log({
+          action: rewrite.usedAiRewrite ? AuditAction.FOLLOW_UP_JOB_SCHEDULED : AuditAction.FOLLOW_UP_JOB_FAILED,
+          businessId,
+          metadata: json({
+            jobId: job.id,
+            ruleId: job.ruleId,
+            usageEvent: rewrite.usedAiRewrite ? "PLUS_AI_REWRITE_USED" : "PLUS_AI_REWRITE_FAILED",
+            reason: rewrite.reason,
+          }),
+        });
+      }
       if (!job.conversationId || !job.leadId || !job.lead?.phone || job.conversation?.channel !== ConversationChannel.WHATSAPP) {
         const failed = await prisma.$transaction(async (tx) => {
           const markedFailed = await tx.followUpJob.updateMany({
@@ -257,7 +291,7 @@ export const followUpJobProcessorService = {
               appointmentId: job.appointmentId,
               quoteId: job.quoteId,
               messageText,
-              sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
+              sentBy: rewrite.usedAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
               deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
               failureReason: "WHATSAPP_NOT_CONNECTED",
             },
@@ -294,7 +328,7 @@ export const followUpJobProcessorService = {
               appointmentId: job.appointmentId,
               quoteId: job.quoteId,
               messageText,
-              sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
+              sentBy: rewrite.usedAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
               deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
               failureReason: "WHATSAPP_NOT_CONNECTED",
             },
@@ -391,6 +425,48 @@ export const followUpJobProcessorService = {
                   job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }),
                   sent: false,
                   reason: "CUSTOMER_EMAIL_ALREADY_AVAILABLE",
+                };
+              }
+            }
+            if (job.rule.type === FollowUpRuleType.AFTER_APPOINTMENT) {
+              const appointment = job.appointmentId
+                ? await tx.appointment.findFirst({
+                  where: { id: job.appointmentId, businessId },
+                  select: { id: true, status: true },
+                })
+                : null;
+              if (!appointment || appointment.status !== AppointmentStatus.COMPLETED) {
+                const cancelled = await tx.followUpJob.updateMany({
+                  where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+                  data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "APPOINTMENT_NOT_COMPLETED", processingStartedAt: null },
+                });
+                if (cancelled.count !== 1) return null;
+                return {
+                  job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }),
+                  sent: false,
+                  reason: "APPOINTMENT_NOT_COMPLETED",
+                };
+              }
+            }
+            if (job.rule.type === FollowUpRuleType.STALE_LEAD) {
+              const recentMessage = await tx.message.findFirst({
+                where: { businessId, leadId, deletedAt: null, createdAt: { gt: job.createdAt } },
+                select: { id: true },
+              });
+              const recentAppointment = await tx.appointment.findFirst({
+                where: { businessId, leadId, createdAt: { gt: job.createdAt } },
+                select: { id: true },
+              });
+              if (recentMessage || recentAppointment) {
+                const cancelled = await tx.followUpJob.updateMany({
+                  where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
+                  data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "STALE_LEAD_ACTIVITY_OCCURRED", processingStartedAt: null },
+                });
+                if (cancelled.count !== 1) return null;
+                return {
+                  job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }),
+                  sent: false,
+                  reason: "STALE_LEAD_ACTIVITY_OCCURRED",
                 };
               }
             }
@@ -593,7 +669,7 @@ export const followUpJobProcessorService = {
             appointmentId: job.appointmentId,
             quoteId: job.quoteId,
             messageText,
-            sentBy: job.rule.useAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
+            sentBy: rewrite.usedAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
             deliveryStatus: followUpDeliveryStatus,
             whatsappMessageId: providerResult.providerMessageId,
             failureReason: providerResult.success ? null : providerResult.error ?? "WHATSAPP_SEND_FAILED",
@@ -624,10 +700,20 @@ export const followUpJobProcessorService = {
         results.push(completed.job);
         continue;
       }
-          await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id }) });
-          await auditService.log({ action: basicSentAuditAction(job.rule.type), businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id, conversationId, leadId, appointmentId: job.appointmentId }) });
+          await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_SENT, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id, usageEvent: sentUsageEvent(job.rule.type), aiRewriteUsed: rewrite.usedAiRewrite }) });
+          await auditService.log({ action: basicSentAuditAction(job.rule.type), businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, messageId: followUpMessage.id, conversationId, leadId, appointmentId: job.appointmentId, usageEvent: sentUsageEvent(job.rule.type) }) });
           realtimeService.publish({ type: "business.follow_up.job.sent", businessId, conversationId, leadId, payload: { job: completed.job }, broadcastToStaff: true });
           realtimeService.publish({ type: basicSentEventType(job.rule.type), businessId, conversationId, leadId, payload: { job: completed.job, message: completed.message }, broadcastToStaff: true });
+          if (job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) {
+            await followUpBasicService.scheduleNoResponseAfterOutboundMessage({
+              businessId,
+              leadId,
+              conversationId,
+              messageId: followUpMessage.id,
+              messageCreatedAt: completed.message.createdAt,
+              deliveryStatus,
+            });
+          }
       results.push(completed.job);
     }
     return results;

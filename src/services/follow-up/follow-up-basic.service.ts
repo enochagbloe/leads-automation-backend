@@ -38,19 +38,28 @@ type BasicFollowUpScheduleInput = {
   replaceScheduledNoResponse?: boolean;
 };
 
-function basicScheduledAuditAction(type: FollowUpRuleType) {
+function scheduledAuditAction(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return AuditAction.BASIC_CONTACT_EMAIL_REQUEST_SCHEDULED;
   if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return AuditAction.BASIC_APPOINTMENT_REMINDER_SCHEDULED;
-  return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SCHEDULED;
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return AuditAction.BASIC_NO_RESPONSE_FOLLOW_UP_SCHEDULED;
+  return AuditAction.FOLLOW_UP_JOB_SCHEDULED;
 }
 
-function basicScheduledEventType(type: FollowUpRuleType) {
+function scheduledUsageEvent(type: FollowUpRuleType) {
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return "PLUS_FOLLOW_UP_NO_RESPONSE_SCHEDULED";
+  if (type === FollowUpRuleType.AFTER_APPOINTMENT) return "PLUS_POST_APPOINTMENT_FOLLOW_UP_SCHEDULED";
+  if (type === FollowUpRuleType.STALE_LEAD) return "PLUS_STALE_LEAD_FOLLOW_UP_SCHEDULED";
+  return "FOLLOW_UP_JOB_SCHEDULED";
+}
+
+function scheduledEventType(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return "business.follow_up.basic.contact_email.scheduled" as const;
   if (type === FollowUpRuleType.BEFORE_APPOINTMENT) return "business.follow_up.basic.appointment_reminder.scheduled" as const;
-  return "business.follow_up.basic.no_response.scheduled" as const;
+  if (type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) return "business.follow_up.basic.no_response.scheduled" as const;
+  return "business.follow_up.job.scheduled" as const;
 }
 
-async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
+export async function scheduleFollowUpAutomationJob(input: BasicFollowUpScheduleInput) {
   const result = await prisma.$transaction(async (tx) => {
     const business = await tx.business.findUnique({
       where: { id: input.businessId },
@@ -65,6 +74,7 @@ async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
       orderBy: { createdAt: "desc" },
     });
     if (!subscription) return { scheduled: false, reason: "SUBSCRIPTION_INACTIVE" as const };
+    if (input.type === FollowUpRuleType.AFTER_QUOTE_SENT) return { scheduled: false, reason: "FOLLOW_UP_DEPENDENCY_NOT_READY" as const };
     if (!ruleTypesForPlan(subscription.plan.code).includes(input.type)) return { scheduled: false, reason: "PLAN_UPGRADE_REQUIRED" as const };
 
     const rule = await tx.followUpAutomationRule.findFirst({
@@ -95,11 +105,14 @@ async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
       || conversation.humanTakeover
     )) return { scheduled: false, reason: "CONVERSATION_NOT_ELIGIBLE" as const };
 
-    if (input.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE && input.conversationId) {
+    if (input.conversationId || input.leadId) {
       const openIssue = await tx.customerIssueLog.findFirst({
         where: {
           businessId: input.businessId,
-          conversationId: input.conversationId,
+          OR: [
+            ...(input.conversationId ? [{ conversationId: input.conversationId }] : []),
+            ...(input.leadId ? [{ leadId: input.leadId }] : []),
+          ],
           status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED] },
         },
         select: { id: true },
@@ -128,6 +141,21 @@ async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
       if (!appointment || (appointment.status !== AppointmentStatus.CONFIRMED && appointment.status !== AppointmentStatus.RESCHEDULED)) return { scheduled: false, reason: "APPOINTMENT_NOT_CONFIRMED" as const };
       if (appointment.startTime <= new Date()) return { scheduled: false, reason: "APPOINTMENT_ALREADY_STARTED" as const };
     }
+
+    if (input.type === FollowUpRuleType.AFTER_APPOINTMENT) {
+      if (!appointment || appointment.status !== AppointmentStatus.COMPLETED) return { scheduled: false, reason: "APPOINTMENT_NOT_COMPLETED" as const };
+    }
+
+    if (input.type === FollowUpRuleType.STALE_LEAD) {
+      if (!lead) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
+    }
+
+    const [leadSends, conversationSends] = await Promise.all([
+      input.leadId ? tx.followUpSendLog.count({ where: { businessId: input.businessId, ruleId: rule.id, leadId: input.leadId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
+      input.conversationId ? tx.followUpSendLog.count({ where: { businessId: input.businessId, ruleId: rule.id, conversationId: input.conversationId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
+    ]);
+    if (input.leadId && leadSends >= rule.maxSendsPerLead) return { scheduled: false, reason: "MAX_SENDS_PER_LEAD_REACHED" as const };
+    if (input.conversationId && conversationSends >= rule.maxSendsPerConversation) return { scheduled: false, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" as const };
 
     if (input.replaceScheduledNoResponse && input.conversationId) {
       await tx.followUpJob.updateMany({
@@ -184,9 +212,10 @@ async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
 
   if (result.scheduled && result.rule && result.job) {
     await auditService.log({
-      action: basicScheduledAuditAction(result.rule.type),
+      action: scheduledAuditAction(result.rule.type),
       businessId: input.businessId,
       metadata: json({
+        usageEvent: scheduledUsageEvent(result.rule.type),
         ruleId: result.rule.id,
         jobId: result.job.id,
         leadId: result.job.leadId,
@@ -196,7 +225,7 @@ async function scheduleBasicFollowUpJob(input: BasicFollowUpScheduleInput) {
       }),
     });
     realtimeService.publish({
-      type: basicScheduledEventType(result.rule.type),
+      type: scheduledEventType(result.rule.type),
       businessId: input.businessId,
       conversationId: result.job.conversationId ?? undefined,
       leadId: result.job.leadId ?? undefined,
@@ -223,7 +252,7 @@ export const followUpBasicService = {
       where: { businessId: input.businessId, type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE, enabled: true, deletedAt: null },
       select: { delayMinutes: true },
     });
-    return scheduleBasicFollowUpJob({
+    return scheduleFollowUpAutomationJob({
       businessId: input.businessId,
       type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE,
       contextType: FollowUpContextType.GENERAL_NO_RESPONSE,
@@ -247,7 +276,7 @@ export const followUpBasicService = {
       where: { businessId: appointment.businessId, type: FollowUpRuleType.CONTACT_EMAIL_REQUEST, enabled: true, deletedAt: null },
       select: { delayMinutes: true },
     });
-    return scheduleBasicFollowUpJob({
+    return scheduleFollowUpAutomationJob({
       businessId: appointment.businessId,
       type: FollowUpRuleType.CONTACT_EMAIL_REQUEST,
       contextType: FollowUpContextType.CONTACT_EMAIL_REQUEST,
@@ -284,7 +313,7 @@ export const followUpBasicService = {
       });
       return { scheduled: false, reason: "APPOINTMENT_TOO_SOON_FOR_REMINDER" as const };
     }
-    return scheduleBasicFollowUpJob({
+    return scheduleFollowUpAutomationJob({
       businessId: appointment.businessId,
       type: FollowUpRuleType.BEFORE_APPOINTMENT,
       contextType: FollowUpContextType.APPOINTMENT_CONFIRMATION,

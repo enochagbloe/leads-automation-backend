@@ -2216,6 +2216,7 @@ export const appointmentService = {
     await Promise.all([
       audit(actor, AuditAction.APPOINTMENT_COMPLETED, updated.id, context, { previousValues: { status: existing.status }, newValues: { status: updated.status }, noteProvided: Boolean(completedNote?.trim()) }),
       publishAndInvalidate(actor, "business.appointment.completed", updated),
+      followUpService.schedulePostAppointmentFollowUp(updated),
     ]);
     return withAvailableActions(updated);
   },
