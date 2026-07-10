@@ -62,7 +62,7 @@ type AppointmentAiDecisionContext = {
   suggestedAction?: string | null;
 };
 
-type InternalCreateAppointmentInput = CreateAppointmentInput & {
+type InternalCreateAppointmentInput = Omit<CreateAppointmentInput, "source"> & {
   source: AppointmentSource;
   aiDecision?: AppointmentAiDecisionContext | null;
 };

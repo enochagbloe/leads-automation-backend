@@ -91,6 +91,7 @@ export const createAppointmentSchema = z.object({
   durationMinutes,
   locationType: z.nativeEnum(AppointmentLocationType).default(AppointmentLocationType.TO_BE_CONFIRMED),
   location: nullableText(500),
+  source: z.literal(AppointmentSource.MANUAL).optional(),
 }).strict().superRefine((input, context) => {
   if (!input.leadId && !input.conversationId && !input.customerPhone) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["customerPhone"], message: "customerPhone is required when no lead or conversation is provided" });
