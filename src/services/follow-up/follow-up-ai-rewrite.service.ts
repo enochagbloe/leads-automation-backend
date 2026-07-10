@@ -1,5 +1,6 @@
 import { FollowUpContextType, FollowUpRuleType, PlanCode } from "@prisma/client";
 import { aiProvider } from "../ai-provider.service";
+import { aiUsageService } from "../ai-usage.service";
 import { subscriptionService } from "../subscription.service";
 
 function significantNumbers(value: string) {
@@ -32,6 +33,7 @@ export const followUpAiRewriteService = {
       if (subscription.plan.code === PlanCode.BASIC) {
         return { text: input.renderedTemplate, usedAiRewrite: false, failed: false, reason: "PLAN_NOT_ALLOWED" as const };
       }
+      const usage = await aiUsageService.assertCanUseAiReplies(input.businessAccountId);
       const result = await aiProvider.generateCompletion({
         businessId: input.businessId,
         systemPrompt: [
@@ -50,9 +52,18 @@ export const followUpAiRewriteService = {
         maxTokens: 120,
         metadata: { source: "FOLLOW_UP_AI_REWRITE", ruleType: input.ruleType, contextType: input.contextType },
       });
+      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: result.totalTokens });
       const text = safeRewrite(input.renderedTemplate, result.rawText);
-      if (!text) return { text: input.renderedTemplate, usedAiRewrite: false, failed: true, reason: "AI_REWRITE_UNSAFE_OUTPUT" as const };
-      return { text, usedAiRewrite: true, failed: false, reason: null };
+      const providerMetadata = {
+        provider: result.provider,
+        model: result.finalModelUsed,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        totalTokens: result.totalTokens,
+        providerRequestCount: result.providerRequestCount,
+      };
+      if (!text) return { text: input.renderedTemplate, usedAiRewrite: false, failed: true, reason: "AI_REWRITE_UNSAFE_OUTPUT" as const, providerMetadata };
+      return { text, usedAiRewrite: true, failed: false, reason: null, providerMetadata };
     } catch {
       return { text: input.renderedTemplate, usedAiRewrite: false, failed: true, reason: "AI_REWRITE_FAILED" as const };
     }

@@ -67,6 +67,10 @@ const schema = z.object({
   KNOWLEDGE_PREMIUM_STORAGE_LIMIT_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024 * 1024),
   KNOWLEDGE_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   KNOWLEDGE_STORAGE_DIR: z.string().min(1).default("storage/knowledge"),
+  FOLLOW_UP_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  FOLLOW_UP_WORKER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
+  FOLLOW_UP_WORKER_BUSINESS_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(25),
+  FOLLOW_UP_WORKER_JOB_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(25),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === "production" && !value.RESEND_API_KEY) {
     context.addIssue({

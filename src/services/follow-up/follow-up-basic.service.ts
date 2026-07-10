@@ -97,6 +97,15 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
     if (input.leadId && !lead) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
     if (input.conversationId && !conversation) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
     if (input.appointmentId && !appointment) return { scheduled: false, reason: "APPOINTMENT_NOT_FOUND" as const };
+    if (input.leadId && conversation && conversation.leadId !== input.leadId) {
+      return { scheduled: false, reason: "FOLLOW_UP_TARGET_MISMATCH" as const };
+    }
+    if (input.leadId && appointment?.leadId && appointment.leadId !== input.leadId) {
+      return { scheduled: false, reason: "FOLLOW_UP_TARGET_MISMATCH" as const };
+    }
+    if (input.conversationId && appointment?.conversationId && appointment.conversationId !== input.conversationId) {
+      return { scheduled: false, reason: "FOLLOW_UP_TARGET_MISMATCH" as const };
+    }
     if (lead && (lead.status === LeadStatus.WON || lead.status === LeadStatus.LOST)) return { scheduled: false, reason: "LEAD_CLOSED" as const };
     if (conversation && (
       conversation.status === ConversationStatus.CLOSED

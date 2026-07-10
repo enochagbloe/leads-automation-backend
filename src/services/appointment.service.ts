@@ -2253,6 +2253,7 @@ export const appointmentService = {
     await Promise.all([
       audit(actor, AuditAction.APPOINTMENT_NO_SHOW, updated.id, context, { previousValues: { status: existing.status }, newValues: { status: updated.status }, noteProvided: Boolean(noShowReason?.trim()) }),
       publishAndInvalidate(actor, "business.appointment.no_show", updated),
+      followUpService.cancelPostAppointmentFollowUpJobs({ businessId: actor.businessId, appointmentId, reason: "APPOINTMENT_OUTCOME_CHANGED_FROM_COMPLETED" }),
     ]);
     return withAvailableActions(updated);
   },
@@ -2289,6 +2290,7 @@ export const appointmentService = {
     await Promise.all([
       audit(actor, AuditAction.APPOINTMENT_MISSED, updated.id, context, { previousValues: { status: existing.status }, newValues: { status: updated.status }, noteProvided: Boolean(missedReason?.trim()) }),
       publishAndInvalidate(actor, "business.appointment.missed", updated),
+      followUpService.cancelPostAppointmentFollowUpJobs({ businessId: actor.businessId, appointmentId, reason: "APPOINTMENT_OUTCOME_CHANGED_FROM_COMPLETED" }),
     ]);
     return withAvailableActions(updated);
   },

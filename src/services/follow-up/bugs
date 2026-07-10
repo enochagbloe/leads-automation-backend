@@ -225,3 +225,55 @@ AI rewrite safety fallback: good direction
 Stale PROCESSING recovery: good direction
 Ambiguous delivery protection: good direction
 Basic and Plus separation: good
+
+
+
+In src/services/follow-up.service.ts:
+
+> +        action: AuditAction.FOLLOW_UP_JOB_FAILED,
++        businessId,
++        metadata: json({
++          jobId: job.id,
++          recoveredFromStaleProcessing: true,
++          messageId: message.id,
++          deliveryStatus: message.deliveryStatus,
++          reason,
++        }),
++      });
++    }
++  }
++}
++
++export const followUpJobProcessorService = {
++  async processDueJobs(businessId: string, limit = 25) {
+P1 Badge Wire the processor into a running scheduler
+
+This processor is only defined/exported; a repo-wide search for processDueJobs finds no call from src/server.ts, any route, or a worker/cron entrypoint. In that deployment context the new scheduling paths only insert SCHEDULED rows, so enabled follow-up automation never actually sends due jobs unless some out-of-repo process is added.
+
+
+In src/services/follow-up.service.ts:
+
+> +        const monthlySends = await tx.followUpSendLog.count({
++          where: {
++            business: { businessAccountId: job.business.businessAccountId },
++            deliveryStatus: { in: [...FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES] },
++            createdAt: { gte: subscription.currentPeriodStart, lt: subscription.currentPeriodEnd },
++          },
++        });
++        if (monthlySends >= defaultMonthlyLimit(subscription.plan.code)) {
+P2 Badge Reserve quota before releasing the lock
+
+When multiple processors run and the account has one follow-up left, each worker can acquire this advisory lock, see the same monthlySends count, then release the transaction before any FollowUpSendLog is written later after WhatsApp delivery. Because no QUEUED/SENT reservation is created while the lock is held, concurrent jobs can all pass this check and exceed the monthly plan limit.
+
+
+In src/services/follow-up.service.ts:
+
+> +    const existingRule = await prisma.followUpAutomationRule.findFirst({
++      where: { businessId: actor.businessId, type: input.type },
++      select: { id: true, deletedAt: true },
++    });
++    if (existingRule) {
++      throw new AppError(409, "A follow-up rule for this type already exists.", "FOLLOW_UP_RULE_ALREADY_EXISTS", {
+P2 Badge Allow recreating soft-deleted rule types
+
+After deleteRule sets deletedAt, the row still matches this lookup and the schema also has a unique key on (businessId, type), so trying to recreate that rule type always returns 409. Since getRule/updateRule exclude deleted rows, users have no restore path and a single delete permanently consumes that follow-up type for the business.

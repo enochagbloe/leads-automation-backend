@@ -32,6 +32,7 @@ export const followUpRuleListQuerySchema = z.object({
   type: z.nativeEnum(FollowUpRuleType).optional(),
   enabled: z.coerce.boolean().optional(),
   includeDeleted: z.coerce.boolean().default(false),
+  includeLocked: z.coerce.boolean().default(false),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });

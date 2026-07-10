@@ -88,4 +88,24 @@ export const followUpCancellationService = {
     }
     return cancelled;
   },
+
+  async cancelPostAppointmentFollowUpJobs(input: { businessId: string; appointmentId: string; reason: string }) {
+    const cancelled = await prisma.followUpJob.updateMany({
+      where: {
+        businessId: input.businessId,
+        appointmentId: input.appointmentId,
+        contextType: FollowUpContextType.POST_APPOINTMENT_FEEDBACK,
+        status: FollowUpJobStatus.SCHEDULED,
+      },
+      data: { status: FollowUpJobStatus.CANCELLED, cancelReason: input.reason },
+    });
+    if (cancelled.count > 0) {
+      await auditService.log({
+        action: AuditAction.FOLLOW_UP_JOB_CANCELLED,
+        businessId: input.businessId,
+        metadata: json({ appointmentId: input.appointmentId, reason: input.reason, cancelledJobCount: cancelled.count }),
+      });
+    }
+    return cancelled;
+  },
 };

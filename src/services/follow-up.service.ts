@@ -179,11 +179,13 @@ export const followUpService = {
   async listRules(actor: FollowUpActor, query: FollowUpRuleListQuery) {
     assertCanView(actor);
     await this.ensureDefaultRulesForBusiness(actor);
+    const policy = await followUpPlanPolicyService.policy(actor);
     const where: Prisma.FollowUpAutomationRuleWhereInput = {
       businessId: actor.businessId,
       ...(query.includeDeleted ? {} : { deletedAt: null }),
       ...(query.type ? { type: query.type } : {}),
       ...(query.enabled !== undefined ? { enabled: query.enabled } : {}),
+      ...(query.includeLocked ? {} : { type: { in: policy.allowedRuleTypes } }),
     };
     const [data, total] = await prisma.$transaction([
       prisma.followUpAutomationRule.findMany({ where, include: ruleInclude, orderBy: [{ createdAt: "desc" }], skip: (query.page - 1) * query.limit, take: query.limit }),
@@ -212,6 +214,21 @@ export const followUpService = {
       select: { id: true, deletedAt: true },
     });
     if (existingRule) {
+      if (existingRule.deletedAt) {
+        const rule = await prisma.followUpAutomationRule.update({
+          where: { id: existingRule.id },
+          data: {
+            ...input,
+            deletedAt: null,
+            planRequired: requiredPlanForRuleType(input.type),
+            updatedByMembershipId: actor.membershipId,
+          },
+          include: ruleInclude,
+        });
+        await audit(actor, AuditAction.FOLLOW_UP_RULE_CREATED, { ruleId: rule.id, type: rule.type, restored: true });
+        realtimeService.publish({ type: "business.follow_up.rule.created", businessId: actor.businessId, payload: { rule, restored: true }, broadcastToStaff: true });
+        return rule;
+      }
       throw new AppError(409, "A follow-up rule for this type already exists.", "FOLLOW_UP_RULE_ALREADY_EXISTS", {
         ruleId: existingRule.id,
         type: input.type,
@@ -235,16 +252,24 @@ export const followUpService = {
   async updateRule(actor: FollowUpActor, ruleId: string, input: FollowUpRuleUpdateInput) {
     assertCanManage(actor);
     const existing = await this.getRule(actor, ruleId);
-    const type = input.type ?? existing.type;
+    if (input.type && input.type !== existing.type) {
+      throw new AppError(422, "Follow-up rule type cannot be changed after creation.", "FOLLOW_UP_RULE_TYPE_IMMUTABLE", {
+        ruleId: existing.id,
+        currentType: existing.type,
+        requestedType: input.type,
+      });
+    }
+    const type = existing.type;
     const policy = await followUpPlanPolicyService.assertRuleAllowed(actor, { type });
     assertFollowUpRuleSettingsWithinPolicy(policy, {
       useAiRewrite: input.useAiRewrite ?? existing.useAiRewrite,
       maxSendsPerLead: input.maxSendsPerLead ?? existing.maxSendsPerLead,
       maxSendsPerConversation: input.maxSendsPerConversation ?? existing.maxSendsPerConversation,
     });
+    const { type: _ignoredType, ...updateData } = input;
     const rule = await prisma.followUpAutomationRule.update({
       where: { id: existing.id },
-      data: { ...input, planRequired: requiredPlanForRuleType(type), updatedByMembershipId: actor.membershipId },
+      data: { ...updateData, planRequired: requiredPlanForRuleType(type), updatedByMembershipId: actor.membershipId },
       include: ruleInclude,
     });
     await audit(actor, AuditAction.FOLLOW_UP_RULE_UPDATED, { ruleId: rule.id, changes: Object.keys(input) });
@@ -372,6 +397,7 @@ export const followUpService = {
   schedulePostAppointmentFollowUp: followUpPlusService.schedulePostAppointmentFollowUp,
   scheduleStaleLeadFollowUp: followUpPlusService.scheduleStaleLeadFollowUp,
   cancelAppointmentReminderJobs: followUpCancellationService.cancelAppointmentReminderJobs,
+  cancelPostAppointmentFollowUpJobs: followUpCancellationService.cancelPostAppointmentFollowUpJobs,
 
   async testTrigger(actor: FollowUpActor, input: FollowUpTestTriggerInput) {
     assertCanManage(actor);
