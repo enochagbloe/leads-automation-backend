@@ -1,227 +1,374 @@
-P1 — Plus follow-up can still send after downgrade/rule disable race
 
-The processor checks eligibility before rendering/sending. That eligibility includes plan and rule checks. Good.
+The current processor now has a proper final delivery gate before WhatsApp send, which is a big improvement.  The eligibility service also correctly blocks several unsafe sends before processing continues.  The main service now handles locked rule visibility, immutable rule type, deleted-rule restore, and retry rules better. 
 
-But inside the final sending transaction, it re-checks subscription only for the monthly limit. It does not re-check:
+But there are still production bugs.
 
-current plan still allows the rule type
-rule is still enabled
-business follow-up automation is still enabled
-rule was not deleted
+---
 
-Race case:
+# P1 — Reserved `QUEUED` send logs can become orphaned and consume quota
 
-1. Plus stale-lead job starts PROCESSING.
-2. Eligibility passes.
-3. Business downgrades to Basic or manager disables rule.
-4. Processor still sends because final transaction does not re-check rule/plan/business enabled.
+Inside the final `prepared` transaction, the processor creates a `followUpSendLog` with:
 
-This matters because Plus rule types are gated by AFTER_APPOINTMENT and STALE_LEAD, while Basic should only have the Basic rule types. The policy service defines Basic, Plus, and Premium rule types correctly, but the final send path needs to re-check it at the last moment.
+```txt id="8xgf7h"
+deliveryStatus = QUEUED
+```
 
-Fix
+before it checks whether an existing follow-up message already exists.
 
-Inside the final prepared transaction, re-fetch the job with rule/business/subscription and verify again:
+Then if an existing message is already delivered, pending, or ambiguous, the function returns early. The reserved send log is not always updated to `SENT`, `FAILED`, or cancelled. 
 
-- business.followUpAutomationEnabled === true
-- rule.enabled === true
-- rule.deletedAt === null
-- current plan allows rule.type
-- subscription active/trialing
+Why this is dangerous:
 
-If not, cancel/skip before creating or sending the message.
+```txt id="vnf4df"
+1. Job enters PROCESSING.
+2. Processor creates QUEUED send log.
+3. Existing delivered/pending message is detected.
+4. Job returns early.
+5. QUEUED log remains.
+6. Monthly quota counts QUEUED + SENT logs.
+7. Business can lose quota for a message that was not actually sent in that attempt.
+```
 
+This is a real production bug because monthly usage includes `QUEUED` logs.
 
-P1 — Disabling automation cancels only SCHEDULED jobs, not PROCESSING jobs
+## Fix
 
-updateSettings() cancels scheduled jobs when automation is turned off, but jobs already in PROCESSING can continue. The current setting update cancels only FollowUpJobStatus.SCHEDULED.
+Move `reservedSendLog` creation **after** existing-message checks.
 
-Race case:
+Or guarantee every early return updates the reserved log:
 
-1. Follow-up job is claimed as PROCESSING.
-2. Owner disables follow-up automation.
-3. Existing PROCESSING job continues and sends anyway.
-Fix
+```txt id="jw2g76"
+FOLLOW_UP_ALREADY_DELIVERED → update reserved log to SENT or delete it
+FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION → update reserved log to FAILED or RECONCILIATION_REQUIRED
+FOLLOW_UP_COOLDOWN_ACTIVE → do not create send log
+PLAN_UPGRADE_REQUIRED → do not create send log
+```
 
-Do not blindly cancel PROCESSING jobs if delivery may have started. Instead:
+Best rule:
 
-1. Mark automation disabled.
-2. Final send transaction must re-check business.followUpAutomationEnabled.
-3. If delivery has not started, cancel job.
-4. If delivery has started, let reconciliation handle it safely.
+```txt id="ps5fy8"
+Only create a QUEUED send log when the system is definitely about to attempt delivery.
+```
 
-The key fix is the final pre-send re-check, not just cancelling more statuses.
+---
 
-P1 — Post-appointment follow-up can send after the customer already replied
+# P1 — Premium intelligence is leaking into the Plus processor path
 
-Plus adds AFTER_APPOINTMENT with context POST_APPOINTMENT_FEEDBACK. The scheduler creates the job after a completed appointment.
+The processor now imports and calls:
 
-But the inbound reply evaluator does not handle POST_APPOINTMENT_FEEDBACK. It handles contact email, location, date/time, quote/payment, and general no-response, then falls back to KEEP_FOLLOW_UP.
+```txt id="12zwhh"
+followUpPremiumIntelligenceService.evaluateBeforeSend()
+followUpPremiumIntelligenceService.composeMessage()
+```
 
-Bad case:
+for `NO_RESPONSE_AFTER_MESSAGE` jobs. 
 
-1. Appointment is completed.
-2. System schedules post-appointment follow-up for 2 hours later.
-3. Customer sends: “Everything was fine, thank you.”
-4. Evaluator does not recognize POST_APPOINTMENT_FEEDBACK.
-5. Follow-up still sends: “Was everything okay with the appointment?”
+That is dangerous unless the Premium service has a hard internal plan gate.
 
-That will feel robotic.
-
-Fix
-
-Add explicit handling for:
-
-FollowUpContextType.POST_APPOINTMENT_FEEDBACK
-
-Cancel if the customer replies meaningfully after the appointment/job is created. Also consider cancelling if the customer sends a complaint, because the complaint system already handles that separately.
-
-P1/P2 — Stale lead follow-up can be scheduled against mismatched lead/conversation
-
-The shared manual scheduler validates target consistency, but the internal scheduleFollowUpAutomationJob() path in follow-up-basic.service.ts checks existence and status, not full relationship consistency.
-
-Plus scheduleStaleLeadFollowUp() accepts an optional conversationId and passes it into the scheduler. If a wrong conversation ID is passed, the job can connect:
-
-leadId = Lead A
-conversationId = Lead B’s conversation
-
-The Plus scheduler does try to find a latest open WhatsApp conversation if none is provided, which is good. But when a caller provides conversationId, the lower scheduler still needs to verify conversation.leadId === leadId.
-
-Fix
-
-In scheduleFollowUpAutomationJob():
-
-if leadId and conversation exist:
-  conversation.leadId must equal leadId
-
-if appointment exists:
-  appointment.leadId must equal leadId
-  appointment.conversationId must equal conversationId if both exist
-
-This same fix protects Basic and Plus.
-
-P2 — Public schema still accepts planRequired
-
-The service now derives planRequired from rule type, which is correct. But the public schema still accepts planRequired.
-
-That is not currently a security bug because service overwrites it, but it is still bad API design.
-
-Fix
-
-Remove this from create/update schema:
-
-planRequired
-
-Frontend should never send this field. Backend owns it completely.
-
-P2 — Updating a rule type can collide with existing one-rule-per-type model
-
-The service prevents creating duplicate rule types and catches duplicate create errors. Good.
-
-But updateRule() allows changing type and does not appear to pre-check whether another rule with that target type already exists. If the DB has businessId_type unique, Prisma may throw raw P2002. If not, you can create duplicate rule-type behavior through update.
-
-Fix
-
-Either block changing rule type entirely:
-
-Rule type is immutable after creation.
-
-or before update:
-
-if input.type && input.type !== existing.type:
-  check no other rule exists for businessId + input.type
-
-For this system, I recommend rule type immutable.
-
-P2 — AI rewrite uses provider but does not appear to track AI usage/quota
-
-follow-up-ai-rewrite.service.ts checks subscription plan and calls the AI provider for Plus/Premium rewrites. It validates output with safeRewrite, which is good. But I do not see AI usage tracking or a separate rewrite quota in this service.
+I cannot verify that gate from the latest uploaded files because the Premium intelligence service file was not included in this latest batch.
 
 Risk:
 
-Plus account can trigger many AI rewrites through follow-ups.
-AI provider cost increases.
-AI usage limits may not reflect rewrite usage.
-Fix
+```txt id="dy4gy4"
+Plus or Basic no-response jobs may call Premium intelligence logic.
+This can cause wrong tier behavior, extra AI cost, or Premium-style message generation outside Premium.
+```
 
-Either:
+## Fix
 
-1. Track rewrite tokens under AI usage, or
-2. Add a separate monthly AI rewrite limit, or
-3. Disable rewrite when AI quota is exhausted.
+The processor itself should guard this before calling Premium logic:
 
-At minimum, log rewrite usage with provider/model/tokens if the provider returns them.
+```ts id="e3qneb"
+if (subscription.plan.code === PlanCode.PREMIUM && job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) {
+  // call premium intelligence
+}
+```
 
-P2 — AI rewrite failure is audited as FOLLOW_UP_JOB_FAILED even though job continues
+Plus should use:
 
-When rewrite fails, the code falls back to the original message. That is good.
+```txt id="j417u7"
+template rendering + optional AI rewrite
+```
 
-But it audits the rewrite failure using AuditAction.FOLLOW_UP_JOB_FAILED. That can make dashboards/reporting think the follow-up job failed even when it successfully sent with the original message.
+Premium should use:
 
-Fix
+```txt id="f7v5wd"
+context-aware intelligence / smart timing / smart message composition
+```
 
-Use a separate action:
+Do not rely only on the imported Premium service to protect tier boundaries.
 
-FOLLOW_UP_AI_REWRITE_FAILED
+---
 
-or audit as FOLLOW_UP_JOB_UPDATED / metadata-only event.
+# P1 — `retryJob()` is stale-write prone
 
-Do not use FOLLOW_UP_JOB_FAILED unless the actual follow-up job failed.
+`retryJob()` reads the job, checks that it is `FAILED`, then updates by ID:
 
-P2 — Ambiguous pending WhatsApp delivery still needs reconciliation
+```txt id="v15ln5"
+FAILED → SCHEDULED
+```
 
-The processor is safer now. It detects stale jobs, checks existing follow-up messages, and avoids blindly resending when delivery may already have started. That prevents duplicates.
+But it does not use compare-and-swap.
 
-But jobs can still land in:
+Race case:
 
+```txt id="eel91c"
+1. Manager opens a failed job.
+2. Reconciliation marks it SENT.
+3. Manager clicks retry from stale UI.
+4. retryJob() can reschedule a job that should no longer be retried.
+```
+
+This is especially risky because the processor now has reconciliation behavior.
+
+## Fix
+
+Use `updateMany()`:
+
+```ts id="t9e7bn"
+const changed = await prisma.followUpJob.updateMany({
+  where: {
+    id: job.id,
+    businessId: actor.businessId,
+    status: FollowUpJobStatus.FAILED,
+    failureReason: {
+      notIn: [
+        "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION",
+        "FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE",
+      ],
+    },
+  },
+  data: {
+    status: FollowUpJobStatus.SCHEDULED,
+    scheduledFor,
+    failureReason: null,
+    processingStartedAt: null,
+    sentAt: null,
+  },
+});
+
+if (changed.count !== 1) {
+  throw new AppError(409, "Follow-up job changed. Refresh and try again.", "FOLLOW_UP_JOB_STATE_CHANGED");
+}
+```
+
+Also block retry if an existing follow-up message for the job is already `SENT`, `DELIVERED`, or `READ`.
+
+---
+
+# P1/P2 — Stale lead follow-up can miss activity because it uses `job.createdAt`
+
+For `STALE_LEAD`, the processor cancels if it finds recent message or appointment activity after:
+
+```txt id="3b9xux"
+job.createdAt
+```
+
+But stale lead logic should compare against the stale baseline, not the job creation time. 
+
+Bad case:
+
+```txt id="f4lppx"
+1. Lead became stale from lastContactedAt.
+2. Scheduler creates stale job later.
+3. Customer activity happened after staleFrom but before job.createdAt.
+4. Processor checks only activity > job.createdAt.
+5. It may miss the activity and still send stale-lead follow-up.
+```
+
+## Fix
+
+Store the stale baseline in job metadata:
+
+```txt id="feepcw"
+staleFrom
+lastKnownLeadUpdatedAt
+lastKnownMessageAt
+lastKnownAppointmentAt
+```
+
+Then final send check should compare against that baseline:
+
+```ts id="ij0qtl"
+createdAt: { gt: staleFrom }
+```
+
+not `job.createdAt`.
+
+---
+
+# P2 — Reconciliation is local-state reconciliation, not provider reconciliation
+
+`reconcilePendingDeliveries()` checks local message status and marks jobs accordingly. That is useful, but it does not appear to query WhatsApp/Meta for the real provider delivery state. 
+
+So this is not full delivery reconciliation yet.
+
+Current behavior can still end with:
+
+```txt id="ofjkt8"
 FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION
-FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE
+```
 
-Manual retry blocks these ambiguous states, which is correct.
+That prevents duplicate sending, which is good, but operations still need a way to resolve it.
 
-Missing production piece
+## Fix
 
-Add a reconciliation worker:
+Either rename it honestly:
 
-1. Find old follow-up messages stuck in PENDING with deliveryAttemptStartedAt.
-2. Query WhatsApp/provider status if possible.
-3. Mark message/job/log as SENT or FAILED.
-4. Do not create/send a second message.
+```txt id="qktu65"
+reconcileLocalPendingFollowUpState()
+```
 
-Not a blocker for staging, but required before real businesses rely on it.
+or implement provider reconciliation:
 
-P2 — Plus post-appointment follow-up may ignore appointment outcome changes after scheduling
+```txt id="qjzmkv"
+1. Find old PENDING follow-up messages.
+2. Query provider status where possible.
+3. If provider confirms accepted/sent → mark SENT.
+4. If provider confirms failed/not found → mark FAILED.
+5. Never create a second message for the same job.
+```
 
-Eligibility cancels AFTER_APPOINTMENT unless appointment status is COMPLETED. Good.
+---
 
-But if a completed appointment is later changed to another outcome or adjusted by manager logic, the follow-up should be cancelled or re-evaluated. I did not see a dedicated cancellation hook for post-appointment follow-ups similar to appointment reminder cancellation.
+# P2 — `POST_APPOINTMENT_FEEDBACK` cancellation is only final-send, not proactive
 
-Fix
+The processor now checks before send whether the customer replied after the post-appointment job was created. Good. 
 
-When appointment outcome changes away from COMPLETED, cancel pending POST_APPOINTMENT_FEEDBACK jobs for that appointment.
+But the inbound-reply cancellation service should also cancel scheduled `POST_APPOINTMENT_FEEDBACK` jobs when the customer replies.
 
-P3 — Plus defaults are seeded even for Basic accounts
+Otherwise the job remains visible as scheduled until the processor eventually cancels it.
 
-seedDefaultRulesForBusiness() now creates Basic and Plus default rule rows for every business, with Plus rules disabled and planRequired derived.
+## Fix
 
-This is acceptable if the frontend shows locked upgrade cards. But if the frontend simply lists all rules, Basic users may see disabled Plus rules with AI rewrite settings and get confused.
+Add deterministic handling:
 
-Fix
+```txt id="mxo8dr"
+FollowUpContextType.POST_APPOINTMENT_FEEDBACK:
+- meaningful reply → CANCEL_FOLLOW_UP
+- complaint detected/open issue → CANCEL_FOLLOW_UP or let complaint system own it
+```
 
-Either:
+This is a UX and queue-cleanliness issue, not as serious as duplicate sending.
 
-Frontend shows Plus rules as locked upgrade features
+---
 
-or backend filters default Plus rules from Basic listRules() unless includeLocked=true.
+# P2 — AI rewrite usage/quota still needs confirmation
 
-What is good enough
+Plus allows AI rewrite. The processor audits AI rewrite metadata, but I do not see quota enforcement for AI rewrite usage in the uploaded Plus processor/service files. 
 
-These are now solid:
+Risk:
 
-Plus policy model: good
-Plus monthly limit 500: good
-AFTER_APPOINTMENT scheduling: good direction
-STALE_LEAD scheduling: good direction
-AI rewrite safety fallback: good direction
-Stale PROCESSING recovery: good direction
-Ambiguous delivery protection: good direction
-Basic and Plus separation: good
+```txt id="1dk42j"
+Plus account sends many follow-ups.
+Every follow-up uses AI rewrite.
+AI provider cost grows without a clear rewrite quota.
+```
+
+## Fix
+
+One of these:
+
+```txt id="fuzj0f"
+Option A: Count follow-up AI rewrite against existing AI usage quota.
+Option B: Add a dedicated monthly AI rewrite limit.
+Option C: Disable AI rewrite when AI quota is exhausted and fall back to template.
+```
+
+For V1, fallback is acceptable, but it should be intentional and logged.
+
+---
+
+# P2 — `deleteRule()` still cancels only scheduled jobs
+
+Deleting a rule cancels:
+
+```txt id="r0bnv8"
+SCHEDULED jobs
+```
+
+but not `PROCESSING` jobs. 
+
+The final delivery gate should catch disabled/deleted rule before sending, so this is mostly covered. But a `PROCESSING` job that already created a local message may remain noisy.
+
+## Fix
+
+Keep current safe final gate, but also add observability:
+
+```txt id="7zhzg8"
+When deleting a rule, report:
+- scheduled jobs cancelled
+- processing jobs pending final gate/reconciliation
+```
+
+Do not blindly cancel delivery-started jobs.
+
+---
+
+# P3 — Plus default upgrades do not update existing Basic defaults
+
+`seedDefaultRulesForBusiness()` uses `upsert` with `update: {}`. That means if a Basic business later upgrades to Plus, existing default rules stay with Basic-style values unless the user manually edits them. 
+
+Example:
+
+```txt id="umx5tc"
+Basic no-response rule:
+maxSendsPerLead = 1
+useAiRewrite = false
+
+After Plus upgrade:
+Still maxSendsPerLead = 1
+Still useAiRewrite = false
+```
+
+This may be intentional to avoid changing user settings. But if product expects Plus defaults to appear after upgrade, this needs a migration or “apply recommended Plus settings” action.
+
+---
+
+# What is approved directionally
+
+```txt id="7zt7gh"
+Plus rule model: good
+Plus plan policy: good
+Post-appointment follow-up: good direction
+Stale-lead follow-up: good direction
+Final send gate: much better
+Retry safety: improved but needs CAS
+Delivery reconciliation: good start
+Rule visibility/immutability: good
+```
+
+---
+
+# Final recommendation
+
+Do **not** merge Plus automation to production yet.
+
+Send backend this fix list:
+
+```txt id="s8doiq"
+Must fix before production merge:
+1. Move QUEUED send-log reservation after existing-message checks, or update it on every early return.
+2. Add processor-level Premium plan gate before calling Premium intelligence.
+3. Make retryJob() compare-and-swap safe and block retry when an existing message is already delivered.
+4. Store staleFrom/lastActivity baseline for stale-lead jobs and compare against that, not job.createdAt.
+
+Should fix:
+5. Make reconciliation query provider state, or rename it as local reconciliation.
+6. Add proactive POST_APPOINTMENT_FEEDBACK cancellation on inbound customer reply.
+7. Enforce or explicitly account for AI rewrite usage/quota.
+8. Add better reporting for processing jobs when a rule is deleted.
+9. Decide whether Plus upgrades should update default rule recommendations.
+```
+
+## Approval level
+
+```txt id="ntret4"
+Plus automation architecture: good
+Tier policy: mostly good
+Final send validation: improved
+Delivery safety: not final
+Main blocker: orphan QUEUED send logs + Premium intelligence leakage
+```
+
+The biggest bug is the `QUEUED` send-log reservation. It can silently burn monthly follow-up quota and corrupt send-log reporting.

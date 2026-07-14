@@ -1,4 +1,4 @@
-import { AuditAction, FollowUpContextType, FollowUpJobStatus } from "@prisma/client";
+import { AuditAction, CustomerIssueStatus, FollowUpContextType, FollowUpJobStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
 import { auditService } from "../audit.service";
@@ -37,7 +37,33 @@ export const followUpCancellationService = {
       select: { id: true, contextType: true, pendingQuestion: true, expectedResponseType: true },
     });
     if (pendingJobs.length === 0) return [];
-    const results = await followUpContextEvaluationService.evaluateInboundReplyAgainstPendingJobs({ ...input, pendingJobs });
+    const openIssue = await prisma.customerIssueLog.findFirst({
+      where: {
+        businessId: input.businessId,
+        conversationId: input.conversationId,
+        leadId: input.leadId,
+        status: { in: [CustomerIssueStatus.OPEN, CustomerIssueStatus.ACKNOWLEDGED, CustomerIssueStatus.REOPENED] },
+      },
+      select: { id: true },
+    });
+    const postAppointmentJobIds = new Set(
+      pendingJobs
+        .filter((job) => job.contextType === FollowUpContextType.POST_APPOINTMENT_FEEDBACK)
+        .map((job) => job.id),
+    );
+    const evaluatedResults = await followUpContextEvaluationService.evaluateInboundReplyAgainstPendingJobs({ ...input, pendingJobs });
+    const results = openIssue
+      ? evaluatedResults.map((result) => postAppointmentJobIds.has(result.jobId)
+        ? {
+          ...result,
+          doesReplyAddressPendingContext: true,
+          pendingContextResolved: true,
+          replyIntent: "CUSTOMER_ISSUE_OPEN",
+          action: "CANCEL_FOLLOW_UP" as const,
+          reason: "Customer issue is open for this conversation, so complaint handling owns the post-appointment follow-up.",
+        }
+        : result)
+      : evaluatedResults;
     for (const result of results) {
       if (result.action === "CANCEL_FOLLOW_UP") {
         await prisma.followUpJob.updateMany({
@@ -75,6 +101,26 @@ export const followUpCancellationService = {
         businessId: input.businessId,
         appointmentId: input.appointmentId,
         contextType: FollowUpContextType.APPOINTMENT_CONFIRMATION,
+        status: FollowUpJobStatus.SCHEDULED,
+      },
+      data: { status: FollowUpJobStatus.CANCELLED, cancelReason: input.reason },
+    });
+    if (cancelled.count > 0) {
+      await auditService.log({
+        action: AuditAction.FOLLOW_UP_JOB_CANCELLED,
+        businessId: input.businessId,
+        metadata: json({ appointmentId: input.appointmentId, reason: input.reason, cancelledJobCount: cancelled.count }),
+      });
+    }
+    return cancelled;
+  },
+
+  async cancelPostAppointmentFollowUpJobs(input: { businessId: string; appointmentId: string; reason: string }) {
+    const cancelled = await prisma.followUpJob.updateMany({
+      where: {
+        businessId: input.businessId,
+        appointmentId: input.appointmentId,
+        contextType: FollowUpContextType.POST_APPOINTMENT_FEEDBACK,
         status: FollowUpJobStatus.SCHEDULED,
       },
       data: { status: FollowUpJobStatus.CANCELLED, cancelReason: input.reason },

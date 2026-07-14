@@ -7,6 +7,7 @@ import {
   FollowUpRuleType,
   FollowUpSendLogDeliveryStatus,
   LeadStatus,
+  PlanCode,
   SubscriptionStatus,
 } from "@prisma/client";
 import { prisma } from "../../config/prisma";
@@ -83,8 +84,14 @@ export const followUpEligibilityService = {
       job.leadId ? prisma.followUpSendLog.count({ where: { businessId: job.businessId, ruleId: job.ruleId, leadId: job.leadId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
       job.conversationId ? prisma.followUpSendLog.count({ where: { businessId: job.businessId, ruleId: job.ruleId, conversationId: job.conversationId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
     ]);
-    if (leadSends >= job.rule.maxSendsPerLead) return { eligible: false, action: "SKIP" as const, reason: "MAX_SENDS_PER_LEAD_REACHED" };
-    if (conversationSends >= job.rule.maxSendsPerConversation) return { eligible: false, action: "SKIP" as const, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" };
+    const maxSendsPerLead = subscription.plan.code === PlanCode.PREMIUM && job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+      ? Math.max(job.rule.maxSendsPerLead, 3)
+      : job.rule.maxSendsPerLead;
+    const maxSendsPerConversation = subscription.plan.code === PlanCode.PREMIUM && job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+      ? Math.max(job.rule.maxSendsPerConversation, 3)
+      : job.rule.maxSendsPerConversation;
+    if (leadSends >= maxSendsPerLead) return { eligible: false, action: "SKIP" as const, reason: "MAX_SENDS_PER_LEAD_REACHED" };
+    if (conversationSends >= maxSendsPerConversation) return { eligible: false, action: "SKIP" as const, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" };
     return { eligible: true, action: "SEND" as const };
   },
 };

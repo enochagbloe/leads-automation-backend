@@ -8,14 +8,17 @@ import {
   appointmentCalendarQuerySchema,
   appointmentListQuerySchema,
   appointmentSettingsSchema,
+  approveAppointmentRescheduleRequestSchema,
   assignAppointmentSchema,
   cancelAppointmentSchema,
   checkAppointmentAvailabilitySchema,
   completeAppointmentSchema,
   confirmAppointmentSchema,
   createAppointmentSchema,
+  declineAppointmentRescheduleRequestSchema,
   missedAppointmentSchema,
   noShowAppointmentSchema,
+  requestAppointmentRescheduleSchema,
   rescheduleAppointmentSchema,
 } from "../validation/appointment.schemas";
 
@@ -29,6 +32,9 @@ appointmentRouter.get("/", validateQuery(appointmentListQuerySchema), appointmen
 appointmentRouter.post("/", mutationLimiter, validate(createAppointmentSchema), appointmentController.create);
 appointmentRouter.get("/:appointmentId", appointmentController.detail);
 appointmentRouter.patch("/:appointmentId/reschedule", mutationLimiter, validate(rescheduleAppointmentSchema), appointmentController.reschedule);
+appointmentRouter.post("/:appointmentId/reschedule-requests", mutationLimiter, validate(requestAppointmentRescheduleSchema), appointmentController.requestReschedule);
+appointmentRouter.post("/:appointmentId/reschedule-requests/:requestId/approve", mutationLimiter, validate(approveAppointmentRescheduleRequestSchema), appointmentController.approveRescheduleRequest);
+appointmentRouter.post("/:appointmentId/reschedule-requests/:requestId/decline", mutationLimiter, validate(declineAppointmentRescheduleRequestSchema), appointmentController.declineRescheduleRequest);
 appointmentRouter.patch("/:appointmentId/cancel", mutationLimiter, validate(cancelAppointmentSchema), appointmentController.cancel);
 appointmentRouter.patch("/:appointmentId/confirm", mutationLimiter, validate(confirmAppointmentSchema), appointmentController.confirm);
 appointmentRouter.patch("/:appointmentId/complete", mutationLimiter, validate(completeAppointmentSchema), appointmentController.complete);

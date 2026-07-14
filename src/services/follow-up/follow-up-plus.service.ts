@@ -47,7 +47,7 @@ export const followUpPlusService = {
     conversationId?: string | null;
     staleFrom?: Date | null;
   }) {
-    const [rule, lead] = await Promise.all([
+    const [rule, lead, overrideConversation] = await Promise.all([
       prisma.followUpAutomationRule.findFirst({
         where: { businessId: input.businessId, type: FollowUpRuleType.STALE_LEAD, enabled: true, deletedAt: null },
         select: { delayMinutes: true },
@@ -59,6 +59,11 @@ export const followUpPlusService = {
           status: true,
           updatedAt: true,
           lastContactedAt: true,
+          appointments: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { createdAt: true },
+          },
           conversations: {
             where: {
               deletedAt: null,
@@ -67,18 +72,34 @@ export const followUpPlusService = {
             },
             orderBy: [{ lastMessageAt: "desc" }, { createdAt: "desc" }],
             take: 1,
-            select: { id: true },
+            select: { id: true, lastMessageAt: true },
           },
         },
       }),
+      input.conversationId ? prisma.conversation.findFirst({
+        where: {
+          id: input.conversationId,
+          businessId: input.businessId,
+          deletedAt: null,
+          channel: ConversationChannel.WHATSAPP,
+          status: { notIn: [ConversationStatus.CLOSED, ConversationStatus.PLAN_LIMIT_BLOCKED] },
+        },
+        select: { id: true, leadId: true },
+      }) : Promise.resolve(null),
     ]);
     if (!lead) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
     if (lead.status === LeadStatus.WON || lead.status === LeadStatus.LOST) return { scheduled: false, reason: "LEAD_CLOSED" as const };
+    if (input.conversationId && !overrideConversation) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
+    if (overrideConversation && overrideConversation.leadId !== input.leadId) {
+      return { scheduled: false, reason: "FOLLOW_UP_TARGET_MISMATCH" as const };
+    }
 
-    const conversationId = input.conversationId ?? lead.conversations[0]?.id ?? null;
+    const conversationId = overrideConversation?.id ?? lead.conversations[0]?.id ?? null;
     if (!conversationId) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
 
     const staleFrom = input.staleFrom ?? lead.lastContactedAt ?? lead.updatedAt;
+    const lastKnownMessageAt = lead.conversations[0]?.lastMessageAt ?? null;
+    const lastKnownAppointmentAt = lead.appointments[0]?.createdAt ?? null;
     const scheduledFor = new Date(staleFrom.getTime() + (rule?.delayMinutes ?? 4320) * 60_000);
     return scheduleFollowUpAutomationJob({
       businessId: input.businessId,
@@ -89,6 +110,12 @@ export const followUpPlusService = {
       scheduledFor: scheduledFor > new Date() ? scheduledFor : new Date(),
       pendingQuestion: "Lead has been inactive and may still need help.",
       expectedResponseType: "LEAD_INTEREST_UPDATE",
+      metadata: {
+        staleFrom: staleFrom.toISOString(),
+        lastKnownLeadUpdatedAt: lead.updatedAt.toISOString(),
+        lastKnownMessageAt: lastKnownMessageAt?.toISOString() ?? null,
+        lastKnownAppointmentAt: lastKnownAppointmentAt?.toISOString() ?? null,
+      },
     });
   },
 };

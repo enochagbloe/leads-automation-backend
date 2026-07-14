@@ -49,6 +49,11 @@ export const followUpContextEvaluationService = {
           ? { jobId: job.id, doesReplyAddressPendingContext: true, pendingContextResolved: true, replyIntent: "MEANINGFUL_REPLY", extractedFields: {}, action: "CANCEL_FOLLOW_UP", reason: "Customer replied meaningfully." }
           : { jobId: job.id, doesReplyAddressPendingContext: false, pendingContextResolved: false, replyIntent: "UNCLEAR_REPLY", extractedFields: {}, action: "KEEP_FOLLOW_UP", reason: "Customer reply was too unclear to cancel the follow-up." };
       }
+      if (job.contextType === FollowUpContextType.POST_APPOINTMENT_FEEDBACK) {
+        return meaningfulReply(text)
+          ? { jobId: job.id, doesReplyAddressPendingContext: true, pendingContextResolved: true, replyIntent: "POST_APPOINTMENT_FEEDBACK_RECEIVED", extractedFields: {}, action: "CANCEL_FOLLOW_UP", reason: "Customer already responded after the appointment." }
+          : { jobId: job.id, doesReplyAddressPendingContext: false, pendingContextResolved: false, replyIntent: "UNCLEAR_POST_APPOINTMENT_REPLY", extractedFields: {}, action: "KEEP_FOLLOW_UP", reason: "Customer reply was too unclear to resolve post-appointment feedback." };
+      }
       return { jobId: job.id, doesReplyAddressPendingContext: false, pendingContextResolved: false, replyIntent: "UNCLASSIFIED_CONTEXT", extractedFields: {}, action: "KEEP_FOLLOW_UP", reason: "No deterministic resolver matched this context." };
     });
   },
