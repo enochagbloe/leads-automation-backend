@@ -132,7 +132,7 @@ export const followUpWorkerService = {
       await scheduleStaleLeadJobs(env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
       const businessIds = await dueBusinessIds(env.FOLLOW_UP_WORKER_BUSINESS_BATCH_SIZE);
       for (const businessId of businessIds) {
-        await followUpJobProcessorService.reconcilePendingDeliveries(businessId);
+        await followUpJobProcessorService.reconcileLocalPendingFollowUpState(businessId);
         await followUpJobProcessorService.processDueJobs(businessId, env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
       }
     } catch (error) {

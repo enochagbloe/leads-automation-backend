@@ -2,6 +2,7 @@ import {
   AuditAction,
   FollowUpJobStatus,
   FollowUpRuleType,
+  MessageDeliveryStatus,
   PlanCode,
   Prisma,
   SubscriptionStatus,
@@ -21,8 +22,7 @@ import {
 import { realtimeService } from "./realtime.service";
 import { followUpBasicService } from "./follow-up/follow-up-basic.service";
 import { followUpCancellationService } from "./follow-up/follow-up-cancellation.service";
-import { followUpEligibilityService } from "./follow-up/follow-up-eligibility.service";
-import { followUpJobProcessorService } from "./follow-up/follow-up-processor.service";
+import { followUpPremiumIntelligenceService } from "./follow-up/follow-up-premium-intelligence.service";
 import { followUpPlusService } from "./follow-up/follow-up-plus.service";
 import {
   assertFollowUpRuleSettingsWithinPolicy,
@@ -41,6 +41,7 @@ import {
   logAccessWhere,
   ruleInclude,
   sendLogInclude,
+  FOLLOW_UP_DELIVERED_MESSAGE_STATUSES,
 } from "./follow-up/follow-up.shared";
 import { FollowUpActor, FollowUpDb } from "./follow-up/follow-up.types";
 
@@ -51,6 +52,7 @@ export { followUpEligibilityService } from "./follow-up/follow-up-eligibility.se
 export { followUpJobProcessorService } from "./follow-up/follow-up-processor.service";
 export { followUpJobSchedulerService } from "./follow-up/follow-up-scheduler.service";
 export { followUpPlanPolicyService } from "./follow-up/follow-up-policy.service";
+export { followUpPremiumIntelligenceService } from "./follow-up/follow-up-premium-intelligence.service";
 export { followUpPlusService } from "./follow-up/follow-up-plus.service";
 export { followUpTemplateRendererService } from "./follow-up/follow-up-template.service";
 
@@ -70,21 +72,26 @@ export const followUpService = {
       })
       : null;
     const plusDefaults = subscription?.plan.code === PlanCode.PLUS || subscription?.plan.code === PlanCode.PREMIUM;
+    const premiumDefaults = subscription?.plan.code === PlanCode.PREMIUM;
+    const basicNoResponseTemplate = "Hi {{customerName}}, just checking if you’d still like help with this.";
+    const plusNoResponseTemplate = "Hi, just checking if you’d still like help with this.";
+    const contactEmailTemplate = "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp.";
+    const appointmentReminderTemplate = "Reminder: your {{serviceName}} appointment is scheduled for {{appointmentDate}} at {{appointmentTime}}.";
     const defaults: Array<Pick<FollowUpRuleCreateInput, "type" | "name" | "delayMinutes" | "messageTemplate" | "useAiRewrite" | "maxSendsPerLead" | "maxSendsPerConversation">> = [
       {
         type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE,
         name: "No response follow-up",
         delayMinutes: 1440,
-        messageTemplate: plusDefaults ? "Hi, just checking if you’d still like help with this." : "Hi {{customerName}}, just checking if you’d still like help with this.",
+        messageTemplate: plusDefaults ? plusNoResponseTemplate : basicNoResponseTemplate,
         useAiRewrite: plusDefaults,
-        maxSendsPerLead: plusDefaults ? 2 : 1,
-        maxSendsPerConversation: plusDefaults ? 2 : 1,
+        maxSendsPerLead: premiumDefaults ? 3 : plusDefaults ? 2 : 1,
+        maxSendsPerConversation: premiumDefaults ? 3 : plusDefaults ? 2 : 1,
       },
       {
         type: FollowUpRuleType.CONTACT_EMAIL_REQUEST,
         name: "Ask for customer email",
         delayMinutes: 0,
-        messageTemplate: "You can also share your email if you’d like us to send the details there. We can still continue here on WhatsApp.",
+        messageTemplate: contactEmailTemplate,
         useAiRewrite: plusDefaults,
         maxSendsPerLead: 1,
         maxSendsPerConversation: 1,
@@ -93,7 +100,7 @@ export const followUpService = {
         type: FollowUpRuleType.BEFORE_APPOINTMENT,
         name: "Appointment reminder",
         delayMinutes: 1440,
-        messageTemplate: "Reminder: your {{serviceName}} appointment is scheduled for {{appointmentDate}} at {{appointmentTime}}.",
+        messageTemplate: appointmentReminderTemplate,
         useAiRewrite: plusDefaults,
         maxSendsPerLead: 1,
         maxSendsPerConversation: 1,
@@ -135,6 +142,77 @@ export const followUpService = {
       },
       update: {},
     })));
+    if (plusDefaults) {
+      await Promise.all([
+        db.followUpAutomationRule.updateMany({
+          where: {
+            businessId,
+            type: FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE,
+            enabled: false,
+            deletedAt: null,
+            delayMinutes: 1440,
+            OR: [
+              {
+                messageTemplate: basicNoResponseTemplate,
+                useAiRewrite: false,
+                maxSendsPerLead: 1,
+                maxSendsPerConversation: 1,
+              },
+              {
+                messageTemplate: plusNoResponseTemplate,
+                useAiRewrite: true,
+                maxSendsPerLead: 2,
+                maxSendsPerConversation: 2,
+              },
+            ],
+          },
+          data: {
+            name: "No response follow-up",
+            messageTemplate: plusNoResponseTemplate,
+            useAiRewrite: true,
+            maxSendsPerLead: premiumDefaults ? 3 : 2,
+            maxSendsPerConversation: premiumDefaults ? 3 : 2,
+            planRequired: requiredPlanForRuleType(FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE),
+          },
+        }),
+        db.followUpAutomationRule.updateMany({
+          where: {
+            businessId,
+            type: FollowUpRuleType.CONTACT_EMAIL_REQUEST,
+            enabled: false,
+            deletedAt: null,
+            delayMinutes: 0,
+            messageTemplate: contactEmailTemplate,
+            useAiRewrite: false,
+            maxSendsPerLead: 1,
+            maxSendsPerConversation: 1,
+          },
+          data: {
+            name: "Ask for customer email",
+            useAiRewrite: true,
+            planRequired: requiredPlanForRuleType(FollowUpRuleType.CONTACT_EMAIL_REQUEST),
+          },
+        }),
+        db.followUpAutomationRule.updateMany({
+          where: {
+            businessId,
+            type: FollowUpRuleType.BEFORE_APPOINTMENT,
+            enabled: false,
+            deletedAt: null,
+            delayMinutes: 1440,
+            messageTemplate: appointmentReminderTemplate,
+            useAiRewrite: false,
+            maxSendsPerLead: 1,
+            maxSendsPerConversation: 1,
+          },
+          data: {
+            name: "Appointment reminder",
+            useAiRewrite: true,
+            planRequired: requiredPlanForRuleType(FollowUpRuleType.BEFORE_APPOINTMENT),
+          },
+        }),
+      ]);
+    }
   },
 
   async getSettings(actor: FollowUpActor) {
@@ -285,10 +363,37 @@ export const followUpService = {
       data: { enabled: false, deletedAt: new Date(), updatedByMembershipId: actor.membershipId },
       include: ruleInclude,
     });
-    await prisma.followUpJob.updateMany({ where: { businessId: actor.businessId, ruleId, status: FollowUpJobStatus.SCHEDULED }, data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "FOLLOW_UP_RULE_DELETED" } });
-    await audit(actor, AuditAction.FOLLOW_UP_RULE_DELETED, { ruleId });
-    realtimeService.publish({ type: "business.follow_up.rule.updated", businessId: actor.businessId, payload: { rule, deleted: true }, broadcastToStaff: true });
-    return { message: "Follow-up rule disabled successfully.", rule };
+    const [cancelled, processingJobsPendingFinalGate] = await Promise.all([
+      prisma.followUpJob.updateMany({
+        where: { businessId: actor.businessId, ruleId, status: FollowUpJobStatus.SCHEDULED },
+        data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "FOLLOW_UP_RULE_DELETED" },
+      }),
+      prisma.followUpJob.count({
+        where: { businessId: actor.businessId, ruleId, status: FollowUpJobStatus.PROCESSING },
+      }),
+    ]);
+    await audit(actor, AuditAction.FOLLOW_UP_RULE_DELETED, {
+      ruleId,
+      scheduledJobsCancelled: cancelled.count,
+      processingJobsPendingFinalGate,
+    });
+    realtimeService.publish({
+      type: "business.follow_up.rule.updated",
+      businessId: actor.businessId,
+      payload: {
+        rule,
+        deleted: true,
+        scheduledJobsCancelled: cancelled.count,
+        processingJobsPendingFinalGate,
+      },
+      broadcastToStaff: true,
+    });
+    return {
+      message: "Follow-up rule disabled successfully.",
+      rule,
+      scheduledJobsCancelled: cancelled.count,
+      processingJobsPendingFinalGate,
+    };
   },
 
   async listJobs(actor: FollowUpActor, query: FollowUpJobListQuery) {
@@ -332,12 +437,28 @@ export const followUpService = {
       where: { businessId: actor.businessId, deletedAt: null, metadata: { path: ["jobId"], equals: job.id } },
       orderBy: { createdAt: "desc" },
     });
-    if (existingMessage?.deliveryStatus === "PENDING" && typeof jsonObject(existingMessage.metadata).deliveryAttemptStartedAt === "string") {
+    if (existingMessage && FOLLOW_UP_DELIVERED_MESSAGE_STATUSES.includes(existingMessage.deliveryStatus)) {
+      throw new AppError(409, "This follow-up message was already delivered and cannot be retried.", "FOLLOW_UP_JOB_ALREADY_DELIVERED", {
+        messageId: existingMessage.id,
+        deliveryStatus: existingMessage.deliveryStatus,
+      });
+    }
+    if (existingMessage?.deliveryStatus === MessageDeliveryStatus.PENDING && typeof jsonObject(existingMessage.metadata).deliveryAttemptStartedAt === "string") {
       throw new AppError(409, "This follow-up has an ambiguous pending delivery and cannot be retried safely yet.", "FOLLOW_UP_DELIVERY_RECONCILIATION_REQUIRED", { messageId: existingMessage.id });
     }
     const scheduledFor = input.scheduledFor ?? new Date();
-    const updated = await prisma.followUpJob.update({
-      where: { id: job.id },
+    const changed = await prisma.followUpJob.updateMany({
+      where: {
+        id: job.id,
+        businessId: actor.businessId,
+        status: FollowUpJobStatus.FAILED,
+        failureReason: {
+          notIn: [
+            "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION",
+            "FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE",
+          ],
+        },
+      },
       data: {
         status: FollowUpJobStatus.SCHEDULED,
         scheduledFor,
@@ -345,13 +466,17 @@ export const followUpService = {
         processingStartedAt: null,
         sentAt: null,
       },
-      include: jobInclude,
     }).catch((error: unknown) => {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         throw new AppError(409, "A matching follow-up job is already scheduled.", "FOLLOW_UP_DUPLICATE_JOB");
       }
       throw error;
     });
+    if (changed.count !== 1) {
+      throw new AppError(409, "Follow-up job changed. Refresh and try again.", "FOLLOW_UP_JOB_STATE_CHANGED");
+    }
+    const updated = await prisma.followUpJob.findFirst({ where: { id: job.id, businessId: actor.businessId }, include: jobInclude });
+    if (!updated) throw new AppError(404, "Follow-up job not found.", "FOLLOW_UP_JOB_NOT_FOUND");
     await audit(actor, AuditAction.FOLLOW_UP_JOB_RESCHEDULED, { jobId: updated.id, ruleId: updated.ruleId, reason: "MANUAL_RETRY", scheduledFor });
     realtimeService.publish({
       type: "business.follow_up.job.rescheduled",
@@ -391,7 +516,11 @@ export const followUpService = {
     return log;
   },
 
-  scheduleNoResponseAfterOutboundMessage: followUpBasicService.scheduleNoResponseAfterOutboundMessage,
+  async scheduleNoResponseAfterOutboundMessage(input: Parameters<typeof followUpBasicService.scheduleNoResponseAfterOutboundMessage>[0]) {
+    const premium = await followUpPremiumIntelligenceService.scheduleNoResponseAfterOutboundMessage(input);
+    if (premium.scheduled || premium.reason !== "PLAN_NOT_PREMIUM") return premium;
+    return followUpBasicService.scheduleNoResponseAfterOutboundMessage(input);
+  },
   scheduleContactEmailRequestForAppointment: followUpBasicService.scheduleContactEmailRequestForAppointment,
   scheduleAppointmentReminder: followUpBasicService.scheduleAppointmentReminder,
   schedulePostAppointmentFollowUp: followUpPlusService.schedulePostAppointmentFollowUp,

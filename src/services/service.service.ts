@@ -163,11 +163,11 @@ function safeService<T extends object>(service: T): Omit<T, "businessId" | "crea
   return safe as Omit<T, "businessId" | "createdById" | "updatedById">;
 }
 
-function listKey(actor: ServiceActor, query: ServiceListQuery) {
+export function listKey(actor: ServiceActor, query: ServiceListQuery) {
   return `business:${actor.businessId}:services:list:${crypto.createHash("sha256").update(JSON.stringify({ query, role: actor.role })).digest("hex")}`;
 }
 
-function detailKey(businessId: string, serviceId: string, role: BusinessRole) {
+export function detailKey(businessId: string, serviceId: string, role: BusinessRole) {
   return `business:${businessId}:services:detail:${serviceId}:${role}`;
 }
 
@@ -175,7 +175,7 @@ function summaryKey(businessId: string, role: BusinessRole) {
   return `business:${businessId}:services:summary:${role}`;
 }
 
-async function invalidateServiceCaches(businessId: string, serviceId?: string) {
+export async function invalidateServiceCaches(businessId: string, serviceId?: string) {
   await Promise.all([
     invalidateBusinessKnowledgePreview(businessId, "SERVICES"),
     cacheService.delByPattern(`business:${businessId}:services:list:*`),
@@ -189,7 +189,7 @@ function asJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
-function assertSafeBookingRules(input: {
+export function assertSafeBookingRules(input: {
   autoConfirmEligible?: boolean;
   requiresManagerApproval?: boolean;
   capacityMode?: string;

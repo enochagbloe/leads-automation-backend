@@ -2,6 +2,7 @@ import { FollowUpContextType, FollowUpRuleType, PlanCode } from "@prisma/client"
 import { aiProvider } from "../ai-provider.service";
 import { aiUsageService } from "../ai-usage.service";
 import { subscriptionService } from "../subscription.service";
+import { AppError } from "../../utils/errors";
 
 function significantNumbers(value: string) {
   return Array.from(new Set(value.match(/\b\d+(?:[.,:]\d+)?\b/g) ?? []));
@@ -52,7 +53,10 @@ export const followUpAiRewriteService = {
         maxTokens: 120,
         metadata: { source: "FOLLOW_UP_AI_REWRITE", ruleType: input.ruleType, contextType: input.contextType },
       });
-      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: result.totalTokens });
+      await Promise.all([
+        aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: result.totalTokens }),
+        aiUsageService.trackReply({ accountUsageId: usage.usage.id }),
+      ]);
       const text = safeRewrite(input.renderedTemplate, result.rawText);
       const providerMetadata = {
         provider: result.provider,
@@ -64,7 +68,10 @@ export const followUpAiRewriteService = {
       };
       if (!text) return { text: input.renderedTemplate, usedAiRewrite: false, failed: true, reason: "AI_REWRITE_UNSAFE_OUTPUT" as const, providerMetadata };
       return { text, usedAiRewrite: true, failed: false, reason: null, providerMetadata };
-    } catch {
+    } catch (error) {
+      if (error instanceof AppError && error.code === "AI_QUOTA_EXCEEDED") {
+        return { text: input.renderedTemplate, usedAiRewrite: false, failed: false, reason: "AI_REWRITE_QUOTA_EXCEEDED" as const };
+      }
       return { text: input.renderedTemplate, usedAiRewrite: false, failed: true, reason: "AI_REWRITE_FAILED" as const };
     }
   },

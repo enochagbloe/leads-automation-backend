@@ -59,6 +59,11 @@ export const followUpPlusService = {
           status: true,
           updatedAt: true,
           lastContactedAt: true,
+          appointments: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { createdAt: true },
+          },
           conversations: {
             where: {
               deletedAt: null,
@@ -67,7 +72,7 @@ export const followUpPlusService = {
             },
             orderBy: [{ lastMessageAt: "desc" }, { createdAt: "desc" }],
             take: 1,
-            select: { id: true },
+            select: { id: true, lastMessageAt: true },
           },
         },
       }),
@@ -93,6 +98,8 @@ export const followUpPlusService = {
     if (!conversationId) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
 
     const staleFrom = input.staleFrom ?? lead.lastContactedAt ?? lead.updatedAt;
+    const lastKnownMessageAt = lead.conversations[0]?.lastMessageAt ?? null;
+    const lastKnownAppointmentAt = lead.appointments[0]?.createdAt ?? null;
     const scheduledFor = new Date(staleFrom.getTime() + (rule?.delayMinutes ?? 4320) * 60_000);
     return scheduleFollowUpAutomationJob({
       businessId: input.businessId,
@@ -103,6 +110,12 @@ export const followUpPlusService = {
       scheduledFor: scheduledFor > new Date() ? scheduledFor : new Date(),
       pendingQuestion: "Lead has been inactive and may still need help.",
       expectedResponseType: "LEAD_INTEREST_UPDATE",
+      metadata: {
+        staleFrom: staleFrom.toISOString(),
+        lastKnownLeadUpdatedAt: lead.updatedAt.toISOString(),
+        lastKnownMessageAt: lastKnownMessageAt?.toISOString() ?? null,
+        lastKnownAppointmentAt: lastKnownAppointmentAt?.toISOString() ?? null,
+      },
     });
   },
 };

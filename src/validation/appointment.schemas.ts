@@ -1,6 +1,7 @@
 import {
   AppointmentConfirmationMode,
   AppointmentLocationType,
+  AppointmentRescheduleRequestedBy,
   AppointmentSource,
   AppointmentStatus,
 } from "@prisma/client";
@@ -158,6 +159,54 @@ export const assignAppointmentSchema = z.object({
   assignedStaffId: z.string().cuid().nullable(),
 });
 
+export const requestAppointmentRescheduleSchema = z.object({
+  requestedBy: z.nativeEnum(AppointmentRescheduleRequestedBy).default(AppointmentRescheduleRequestedBy.CUSTOMER),
+  date: dateString.optional(),
+  time: timeString.optional(),
+  timezone: timezone.optional(),
+  durationMinutes,
+  requestedDateText: z.string().trim().max(240).nullable().optional(),
+  reason: z.string().trim().max(500).nullable().optional(),
+}).superRefine((input, context) => {
+  const hasStructuredTime = Boolean(input.date || input.time || input.timezone);
+  if (hasStructuredTime && (!input.date || !input.time || !input.timezone)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["date"],
+      message: "date, time, and timezone are required together for a structured reschedule request",
+    });
+  }
+  if (!hasStructuredTime && !input.requestedDateText?.trim()) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["requestedDateText"],
+      message: "Provide requestedDateText or date/time/timezone",
+    });
+  }
+});
+
+export const approveAppointmentRescheduleRequestSchema = z.object({
+  date: dateString.optional(),
+  time: timeString.optional(),
+  timezone: timezone.optional(),
+  durationMinutes,
+  reason: z.string().trim().max(500).nullable().optional(),
+}).superRefine((input, context) => {
+  const hasOverride = Boolean(input.date || input.time || input.timezone);
+  if (hasOverride && (!input.date || !input.time || !input.timezone)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["date"],
+      message: "date, time, and timezone are required together when overriding the requested time",
+    });
+  }
+});
+
+export const declineAppointmentRescheduleRequestSchema = z.object({
+  reason: z.string().trim().max(500).nullable().optional(),
+  alternativeTimes: z.array(z.string().trim().min(1).max(120)).max(5).optional(),
+});
+
 export type AppointmentListQuery = z.infer<typeof appointmentListQuerySchema>;
 export type AppointmentCalendarQuery = z.infer<typeof appointmentCalendarQuerySchema>;
 export type CheckAppointmentAvailabilityInput = z.infer<typeof checkAppointmentAvailabilitySchema>;
@@ -171,3 +220,6 @@ export type ConfirmAppointmentInput = z.infer<typeof confirmAppointmentSchema>;
 export type CompleteAppointmentInput = z.infer<typeof completeAppointmentSchema>;
 export type NoShowAppointmentInput = z.infer<typeof noShowAppointmentSchema>;
 export type MissedAppointmentInput = z.infer<typeof missedAppointmentSchema>;
+export type RequestAppointmentRescheduleInput = z.infer<typeof requestAppointmentRescheduleSchema>;
+export type ApproveAppointmentRescheduleRequestInput = z.infer<typeof approveAppointmentRescheduleRequestSchema>;
+export type DeclineAppointmentRescheduleRequestInput = z.infer<typeof declineAppointmentRescheduleRequestSchema>;

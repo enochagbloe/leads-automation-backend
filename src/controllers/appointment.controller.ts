@@ -19,6 +19,11 @@ function appointmentId(req: Request) {
   return Array.isArray(value) ? value[0]! : value!;
 }
 
+function rescheduleRequestId(req: Request) {
+  const value = req.params.requestId;
+  return Array.isArray(value) ? value[0]! : value!;
+}
+
 export const appointmentController = {
   list: async (req, res) => res.json(await appointmentService.list(actor(req), res.locals.validatedQuery as AppointmentListQuery)),
   calendar: async (req, res) => res.json(await appointmentService.calendar(actor(req), res.locals.validatedQuery as AppointmentCalendarQuery)),
@@ -29,6 +34,9 @@ export const appointmentController = {
   create: async (req, res) => res.status(201).json(await appointmentService.create(actor(req), req.body, requestMetadata(req))),
   detail: async (req, res) => res.json(await appointmentService.detail(actor(req), appointmentId(req))),
   reschedule: async (req, res) => res.json(await appointmentService.reschedule(actor(req), appointmentId(req), req.body, requestMetadata(req))),
+  requestReschedule: async (req, res) => res.status(201).json(await appointmentService.requestReschedule(actor(req), appointmentId(req), req.body, requestMetadata(req))),
+  approveRescheduleRequest: async (req, res) => res.json(await appointmentService.approveRescheduleRequest(actor(req), appointmentId(req), rescheduleRequestId(req), req.body, requestMetadata(req))),
+  declineRescheduleRequest: async (req, res) => res.json(await appointmentService.declineRescheduleRequest(actor(req), appointmentId(req), rescheduleRequestId(req), req.body, requestMetadata(req))),
   cancel: async (req, res) => res.json(await appointmentService.cancel(actor(req), appointmentId(req), req.body.reason, requestMetadata(req))),
   confirm: async (req, res) => res.json(await appointmentService.confirm(actor(req), appointmentId(req), req.body.note, requestMetadata(req))),
   complete: async (req, res) => res.json(await appointmentService.complete(actor(req), appointmentId(req), req.body.completedNote, requestMetadata(req))),

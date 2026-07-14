@@ -10,6 +10,7 @@ import {
   FollowUpSendLogDeliveryStatus,
   LeadStatus,
   MessageDeliveryStatus,
+  PlanCode,
   Prisma,
   SubscriptionStatus,
 } from "@prisma/client";
@@ -36,6 +37,7 @@ type BasicFollowUpScheduleInput = {
   pendingQuestion: string;
   expectedResponseType: string;
   replaceScheduledNoResponse?: boolean;
+  metadata?: Record<string, unknown>;
 };
 
 function scheduledAuditAction(type: FollowUpRuleType) {
@@ -163,8 +165,14 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
       input.leadId ? tx.followUpSendLog.count({ where: { businessId: input.businessId, ruleId: rule.id, leadId: input.leadId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
       input.conversationId ? tx.followUpSendLog.count({ where: { businessId: input.businessId, ruleId: rule.id, conversationId: input.conversationId, deliveryStatus: FollowUpSendLogDeliveryStatus.SENT } }) : Promise.resolve(0),
     ]);
-    if (input.leadId && leadSends >= rule.maxSendsPerLead) return { scheduled: false, reason: "MAX_SENDS_PER_LEAD_REACHED" as const };
-    if (input.conversationId && conversationSends >= rule.maxSendsPerConversation) return { scheduled: false, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" as const };
+    const maxSendsPerLead = subscription.plan.code === PlanCode.PREMIUM && input.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+      ? Math.max(rule.maxSendsPerLead, 3)
+      : rule.maxSendsPerLead;
+    const maxSendsPerConversation = subscription.plan.code === PlanCode.PREMIUM && input.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+      ? Math.max(rule.maxSendsPerConversation, 3)
+      : rule.maxSendsPerConversation;
+    if (input.leadId && leadSends >= maxSendsPerLead) return { scheduled: false, reason: "MAX_SENDS_PER_LEAD_REACHED" as const };
+    if (input.conversationId && conversationSends >= maxSendsPerConversation) return { scheduled: false, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" as const };
 
     if (input.replaceScheduledNoResponse && input.conversationId) {
       await tx.followUpJob.updateMany({
@@ -207,6 +215,7 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
         pendingQuestion: input.pendingQuestion,
         expectedResponseType: input.expectedResponseType,
         relatedMessageId: input.relatedMessageId ?? null,
+        metadata: input.metadata ? json(input.metadata) : undefined,
         scheduledFor,
       },
       include: jobInclude,
