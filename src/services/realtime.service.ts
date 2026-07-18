@@ -106,6 +106,13 @@ export type RealtimeEventType =
   | "business.follow_up.premium.no_response.scheduled"
   | "business.follow_up.premium.no_response.cancelled"
   | "business.follow_up.premium.no_response.rescheduled"
+  | "business.ai_prompt.created"
+  | "business.ai_prompt.updated"
+  | "business.ai_prompt.draft.saved"
+  | "business.ai_prompt.validation_completed"
+  | "business.ai_prompt.activated"
+  | "business.ai_prompt.deactivated"
+  | "business.ai_prompt.archived"
   | "business.conversation.human_takeover.started"
   | "business.conversation.ai_resumed"
   | "business.conversation.updated";
@@ -124,6 +131,7 @@ export type RealtimeEvent = {
 type PublishInput = Omit<RealtimeEvent, "id" | "createdAt"> & {
   assignedStaffId?: string | null;
   staffMembershipIds?: Array<string | null | undefined>;
+  roles?: BusinessRole[];
   broadcastToStaff?: boolean;
 };
 
@@ -148,7 +156,7 @@ function writeEvent(response: Response, event: RealtimeEvent) {
 export const realtimeService = {
   // TODO: Replace in-memory pub/sub with Redis Pub/Sub when running multiple backend instances.
   publish(input: PublishInput) {
-    const { assignedStaffId, staffMembershipIds = [], broadcastToStaff = false, ...publicInput } = input;
+    const { assignedStaffId, staffMembershipIds = [], roles, broadcastToStaff = false, ...publicInput } = input;
     const event: RealtimeEvent = {
       ...publicInput,
       id: crypto.randomUUID(),
@@ -156,6 +164,7 @@ export const realtimeService = {
     };
     for (const client of clients.values()) {
       if (client.businessId !== event.businessId) continue;
+      if (roles && !roles.includes(client.role)) continue;
       if (
         client.role === BusinessRole.STAFF
         && !broadcastToStaff

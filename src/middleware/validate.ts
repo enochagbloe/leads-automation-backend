@@ -26,3 +26,16 @@ export const validateQuery = (schema: ZodSchema): RequestHandler => (req, res, n
   res.locals.validatedQuery = result.data;
   next();
 };
+
+export const validateParams = (schema: ZodSchema): RequestHandler => (req, res, next) => {
+  const result = schema.safeParse(req.params);
+  if (!result.success) {
+    return next(Object.assign(new Error("Validation failed"), {
+      statusCode: 422,
+      code: "VALIDATION_ERROR",
+      details: result.error.flatten().fieldErrors,
+    }));
+  }
+  res.locals.validatedParams = result.data;
+  next();
+};

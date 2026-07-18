@@ -11,11 +11,66 @@ import {
 } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
+import { isDatabaseUnavailableError } from "../../utils/database-error";
 import { followUpPlusService } from "./follow-up-plus.service";
 import { followUpJobProcessorService } from "./follow-up-processor.service";
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
+let databaseUnavailableSince: Date | null = null;
+let databaseUnavailableLogCount = 0;
+let nextDatabaseRetryAt: Date | null = null;
+
+const DATABASE_BACKOFF_BASE_MS = 30_000;
+const DATABASE_BACKOFF_MAX_MS = 5 * 60_000;
+
+function databaseBackoffMs() {
+  const multiplier = Math.min(databaseUnavailableLogCount, 4);
+  return Math.min(DATABASE_BACKOFF_BASE_MS * 2 ** multiplier, DATABASE_BACKOFF_MAX_MS);
+}
+
+function databaseErrorSummary(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function shouldSkipForDatabaseBackoff(now = new Date()) {
+  return Boolean(nextDatabaseRetryAt && nextDatabaseRetryAt > now);
+}
+
+function handleDatabaseUnavailable(error: unknown) {
+  const now = new Date();
+  if (!databaseUnavailableSince) databaseUnavailableSince = now;
+  const backoffMs = databaseBackoffMs();
+  nextDatabaseRetryAt = new Date(now.getTime() + backoffMs);
+  databaseUnavailableLogCount += 1;
+
+  const payload = {
+    unavailableSince: databaseUnavailableSince.toISOString(),
+    nextRetryAt: nextDatabaseRetryAt.toISOString(),
+    retryInSeconds: Math.ceil(backoffMs / 1000),
+    reason: databaseErrorSummary(error),
+  };
+
+  if (databaseUnavailableLogCount === 1) {
+    console.warn("Follow-up worker paused because the database is unreachable", payload);
+    return;
+  }
+
+  console.warn("Follow-up worker database retry failed", payload);
+}
+
+function markDatabaseAvailable() {
+  if (!databaseUnavailableSince) return;
+  console.info("Follow-up worker database connection recovered", {
+    unavailableSince: databaseUnavailableSince.toISOString(),
+    recoveredAt: new Date().toISOString(),
+    failedRetries: databaseUnavailableLogCount,
+  });
+  databaseUnavailableSince = null;
+  databaseUnavailableLogCount = 0;
+  nextDatabaseRetryAt = null;
+}
 
 async function dueBusinessIds(limit: number) {
   const now = new Date();
@@ -127,6 +182,7 @@ async function scheduleStaleLeadJobs(limit: number) {
 export const followUpWorkerService = {
   async tick() {
     if (running) return;
+    if (shouldSkipForDatabaseBackoff()) return;
     running = true;
     try {
       await scheduleStaleLeadJobs(env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
@@ -135,7 +191,12 @@ export const followUpWorkerService = {
         await followUpJobProcessorService.reconcileLocalPendingFollowUpState(businessId);
         await followUpJobProcessorService.processDueJobs(businessId, env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
       }
+      markDatabaseAvailable();
     } catch (error) {
+      if (isDatabaseUnavailableError(error)) {
+        handleDatabaseUnavailable(error);
+        return;
+      }
       console.error("Follow-up worker tick failed", error);
     } finally {
       running = false;
@@ -158,5 +219,8 @@ export const followUpWorkerService = {
     if (!timer) return;
     clearInterval(timer);
     timer = null;
+    databaseUnavailableSince = null;
+    databaseUnavailableLogCount = 0;
+    nextDatabaseRetryAt = null;
   },
 };

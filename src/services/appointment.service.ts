@@ -23,8 +23,7 @@ import {
   rescheduleAppointmentFromValidatedInput,
 } from "./appointment/appointment-reschedule.service";
 import { getAutoConfirmSettings, updateAutoConfirmSettings, updateSettings } from "./appointment/appointment-settings.service";
-import { AppointmentActor, InternalCreateAppointmentInput } from "./appointment/appointment.types";
-import { assertAppointmentConfirmationModeAllowed } from "./appointment/appointment-validation.service";
+import { AppointmentActor } from "./appointment/appointment.types";
 
 export type { AppointmentActor, InternalCreateAppointmentInput } from "./appointment/appointment.types";
 export { assertAppointmentConfirmationModeAllowed } from "./appointment/appointment-validation.service";

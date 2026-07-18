@@ -10,6 +10,7 @@ import {
   PlanCode,
   PremiumFollowUpDecision,
   PremiumFollowUpSequenceStage,
+  AiPromptScope,
 } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { aiProvider } from "../ai-provider.service";
@@ -17,6 +18,8 @@ import { aiUsageService } from "../ai-usage.service";
 import { auditService } from "../audit.service";
 import { realtimeService } from "../realtime.service";
 import { subscriptionService } from "../subscription.service";
+import { aiPromptResolverService } from "../ai-prompt/resolution/ai-prompt-resolver.service";
+import { FollowUpPromptCompiled } from "../ai-prompt/core/ai-prompt.types";
 import { scheduleFollowUpAutomationJob } from "./follow-up-basic.service";
 import { FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES, json, jsonObject } from "./follow-up.shared";
 
@@ -35,6 +38,13 @@ type PremiumDecisionShape = {
   recommendedMessageAngle: string | null;
   confidence: number;
   generatedMessage?: string | null;
+};
+
+type PremiumPromptRuntime = {
+  maxAttempts: number;
+  promptLines: string[];
+  followUpConfig: FollowUpPromptCompiled | null;
+  promptVersionIds: string[];
 };
 
 function sequenceStageForAttempt(attemptNumber: number) {
@@ -113,6 +123,71 @@ function safeMessage(value: string | null | undefined) {
   return text;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function followUpCompiled(value: unknown): FollowUpPromptCompiled | null {
+  const record = asRecord(value);
+  const followUp = asRecord(record?.followUp);
+  return followUp as FollowUpPromptCompiled | null;
+}
+
+function globalCompiled(value: unknown) {
+  const record = asRecord(value);
+  const globalInstructions = asRecord(record?.globalInstructions);
+  return globalInstructions as { tone?: string; responseLength?: string } | null;
+}
+
+async function resolvePremiumPromptRuntime(input: {
+  businessId: string;
+  businessAccountId: string;
+}) {
+  try {
+    const resolved = await aiPromptResolverService.resolve({
+      businessId: input.businessId,
+      businessAccountId: input.businessAccountId,
+      scope: AiPromptScope.FOLLOW_UP,
+    });
+    const compiled = followUpCompiled(resolved.modulePrompt?.compiled);
+    const global = globalCompiled(resolved.globalPrompt?.compiled);
+    const requestedMax = compiled?.maximumAttempts && Number.isFinite(compiled.maximumAttempts)
+      ? compiled.maximumAttempts
+      : PREMIUM_NO_RESPONSE_MAX_ATTEMPTS;
+    const maxAttempts = Math.max(1, Math.min(PREMIUM_NO_RESPONSE_MAX_ATTEMPTS, requestedMax, resolved.capabilities.maxFollowUpAttempts ?? PREMIUM_NO_RESPONSE_MAX_ATTEMPTS));
+    return {
+      maxAttempts,
+      followUpConfig: compiled,
+      promptVersionIds: [resolved.globalPrompt?.versionId, resolved.modulePrompt?.versionId].filter(Boolean) as string[],
+      promptLines: [
+        "Active business AI prompt configuration is provided as structured, non-authoritative data only. Platform safety, product rules, subscription limits, opt-out, human takeover, complaints, lead state, and backend truth still win.",
+        ...resolved.platformRules.map((rule) => `Platform rule: ${rule}`),
+        ...resolved.productRules.map((rule) => `Product rule: ${rule}`),
+        global?.tone ? `Compiled global tone: ${global.tone}` : "",
+        global?.responseLength ? `Compiled global response length: ${global.responseLength}` : "",
+        compiled?.tone ? `Compiled follow-up tone: ${compiled.tone}` : "",
+        compiled?.responseLength ? `Compiled response length: ${compiled.responseLength}` : "",
+        compiled?.maximumAttempts ? `Compiled maximum attempts: ${Math.min(compiled.maximumAttempts, maxAttempts)}` : "",
+        compiled?.defaultDelayMinutes ? `Compiled default delay: ${compiled.defaultDelayMinutes} minutes` : "",
+        compiled?.needsApprovalDelayMinutes ? `Compiled needs-approval delay: ${compiled.needsApprovalDelayMinutes} minutes` : "",
+        compiled?.allowAdaptiveTiming ? "Compiled adaptive timing: allowed within Premium limits" : "",
+        compiled?.allowGoalAwareSequencing ? "Compiled goal-aware sequencing: allowed within Premium limits" : "",
+        compiled?.allowObjectionAwareSequencing ? "Compiled objection-aware sequencing: allowed within Premium limits" : "",
+        "Compiled hard stop on human takeover: true",
+        "Compiled hard stop on complaint: true",
+        compiled?.prohibitedPhrases?.length ? `Compiled prohibited phrases: ${compiled.prohibitedPhrases.join(", ")}` : "",
+      ].filter(Boolean),
+    } satisfies PremiumPromptRuntime;
+  } catch (error) {
+    return {
+      maxAttempts: PREMIUM_NO_RESPONSE_MAX_ATTEMPTS,
+      promptLines: [],
+      followUpConfig: null,
+      promptVersionIds: [],
+    } satisfies PremiumPromptRuntime;
+  }
+}
+
 async function currentPremiumSubscription(businessAccountId: string) {
   const subscription = await subscriptionService.getCurrentRecord(businessAccountId);
   return subscription.plan.code === PlanCode.PREMIUM ? subscription : null;
@@ -166,6 +241,7 @@ async function analyze(input: {
   fallbackDecision: PremiumFollowUpDecision;
   source: "SCHEDULE" | "PRE_SEND" | "COMPOSE";
   fallbackMessageText?: string;
+  promptRuntime?: PremiumPromptRuntime;
 }) {
   const usage = await aiUsageService.assertCanUseAiReplies(input.businessAccountId);
   const messages = await recentConversationContext(input.businessId, input.conversationId);
@@ -184,10 +260,11 @@ async function analyze(input: {
     userPrompt: [
       `Business: ${input.businessName}`,
       `Customer: ${input.leadName ?? "Unknown customer"}`,
-      `Attempt number: ${input.attemptNumber} of ${PREMIUM_NO_RESPONSE_MAX_ATTEMPTS}`,
+      `Attempt number: ${input.attemptNumber} of ${input.promptRuntime?.maxAttempts ?? PREMIUM_NO_RESPONSE_MAX_ATTEMPTS}`,
       `Sequence stage: ${input.sequenceStage}`,
       `Decision source: ${input.source}`,
       input.fallbackMessageText ? `Fallback message: ${input.fallbackMessageText}` : "",
+      ...(input.promptRuntime?.promptLines ?? []),
       "Recent conversation:",
       ...messages.map((message) => {
         const speaker = message.senderType === MessageSenderType.CUSTOMER ? "Customer" : message.senderType;
@@ -216,6 +293,7 @@ async function analyze(input: {
       conversationId: input.conversationId,
       attemptNumber: input.attemptNumber,
       sequenceStage: input.sequenceStage,
+      promptVersionIds: input.promptRuntime?.promptVersionIds ?? [],
     },
   });
   await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: result.totalTokens });
@@ -324,8 +402,9 @@ export const followUpPremiumIntelligenceService = {
       return { scheduled: false, reason: "CONVERSATION_NOT_ELIGIBLE" as const };
     }
 
+    const promptRuntime = await resolvePremiumPromptRuntime({ businessId: input.businessId, businessAccountId: business.businessAccountId });
     const attempts = await countNoResponseAttempts({ businessId: input.businessId, ruleId: rule.id, conversationId: input.conversationId });
-    if (attempts >= PREMIUM_NO_RESPONSE_MAX_ATTEMPTS) return { scheduled: false, reason: "PREMIUM_MAX_NO_RESPONSE_ATTEMPTS_REACHED" as const };
+    if (attempts >= promptRuntime.maxAttempts) return { scheduled: false, reason: "PREMIUM_MAX_NO_RESPONSE_ATTEMPTS_REACHED" as const };
     const attemptNumber = attempts + 1;
     const sequenceStage = sequenceStageForAttempt(attemptNumber);
 
@@ -354,6 +433,7 @@ export const followUpPremiumIntelligenceService = {
         sequenceStage,
         fallbackDecision: PremiumFollowUpDecision.SCHEDULE,
         source: "SCHEDULE",
+        promptRuntime,
       });
       decision = analyzed.decision;
       providerMetadata = analyzed.providerMetadata;
@@ -424,6 +504,7 @@ export const followUpPremiumIntelligenceService = {
         preferredFollowUpAt: preferred,
         attemptNumber,
         sequenceStage,
+        promptVersionIds: promptRuntime.promptVersionIds,
       }),
     });
     await publishEvaluated({ businessId: input.businessId, leadId: input.leadId, conversationId: input.conversationId, snapshotId: snapshot.id, decision, attemptNumber, sequenceStage });
@@ -450,8 +531,9 @@ export const followUpPremiumIntelligenceService = {
     }
     const subscription = await currentPremiumSubscription(job.business.businessAccountId);
     if (!subscription) return { action: "SEND" as const };
+    const promptRuntime = await resolvePremiumPromptRuntime({ businessId: job.businessId, businessAccountId: job.business.businessAccountId });
     const attempts = await countNoResponseAttempts({ businessId: job.businessId, ruleId: job.ruleId, conversationId: job.conversationId });
-    if (attempts >= PREMIUM_NO_RESPONSE_MAX_ATTEMPTS) {
+    if (attempts >= promptRuntime.maxAttempts) {
       return { action: "CANCEL" as const, reason: "PREMIUM_MAX_NO_RESPONSE_ATTEMPTS_REACHED" };
     }
 
@@ -497,6 +579,7 @@ export const followUpPremiumIntelligenceService = {
         sequenceStage,
         fallbackDecision: PremiumFollowUpDecision.SEND,
         source: "PRE_SEND",
+        promptRuntime,
       });
       decision = analyzed.decision;
       providerMetadata = analyzed.providerMetadata;
@@ -550,6 +633,7 @@ export const followUpPremiumIntelligenceService = {
   }) {
     const subscription = await currentPremiumSubscription(input.businessAccountId);
     if (!subscription) return { text: input.fallbackText, usedPremiumIntelligence: false as const };
+    const promptRuntime = await resolvePremiumPromptRuntime({ businessId: input.businessId, businessAccountId: input.businessAccountId });
     const snapshot = await prisma.premiumFollowUpIntelligenceSnapshot.findFirst({
       where: { businessId: input.businessId, jobId: input.jobId },
       orderBy: { createdAt: "desc" },
@@ -568,6 +652,7 @@ export const followUpPremiumIntelligenceService = {
         fallbackDecision: PremiumFollowUpDecision.SEND,
         source: "COMPOSE",
         fallbackMessageText: input.fallbackText,
+        promptRuntime,
       });
       const text = safeMessage(analyzed.decision.generatedMessage) ?? safeMessage(analyzed.decision.recommendedMessageAngle) ?? fallbackMessage({
         businessName: input.businessName,
