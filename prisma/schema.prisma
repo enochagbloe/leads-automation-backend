@@ -209,6 +209,29 @@ enum FollowUpSendLogDeliveryStatus {
   FAILED
 }
 
+enum AiPromptScope {
+  GLOBAL
+  AI_REPLIES
+  FOLLOW_UP
+  APPOINTMENTS
+  SALES
+  LEAD_QUALIFICATION
+  KNOWLEDGE
+  DOCUMENT_SENDING
+  COMPLAINTS
+  HUMAN_HANDOFF
+}
+
+enum AiPromptStatus {
+  DRAFT
+  VALIDATING
+  VALID
+  INVALID
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
 enum PremiumFollowUpDecision {
   SCHEDULE
   SEND
@@ -744,6 +767,24 @@ enum AuditAction {
   BASIC_APPOINTMENT_REMINDER_SCHEDULED
   BASIC_APPOINTMENT_REMINDER_SENT
   BASIC_FOLLOW_UP_BLOCKED_BY_LIMIT
+  AI_PROMPT_CREATED
+  AI_PROMPT_UPDATED
+  AI_PROMPT_VERSION_CREATED
+  AI_PROMPT_VALIDATION_STARTED
+  AI_PROMPT_VALIDATION_SUCCEEDED
+  AI_PROMPT_VALIDATION_FAILED
+  AI_PROMPT_ACTIVATED
+  AI_PROMPT_DEACTIVATED
+  AI_PROMPT_ARCHIVED
+  AI_PROMPT_ROLLED_BACK
+  AI_PROMPT_PREVIEWED
+  AI_PROMPT_BLOCKED_BY_PLAN
+  AI_PROMPT_BLOCKED_BY_SAFETY
+  AI_PROMPT_BLOCKED_BY_CONFLICT
+  AI_PROMPT_DRAFT_AUTOSAVED
+  AI_PROMPT_DRAFT_SYNC_DUPLICATE
+  AI_PROMPT_DRAFT_CONFLICT_DETECTED
+  AI_PROMPT_DRAFT_CONFLICT_RESOLVED
 }
 
 enum DayOfWeek {
@@ -882,6 +923,9 @@ model Business {
   followUpJobs                  FollowUpJob[]
   followUpSendLogs              FollowUpSendLog[]
   premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
+  aiPromptConfigurations        AiPromptConfiguration[]
+  aiPromptVersions              AiPromptVersion[]
+  aiPromptDraftMutations        AiPromptDraftMutation[]
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -1051,6 +1095,9 @@ model BusinessMember {
   customerIssueTimelineEvents        CustomerIssueTimelineEvent[]
   createdFollowUpRules               FollowUpAutomationRule[]       @relation("FollowUpRuleCreator")
   updatedFollowUpRules               FollowUpAutomationRule[]       @relation("FollowUpRuleUpdater")
+  createdAiPromptConfigurations      AiPromptConfiguration[]        @relation("AiPromptConfigurationCreator")
+  updatedAiPromptConfigurations      AiPromptConfiguration[]        @relation("AiPromptConfigurationUpdater")
+  createdAiPromptVersions            AiPromptVersion[]              @relation("AiPromptVersionCreator")
 
   @@unique([businessId, userId])
   @@index([userId])
@@ -1615,6 +1662,97 @@ model FollowUpSendLog {
   @@index([businessId, quoteId])
   @@index([businessId, deliveryStatus])
   @@index([businessId, createdAt])
+}
+
+model AiPromptConfiguration {
+  id                    String         @id @default(cuid())
+  businessId            String
+  scope                 AiPromptScope
+  name                  String
+  description           String?
+  status                AiPromptStatus @default(DRAFT)
+  activeVersionId       String?
+  latestVersionNumber   Int            @default(0)
+  createdByMembershipId String
+  updatedByMembershipId String?
+  archivedAt            DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  business      Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy     BusinessMember    @relation("AiPromptConfigurationCreator", fields: [createdByMembershipId], references: [id], onDelete: Restrict)
+  updatedBy     BusinessMember?   @relation("AiPromptConfigurationUpdater", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
+  activeVersion AiPromptVersion?  @relation("ActiveAiPromptVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions      AiPromptVersion[] @relation("AiPromptConfigurationVersions")
+
+  @@unique([businessId, scope])
+  @@index([businessId])
+  @@index([businessId, scope])
+  @@index([businessId, status])
+}
+
+model AiPromptVersion {
+  id                    String         @id @default(cuid())
+  businessId            String
+  configurationId       String
+  scope                 AiPromptScope
+  versionNumber         Int
+  previousVersionId     String?
+  status                AiPromptStatus @default(DRAFT)
+  activeKey             String?
+  promptText            String
+  changeSummary         String?
+  compiled              Json?
+  validationResult      Json?
+  unsupportedIssues     Json?
+  safetyIssues          Json?
+  capabilityIssues      Json?
+  conflictIssues        Json?
+  compilerVersion       String?
+  validatedAt           DateTime?
+  validatedRevision     Int?
+  revision              Int            @default(1)
+  validationFailureCode String?
+  validationFailureAt   DateTime?
+  activatedAt           DateTime?
+  deactivatedAt         DateTime?
+  archivedAt            DateTime?
+  createdByMembershipId String
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  business        Business                @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  configuration   AiPromptConfiguration   @relation("AiPromptConfigurationVersions", fields: [configurationId], references: [id], onDelete: Cascade)
+  previousVersion AiPromptVersion?        @relation("AiPromptVersionHistory", fields: [previousVersionId], references: [id], onDelete: SetNull)
+  nextVersions    AiPromptVersion[]       @relation("AiPromptVersionHistory")
+  activeFor       AiPromptConfiguration[] @relation("ActiveAiPromptVersion")
+  createdBy       BusinessMember          @relation("AiPromptVersionCreator", fields: [createdByMembershipId], references: [id], onDelete: Restrict)
+  draftMutations  AiPromptDraftMutation[]
+
+  @@unique([configurationId, versionNumber])
+  @@unique([businessId, scope, activeKey])
+  @@index([businessId])
+  @@index([businessId, scope])
+  @@index([configurationId, status])
+  @@index([businessId, status])
+}
+
+model AiPromptDraftMutation {
+  id               String   @id @default(cuid())
+  businessId       String
+  versionId        String
+  clientMutationId String
+  clientUpdatedAt  DateTime?
+  appliedRevision  Int
+  resultSnapshot   Json?
+  createdAt        DateTime @default(now())
+
+  business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  version  AiPromptVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, clientMutationId])
+  @@index([businessId, versionId])
+  @@index([createdAt])
 }
 
 model PremiumFollowUpIntelligenceSnapshot {
