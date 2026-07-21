@@ -7,7 +7,7 @@ export const ACTIVE_SUBSCRIPTION_STATUSES = [SubscriptionStatus.TRIALING, Subscr
 
 export type FeatureKey = "allowAnalytics" | "allowRemoveBranding" | "allowPrioritySupport";
 export type EnforcedUsageKey = "businessesCount" | "staffCount" | "servicesCount" | "appointmentsUsed";
-export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "aiBlockedUsed" | "aiHumanReviewsUsed" | "aiBookingRequestsCreated" | "knowledgeItemsCount";
+export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "aiMemoryExtractionRequestsUsed" | "aiMemoryExtractionTokensUsed" | "aiBlockedUsed" | "aiHumanReviewsUsed" | "aiBookingRequestsCreated" | "knowledgeItemsCount";
 export type BusinessUsageKey = "conversationsUsed" | "aiRepliesUsed" | "appointmentsUsed" | "leadsCreated";
 
 export const PLAN_LIMIT_KEYS = {
@@ -69,6 +69,8 @@ export function getAccountUsage(usage?: AccountUsageRecord) {
     aiRepliesUsed: usage?.aiRepliesUsed ?? 0,
     aiRequestsUsed: usage?.aiRequestsUsed ?? 0,
     aiTokensUsed: usage?.aiTokensUsed ?? 0,
+    aiMemoryExtractionRequestsUsed: usage?.aiMemoryExtractionRequestsUsed ?? 0,
+    aiMemoryExtractionTokensUsed: usage?.aiMemoryExtractionTokensUsed ?? 0,
     aiBlockedUsed: usage?.aiBlockedUsed ?? 0,
     aiHumanReviewsUsed: usage?.aiHumanReviewsUsed ?? 0,
     aiBookingRequestsCreated: usage?.aiBookingRequestsCreated ?? 0,
@@ -93,17 +95,51 @@ export function getBusinessUsage(usage?: BusinessUsageRecord) {
 
 export const subscriptionService = {
   async getCurrentRecord(businessAccountId: string) {
+    const now = new Date();
     const subscription = await prisma.subscription.findFirst({
-      where: { businessAccountId, status: { in: ACTIVE_SUBSCRIPTION_STATUSES } },
+      where: {
+        businessAccountId,
+        status: { in: ACTIVE_SUBSCRIPTION_STATUSES },
+        currentPeriodStart: { lte: now },
+        currentPeriodEnd: { gt: now },
+      },
       orderBy: { createdAt: "desc" },
       include: {
         businessAccount: true,
         plan: true,
-        usageRecords: { orderBy: { periodStart: "desc" }, take: 1 },
+        usageRecords: {
+          where: {
+            businessAccountId,
+            periodStart: { lte: now },
+            periodEnd: { gt: now },
+          },
+          orderBy: [{ periodStart: "desc" }, { createdAt: "desc" }],
+          take: 2,
+        },
       },
     });
     if (!subscription) throw new AppError(403, "No active subscription", "SUBSCRIPTION_REQUIRED");
-    return subscription;
+    const usageRecords = subscription.usageRecords.filter((usage) => (
+      usage.businessAccountId === businessAccountId
+      && usage.subscriptionId === subscription.id
+      && usage.periodStart.getTime() === subscription.currentPeriodStart.getTime()
+      && usage.periodEnd.getTime() === subscription.currentPeriodEnd.getTime()
+    ));
+    if (usageRecords.length !== 1) {
+      throw new AppError(
+        500,
+        "The current account usage period is unavailable or ambiguous.",
+        usageRecords.length === 0 ? "USAGE_RECORD_UNAVAILABLE" : "USAGE_RECORD_AMBIGUOUS",
+        {
+          businessAccountId,
+          subscriptionId: subscription.id,
+          currentPeriodStart: subscription.currentPeriodStart.toISOString(),
+          currentPeriodEnd: subscription.currentPeriodEnd.toISOString(),
+          matchingUsageRecordCount: usageRecords.length,
+        },
+      );
+    }
+    return { ...subscription, usageRecords };
   },
 
   async getCurrent(businessAccountId: string, activeBusinessId?: string | null, userId?: string) {

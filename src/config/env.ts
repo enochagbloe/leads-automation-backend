@@ -71,6 +71,16 @@ const schema = z.object({
   FOLLOW_UP_WORKER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
   FOLLOW_UP_WORKER_BUSINESS_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(25),
   FOLLOW_UP_WORKER_JOB_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(25),
+  CUSTOMER_MEMORY_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  CUSTOMER_MEMORY_WORKER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(20),
+  CUSTOMER_MEMORY_DISCOVERY_BUSINESS_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
+  CUSTOMER_MEMORY_DISCOVERY_PER_BUSINESS_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(20),
+  CUSTOMER_MEMORY_LIVE_PRIORITY_WINDOW_MINUTES: z.coerce.number().int().positive().max(1440).default(15),
+  CUSTOMER_MEMORY_WORKER_PROCESS_BATCH_SIZE: z.coerce.number().int().positive().max(50).default(10),
+  CUSTOMER_MEMORY_TURN_BATCH_DELAY_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
+  CUSTOMER_MEMORY_BASIC_MONTHLY_AI_REQUEST_LIMIT: z.coerce.number().int().nonnegative().default(250),
+  CUSTOMER_MEMORY_PLUS_MONTHLY_AI_REQUEST_LIMIT: z.coerce.number().int().nonnegative().default(1000),
+  CUSTOMER_MEMORY_PREMIUM_MONTHLY_AI_REQUEST_LIMIT: z.coerce.number().int().nonnegative().default(5000),
 }).superRefine((value, context) => {
   if (value.NODE_ENV === "production" && !value.RESEND_API_KEY) {
     context.addIssue({
