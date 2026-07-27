@@ -142,6 +142,15 @@ export const subscriptionService = {
     return { ...subscription, usageRecords };
   },
 
+  async getCurrentRecordOrNull(businessAccountId: string) {
+    try {
+      return await this.getCurrentRecord(businessAccountId);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "SUBSCRIPTION_REQUIRED") return null;
+      throw error;
+    }
+  },
+
   async getCurrent(businessAccountId: string, activeBusinessId?: string | null, userId?: string) {
     const subscription = await this.getCurrentRecord(businessAccountId);
     const [businessUsage, memberships] = await Promise.all([
