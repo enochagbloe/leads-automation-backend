@@ -150,9 +150,9 @@ function decisionValid(decision: AiReplyDecision | undefined) {
 
 export class OpenRouterProvider implements AiProvider {
   async generateCompletion(input: AiCompletionInput): Promise<AiCompletionResult> {
-    if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
+    if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
     const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
-    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
+    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
 
     const startedAt = Date.now();
     const models = attemptModels(primaryModel);

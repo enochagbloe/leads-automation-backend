@@ -178,7 +178,7 @@ export const authService = {
     const role = user.platformRole ?? membership?.role;
     const activeBusiness = membership?.business ?? null;
     const account = activeBusiness?.businessAccount ?? null;
-    const subscription = account ? await subscriptionService.getCurrentRecord(account.id) : null;
+    const subscription = account ? await subscriptionService.getCurrentRecordOrNull(account.id) : null;
     const businessUsage = activeBusiness
       ? await prisma.businessUsageRecord.findFirst({ where: { businessId: activeBusiness.id }, orderBy: { periodStart: "desc" } })
       : null;

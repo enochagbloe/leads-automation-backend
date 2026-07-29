@@ -158,6 +158,77 @@ enum MessageDirection {
   INTERNAL
 }
 
+enum CustomerMemoryCategory {
+  GOAL
+  INTERESTED_SERVICE
+  PREFERENCE
+  OBJECTION
+  TIMING_STATEMENT
+  MISSING_DETAIL
+  UNRESOLVED_REQUEST
+  APPOINTMENT_CONTEXT
+  LEAD_CONTEXT
+  LAST_CUSTOMER_ACTION
+  LAST_STAFF_ACTION
+  HUMAN_TAKEOVER
+}
+
+enum CustomerMemoryStatus {
+  ACTIVE
+  ARCHIVED
+  RESOLVED
+  SUPERSEDED
+  NEEDS_CLARIFICATION
+  DELETED
+}
+
+enum CustomerMemoryTruthType {
+  BACKEND_CONFIRMED
+  CUSTOMER_STATED
+  STAFF_CONFIRMED
+  AI_INFERRED
+}
+
+enum CustomerMemorySourceType {
+  CUSTOMER_MESSAGE
+  STAFF_MESSAGE
+  AI_MESSAGE
+  APPOINTMENT
+  LEAD
+  COMPLAINT
+  SYSTEM_EVENT
+  MANUAL_CORRECTION
+}
+
+enum CustomerMemoryMissingDetailState {
+  MISSING
+  REQUESTED
+  PROVIDED
+  CANCELLED
+  NO_LONGER_REQUIRED
+  EXPIRED
+}
+
+enum CustomerMemorySensitiveDataPolicy {
+  ALLOWED
+  REDACT
+  DO_NOT_STORE
+  REQUIRES_EXPLICIT_BUSINESS_CONFIGURATION
+}
+
+enum CustomerMemoryExtractionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  EXHAUSTED
+}
+
+enum CustomerMemorySuppressionMode {
+  SOURCE_OCCURRENCE
+  MEMORY_KEY
+}
+
 enum MessageDeliveryStatus {
   PENDING
   SENT
@@ -458,6 +529,7 @@ enum AppointmentConfirmationMode {
 
 enum BusinessNotificationType {
   INFO
+  CUSTOMER_MEMORY_EXTRACTION_EXHAUSTED
   KNOWLEDGE_ARTICLE_NEEDS_REVIEW
   KNOWLEDGE_ASSET_SEND_FAILED
   APPOINTMENT_NEEDS_CONFIRMATION
@@ -698,6 +770,16 @@ enum AuditAction {
   APPOINTMENT_RESCHEDULE_DECLINED_BY_TEAM
   APPOINTMENT_CUSTOMER_RESCHEDULE_MESSAGE_SENT
   APPOINTMENT_CUSTOMER_RESCHEDULE_MESSAGE_FAILED
+  CUSTOMER_MEMORY_CREATED
+  CUSTOMER_MEMORY_UPDATED
+  CUSTOMER_MEMORY_ARCHIVED
+  CUSTOMER_MEMORY_SUPERSEDED
+  CUSTOMER_MEMORY_RESOLVED
+  CUSTOMER_MEMORY_DELETED
+  CUSTOMER_MEMORY_SUMMARY_UPDATED
+  CUSTOMER_MEMORY_EXTRACTION_FAILED
+  CUSTOMER_MEMORY_CONFLICT_DETECTED
+  CUSTOMER_MEMORY_MANUALLY_CORRECTED
   NOTIFICATION_CREATED
   NOTIFICATION_READ
   NOTIFICATION_DISMISSED
@@ -848,13 +930,14 @@ model BusinessAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  owner             User                   @relation("BusinessAccountOwner", fields: [ownerId], references: [id])
-  businesses        Business[]
-  subscriptions     Subscription[]
-  usageRecords      AccountUsageRecord[]
-  appointments      Appointment[]
-  notifications     BusinessNotification[]
-  aiInteractionLogs AiInteractionLog[]
+  owner               User                   @relation("BusinessAccountOwner", fields: [ownerId], references: [id])
+  businesses          Business[]
+  subscriptions       Subscription[]
+  usageRecords        AccountUsageRecord[]
+  appointments        Appointment[]
+  notifications       BusinessNotification[]
+  aiInteractionLogs   AiInteractionLog[]
+  aiUsageReservations AiUsageReservation[]
 
   @@index([ownerId])
 }
@@ -926,6 +1009,12 @@ model Business {
   aiPromptConfigurations        AiPromptConfiguration[]
   aiPromptVersions              AiPromptVersion[]
   aiPromptDraftMutations        AiPromptDraftMutation[]
+  customerMemoryProfiles        CustomerMemoryProfile[]
+  customerMemoryItems           CustomerMemoryItem[]
+  customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
+  customerMemoryTombstones      CustomerMemoryConversationTombstone[]
+  customerMemoryItemTombstones  CustomerMemoryItemTombstone[]
+  customerMemoryDiscoveryCursor CustomerMemoryDiscoveryCursor?
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -1174,37 +1263,76 @@ model Subscription {
 }
 
 model AccountUsageRecord {
-  id                       String   @id @default(cuid())
-  businessAccountId        String
-  subscriptionId           String
-  businessesCount          Int      @default(1)
-  conversationsUsed        Int      @default(0)
-  aiRepliesUsed            Int      @default(0)
-  aiRequestsUsed           Int      @default(0)
-  aiTokensUsed             Int      @default(0)
-  aiBlockedUsed            Int      @default(0)
-  aiHumanReviewsUsed       Int      @default(0)
-  aiBookingRequestsCreated Int      @default(0)
-  aiSafeHandoffsTriggered  Int      @default(0)
-  aiSafeHandoffEmailsSent  Int      @default(0)
-  aiComplaintsDetected     Int      @default(0)
-  customerIssuesLogged     Int      @default(0)
-  customerIssuesRouted     Int      @default(0)
-  customerIssueEmailsSent  Int      @default(0)
-  staffCount               Int      @default(1)
-  servicesCount            Int      @default(0)
-  appointmentsUsed         Int      @default(0)
-  knowledgeItemsCount      Int      @default(0)
-  periodStart              DateTime
-  periodEnd                DateTime
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  id                             String   @id @default(cuid())
+  businessAccountId              String
+  subscriptionId                 String
+  businessesCount                Int      @default(1)
+  conversationsUsed              Int      @default(0)
+  aiRepliesUsed                  Int      @default(0)
+  aiRequestsUsed                 Int      @default(0)
+  aiTokensUsed                   Int      @default(0)
+  aiMemoryExtractionRequestsUsed Int      @default(0)
+  aiMemoryExtractionTokensUsed   Int      @default(0)
+  aiBlockedUsed                  Int      @default(0)
+  aiHumanReviewsUsed             Int      @default(0)
+  aiBookingRequestsCreated       Int      @default(0)
+  aiSafeHandoffsTriggered        Int      @default(0)
+  aiSafeHandoffEmailsSent        Int      @default(0)
+  aiComplaintsDetected           Int      @default(0)
+  customerIssuesLogged           Int      @default(0)
+  customerIssuesRouted           Int      @default(0)
+  customerIssueEmailsSent        Int      @default(0)
+  staffCount                     Int      @default(1)
+  servicesCount                  Int      @default(0)
+  appointmentsUsed               Int      @default(0)
+  knowledgeItemsCount            Int      @default(0)
+  periodStart                    DateTime
+  periodEnd                      DateTime
+  createdAt                      DateTime @default(now())
+  updatedAt                      DateTime @updatedAt
 
-  businessAccount BusinessAccount @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  subscription    Subscription    @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  businessAccount     BusinessAccount      @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  subscription        Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  aiUsageReservations AiUsageReservation[]
 
   @@unique([subscriptionId, periodStart])
+  @@unique([businessAccountId, periodStart, periodEnd])
   @@index([businessAccountId, periodStart])
+}
+
+enum AiUsageReservationStatus {
+  RESERVED
+  SETTLED
+  RELEASED
+  RECONCILIATION_REQUIRED
+}
+
+model AiUsageReservation {
+  id                       String                   @id @default(cuid())
+  businessAccountId        String
+  accountUsageId           String
+  idempotencyKey           String                   @unique
+  feature                  String
+  processingBatchId        String?
+  status                   AiUsageReservationStatus @default(RESERVED)
+  reservedRequests         Int
+  actualRequests           Int?
+  actualTokens             Int?
+  providerAttemptStartedAt DateTime?
+  providerRequestId        String?
+  failureCode              String?
+  settledAt                DateTime?
+  releasedAt               DateTime?
+  reconciliationRequiredAt DateTime?
+  createdAt                DateTime                 @default(now())
+  updatedAt                DateTime                 @updatedAt
+
+  businessAccount BusinessAccount    @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  accountUsage    AccountUsageRecord @relation(fields: [accountUsageId], references: [id], onDelete: Cascade)
+
+  @@index([businessAccountId, status, createdAt])
+  @@index([processingBatchId, status])
+  @@index([accountUsageId])
 }
 
 model BusinessUsageRecord {
@@ -1302,6 +1430,11 @@ model Lead {
   followUpJobs                  FollowUpJob[]
   followUpSendLogs              FollowUpSendLog[]
   premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
+  customerMemoryProfile         CustomerMemoryProfile?
+  customerMemoryItems           CustomerMemoryItem[]
+  customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
+  customerMemoryTombstones      CustomerMemoryConversationTombstone[]
+  customerMemoryItemTombstones  CustomerMemoryItemTombstone[]
 
   @@index([businessId])
   @@index([businessId, phone])
@@ -1369,6 +1502,9 @@ model Conversation {
   followUpJobs                  FollowUpJob[]
   followUpSendLogs              FollowUpSendLog[]
   premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
+  customerMemoryItems           CustomerMemoryItem[]
+  customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
+  customerMemoryTombstone       CustomerMemoryConversationTombstone?
 
   @@index([businessId])
   @@index([businessId, leadId])
@@ -1414,6 +1550,8 @@ model Message {
   knowledgeAssetSendLogs      KnowledgeAssetSendLog[]
   attachments                 ConversationMessageAttachment[]
   premiumFollowUpInsights     PremiumFollowUpIntelligenceSnapshot[]
+  customerMemoryItems         CustomerMemoryItem[]
+  customerMemoryExtractionJob CustomerMemoryExtractionJob?
 
   @@index([businessId])
   @@index([conversationId])
@@ -1423,6 +1561,165 @@ model Message {
   @@index([senderType])
   @@index([deliveryStatus])
   @@index([businessId, provider, providerMessageId])
+}
+
+model CustomerMemoryProfile {
+  id                       String    @id @default(cuid())
+  businessId               String
+  leadId                   String    @unique
+  conversationSummary      String?
+  summaryConversationId    String?
+  summaryUpdatedAt         DateTime?
+  lastMeaningfulActivityAt DateTime?
+  lastExtractionAt         DateTime?
+  memoryEnabled            Boolean   @default(true)
+  memoryRevision           Int       @default(0)
+  reconciliationRequiredAt DateTime?
+  reconciliationReason     String?
+  lastReconciledAt         DateTime?
+  deletedAt                DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, leadId])
+  @@index([businessId, updatedAt])
+  @@index([reconciliationRequiredAt])
+}
+
+model CustomerMemoryItem {
+  id                         String                            @id @default(cuid())
+  businessId                 String
+  leadId                     String
+  sourceConversationId       String?
+  sourceMessageId            String?
+  category                   CustomerMemoryCategory
+  memoryKey                  String
+  valueText                  String
+  structuredValue            Json?
+  status                     CustomerMemoryStatus              @default(ACTIVE)
+  activeKey                  String?
+  truthType                  CustomerMemoryTruthType
+  sourceType                 CustomerMemorySourceType
+  confidence                 Float?
+  missingDetailState         CustomerMemoryMissingDetailState?
+  sourceStatement            String?
+  sensitiveDataPolicy        CustomerMemorySensitiveDataPolicy @default(ALLOWED)
+  sensitiveDataPolicyVersion String?
+  retentionExpiresAt         DateTime?
+  supersedesId               String?
+  supersededById             String?
+  correctedByMembershipId    String?
+  learnedAt                  DateTime                          @default(now())
+  resolvedAt                 DateTime?
+  deletedAt                  DateTime?
+  createdAt                  DateTime                          @default(now())
+  updatedAt                  DateTime                          @updatedAt
+
+  business           Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead               Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  sourceConversation Conversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+  sourceMessage      Message?      @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+
+  @@unique([businessId, leadId, category, memoryKey, activeKey])
+  @@index([businessId, leadId, status, category])
+  @@index([businessId, sourceConversationId])
+  @@index([sourceMessageId])
+  @@index([supersedesId])
+  @@index([supersededById])
+  @@index([retentionExpiresAt, status])
+  @@index([sensitiveDataPolicyVersion])
+}
+
+model CustomerMemoryExtractionJob {
+  id                  String                         @id @default(cuid())
+  businessId          String
+  leadId              String
+  conversationId      String
+  messageId           String                         @unique
+  status              CustomerMemoryExtractionStatus @default(PENDING)
+  attemptCount        Int                            @default(0)
+  processingStartedAt DateTime?
+  processingBatchId   String?
+  nextAttemptAt       DateTime?                      @default(now())
+  completedAt         DateTime?
+  lastErrorCode       String?
+  lastErrorAt         DateTime?
+  finalErrorCode      String?
+  exhaustedAt         DateTime?
+  createdAt           DateTime                       @default(now())
+  updatedAt           DateTime                       @updatedAt
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message      Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([processingBatchId, status])
+  @@index([businessId, leadId, createdAt])
+  @@index([status, exhaustedAt])
+}
+
+model CustomerMemoryDiscoveryCursor {
+  businessId           String   @id
+  lastMessageCreatedAt DateTime
+  lastMessageId        String   @default("")
+  lastScannedAt        DateTime @default(now())
+  lastProcessedAt      DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([lastScannedAt, businessId])
+  @@index([lastProcessedAt, businessId])
+}
+
+model CustomerMemoryConversationTombstone {
+  id                    String   @id @default(cuid())
+  businessId            String
+  leadId                String
+  conversationId        String   @unique
+  deletedByMembershipId String?
+  deletedAt             DateTime @default(now())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead         Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, leadId, conversationId])
+  @@index([businessId, leadId, deletedAt])
+}
+
+model CustomerMemoryItemTombstone {
+  id                    String                        @id @default(cuid())
+  businessId            String
+  leadId                String
+  deletedMemoryId       String
+  category              CustomerMemoryCategory
+  memoryKey             String
+  mode                   CustomerMemorySuppressionMode
+  suppressionKey        String
+  sourceConversationId  String?
+  sourceMessageId       String?
+  suppressThrough       DateTime?
+  deletedByMembershipId String?
+  deletedAt             DateTime                      @default(now())
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, leadId, suppressionKey])
+  @@index([businessId, leadId, category, memoryKey, mode])
+  @@index([sourceMessageId])
+  @@index([deletedAt])
 }
 
 model KnowledgeArticle {
@@ -1738,14 +2035,14 @@ model AiPromptVersion {
 }
 
 model AiPromptDraftMutation {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   businessId       String
   versionId        String
   clientMutationId String
   clientUpdatedAt  DateTime?
   appliedRevision  Int
   resultSnapshot   Json?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
 
   business Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
   version  AiPromptVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)

@@ -28,6 +28,7 @@ import { customerIssueRouter } from "./routes/customer-issue.routes";
 import { knowledgeRouter } from "./routes/knowledge.routes";
 import { followUpRouter } from "./routes/follow-up.routes";
 import { aiPromptRouter } from "./routes/ai-prompt.routes";
+import { customerMemoryRouter } from "./routes/customer-memory.routes";
 
 export const app = express();
 
@@ -63,6 +64,7 @@ app.get("/api", (_req, res) => res.json({
     businessCustomerIssues: "/api/business/customer-issues",
     businessFollowUp: "/api/business/follow-up",
     businessAiPrompts: "/api/business/ai-prompts",
+    businessCustomerMemory: "/api/business/customer-memory",
     businessKnowledge: "/api/business/knowledge",
     businessLeads: "/api/business/leads",
     businessConversations: "/api/business/conversations",
@@ -105,6 +107,7 @@ app.use("/api/business/members", businessMemberRouter);
 app.use("/api/business/customer-issues", customerIssueRouter);
 app.use("/api/business/follow-up", followUpRouter);
 app.use("/api/business/ai-prompts", aiPromptRouter);
+app.use("/api/business/customer-memory", customerMemoryRouter);
 app.use("/api/business/knowledge", knowledgeRouter);
 app.use("/api/business/leads", leadRouter);
 app.use("/api/business/conversations", conversationRouter);
