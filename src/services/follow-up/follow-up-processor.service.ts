@@ -1,4 +1,4 @@
-import { AppointmentStatus, AuditAction, ConversationChannel, FollowUpJobStatus, FollowUpRuleType, FollowUpSendLogDeliveryStatus, FollowUpSendLogSentBy, LeadActivityAction, MessageDeliveryStatus, MessageDirection, MessageSenderType, MessageType, PlanCode, SubscriptionStatus } from "@prisma/client";
+import { AppointmentStatus, AuditAction, ConversationChannel, FollowUpJobStatus, FollowUpRuleType, FollowUpSendLogDeliveryStatus, FollowUpSendLogSentBy, LeadActivityAction, MessageDeliveryStatus, MessageDirection, MessageSenderType, MessageType, PlanCode, PremiumFollowUpExecutionStatus, PremiumFollowUpSequenceStage, Prisma, SubscriptionStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { auditService } from "../audit.service";
 import { realtimeService } from "../realtime.service";
@@ -9,7 +9,15 @@ import { followUpTemplateRendererService } from "./follow-up-template.service";
 import { FOLLOW_UP_PROCESSING_STALE_MS, FOLLOW_UP_DELIVERED_MESSAGE_STATUSES, jsonObject, businessHoursFollowUpDecision, nextFollowUpAllowedAfterCooldown, humanDate, humanTime, lockFollowUpMonthlyQuotaScope, FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES, cancelNoResponseFollowUpIfCustomerReplied, json } from "./follow-up.shared";
 import { followUpAiRewriteService } from "./follow-up-ai-rewrite.service";
 import { followUpBasicService } from "./follow-up-basic.service";
-import { followUpPremiumIntelligenceService } from "./follow-up-premium-intelligence.service";
+import {
+  PREMIUM_CONTINUATION_STATUS,
+  premiumContinuationRequired,
+} from "./follow-up-premium-continuation-policy";
+import { followUpPremiumContinuationService } from "./follow-up-premium-continuation.service";
+import {
+  followUpPremiumExecutionService,
+  PremiumFollowUpPreparedExecution,
+} from "./follow-up-premium-execution.service";
 
 function basicSentAuditAction(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.CONTACT_EMAIL_REQUEST) return AuditAction.BASIC_CONTACT_EMAIL_REQUEST_SENT;
@@ -30,6 +38,125 @@ function sentUsageEvent(type: FollowUpRuleType) {
   if (type === FollowUpRuleType.AFTER_APPOINTMENT) return "PLUS_POST_APPOINTMENT_FOLLOW_UP_SENT";
   if (type === FollowUpRuleType.STALE_LEAD) return "PLUS_STALE_LEAD_FOLLOW_UP_SENT";
   return "FOLLOW_UP_JOB_SENT";
+}
+
+async function settleReconciledSendLog(
+  tx: Prisma.TransactionClient,
+  input: {
+    businessId: string;
+    premiumExecutionId: string | null;
+    job: {
+      id: string;
+      ruleId: string;
+      leadId: string | null;
+      conversationId: string | null;
+      appointmentId: string | null;
+      quoteId: string | null;
+    };
+    message: {
+      content: string;
+      providerMessageId: string | null;
+    };
+    deliveryStatus: FollowUpSendLogDeliveryStatus;
+    failureReason: string | null;
+  },
+) {
+  const linkedSendLogId = input.premiumExecutionId
+    ? (await tx.premiumFollowUpExecution.findFirst({
+      where: {
+        id: input.premiumExecutionId,
+        businessId: input.businessId,
+        jobId: input.job.id,
+      },
+      select: { sendLogId: true },
+    }))?.sendLogId ?? null
+    : null;
+  const existingSent = input.deliveryStatus === FollowUpSendLogDeliveryStatus.SENT
+    ? await tx.followUpSendLog.findFirst({
+      where: {
+        businessId: input.businessId,
+        jobId: input.job.id,
+        deliveryStatus: FollowUpSendLogDeliveryStatus.SENT,
+      },
+      orderBy: { createdAt: "asc" },
+    })
+    : null;
+  const linkedReservation = !existingSent && linkedSendLogId
+    ? await tx.followUpSendLog.findFirst({
+      where: {
+        id: linkedSendLogId,
+        businessId: input.businessId,
+        jobId: input.job.id,
+      },
+    })
+    : null;
+  const queuedReservation = !existingSent && !linkedReservation
+    ? await tx.followUpSendLog.findFirst({
+      where: {
+        businessId: input.businessId,
+        jobId: input.job.id,
+        deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
+      },
+      orderBy: { createdAt: "asc" },
+    })
+    : null;
+  const existing = existingSent ?? linkedReservation ?? queuedReservation;
+  const settled = existing
+    ? await tx.followUpSendLog.update({
+      where: { id: existing.id },
+      data: {
+        deliveryStatus: input.deliveryStatus,
+        whatsappMessageId: input.message.providerMessageId,
+        failureReason: input.failureReason,
+      },
+    })
+    : await tx.followUpSendLog.upsert({
+      where: { id: `reconciled_${input.job.id}` },
+      create: {
+        id: `reconciled_${input.job.id}`,
+        businessId: input.businessId,
+        ruleId: input.job.ruleId,
+        jobId: input.job.id,
+        leadId: input.job.leadId,
+        conversationId: input.job.conversationId,
+        appointmentId: input.job.appointmentId,
+        quoteId: input.job.quoteId,
+        messageText: input.message.content,
+        sentBy: FollowUpSendLogSentBy.SYSTEM,
+        deliveryStatus: input.deliveryStatus,
+        whatsappMessageId: input.message.providerMessageId,
+        failureReason: input.failureReason,
+      },
+      update: {
+        deliveryStatus: input.deliveryStatus,
+        whatsappMessageId: input.message.providerMessageId,
+        failureReason: input.failureReason,
+      },
+    });
+
+  await tx.followUpSendLog.updateMany({
+    where: {
+      businessId: input.businessId,
+      jobId: input.job.id,
+      id: { not: settled.id },
+      deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
+    },
+    data: {
+      deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
+      failureReason: "DUPLICATE_RESERVATION_RECONCILED",
+    },
+  });
+  if (input.premiumExecutionId) {
+    await tx.premiumFollowUpExecution.updateMany({
+      where: {
+        id: input.premiumExecutionId,
+        businessId: input.businessId,
+        jobId: input.job.id,
+      },
+      data: { sendLogId: settled.id },
+    });
+  }
+  return settled;
 }
 
 // Base/shared section: crash recovery for jobs claimed by a previous processor run.
@@ -162,6 +289,9 @@ export const followUpJobProcessorService = {
       const metadata = jsonObject(message.metadata);
       const jobId = typeof metadata.jobId === "string" ? metadata.jobId : null;
       const ruleId = typeof metadata.ruleId === "string" ? metadata.ruleId : null;
+      const premiumExecutionId = typeof metadata.premiumExecutionId === "string"
+        ? metadata.premiumExecutionId
+        : null;
       if (!jobId || !ruleId) continue;
 
       const result = await prisma.$transaction(async (tx) => {
@@ -178,34 +308,87 @@ export const followUpJobProcessorService = {
           },
         });
         if (!job) return null;
+        const updatePremiumExecution = async (
+          executionStatus: PremiumFollowUpExecutionStatus,
+          reason: string,
+        ) => {
+          if (!premiumExecutionId) return;
+          const execution = await tx.premiumFollowUpExecution.findFirst({
+            where: {
+              id: premiumExecutionId,
+              businessId,
+              jobId: job.id,
+            },
+            select: {
+              sequenceStage: true,
+              finalDecision: true,
+            },
+          });
+          if (!execution) return;
+          const effectiveStatus =
+            executionStatus === PremiumFollowUpExecutionStatus.SENT
+            && execution.sequenceStage === PremiumFollowUpSequenceStage.FINAL_POLITE_FOLLOW_UP
+              ? PremiumFollowUpExecutionStatus.EXHAUSTED
+              : executionStatus;
+          const continuationRequired = premiumContinuationRequired({
+            providerAccepted: effectiveStatus === PremiumFollowUpExecutionStatus.SENT,
+            sequenceStage: execution.sequenceStage,
+            executionAction: execution.finalDecision === "ESCALATE_TO_STAFF"
+              ? "ESCALATE"
+              : "SEND",
+          });
+          await tx.premiumFollowUpExecution.updateMany({
+            where: {
+              id: premiumExecutionId,
+              businessId,
+              jobId: job.id,
+            },
+            data: {
+              executionStatus: effectiveStatus,
+              executionReason: reason,
+              executionBlocked: executionStatus === PremiumFollowUpExecutionStatus.BLOCKED,
+              blockReason: executionStatus === PremiumFollowUpExecutionStatus.BLOCKED
+                ? reason
+                : null,
+              outboundMessageId: message.id,
+              executedAt: new Date(),
+              completedAt: new Date(),
+              errorCode: executionStatus === PremiumFollowUpExecutionStatus.FAILED
+                ? reason
+                : null,
+              continuationStatus: continuationRequired
+                ? PREMIUM_CONTINUATION_STATUS.PENDING
+                : PREMIUM_CONTINUATION_STATUS.NOT_REQUIRED,
+              continuationJobId: null,
+              continuationReason: continuationRequired
+                ? "PREMIUM_NEXT_STAGE_REQUIRED"
+                : "PREMIUM_NEXT_STAGE_NOT_REQUIRED",
+              continuationProcessingStartedAt: null,
+              continuationNextAttemptAt: continuationRequired ? new Date() : null,
+              continuationCompletedAt: continuationRequired ? null : new Date(),
+            },
+          });
+        };
 
         if (FOLLOW_UP_DELIVERED_MESSAGE_STATUSES.includes(message.deliveryStatus)) {
           const updatedJob = await tx.followUpJob.update({
             where: { id: job.id },
             data: { status: FollowUpJobStatus.SENT, sentAt: message.updatedAt, processingStartedAt: null, failureReason: null },
           });
-          await tx.followUpSendLog.upsert({
-            where: { id: `reconciled_${job.id}` },
-            create: {
-              id: `reconciled_${job.id}`,
-              businessId,
-              ruleId: job.ruleId,
-              jobId: job.id,
-              leadId: job.leadId,
-              conversationId: job.conversationId,
-              appointmentId: job.appointmentId,
-              quoteId: job.quoteId,
-              messageText: message.content,
-              sentBy: FollowUpSendLogSentBy.SYSTEM,
-              deliveryStatus: FollowUpSendLogDeliveryStatus.SENT,
-              whatsappMessageId: message.providerMessageId,
-            },
-            update: {
-              deliveryStatus: FollowUpSendLogDeliveryStatus.SENT,
-              whatsappMessageId: message.providerMessageId,
-              failureReason: null,
-            },
+          await settleReconciledSendLog(tx, {
+            businessId,
+            premiumExecutionId,
+            job,
+            message,
+            deliveryStatus: FollowUpSendLogDeliveryStatus.SENT,
+            failureReason: null,
           });
+          await updatePremiumExecution(
+            metadata.premiumSequenceStage === PremiumFollowUpSequenceStage.FINAL_POLITE_FOLLOW_UP
+              ? PremiumFollowUpExecutionStatus.EXHAUSTED
+              : PremiumFollowUpExecutionStatus.SENT,
+            "FOLLOW_UP_DELIVERY_RECONCILED_SENT",
+          );
           return { job: updatedJob, message, reason: "FOLLOW_UP_DELIVERY_RECONCILED_SENT" };
         }
 
@@ -214,29 +397,18 @@ export const followUpJobProcessorService = {
             where: { id: job.id },
             data: { status: FollowUpJobStatus.FAILED, failureReason: "FOLLOW_UP_DELIVERY_RECONCILED_FAILED", processingStartedAt: null },
           });
-          await tx.followUpSendLog.upsert({
-            where: { id: `reconciled_${job.id}` },
-            create: {
-              id: `reconciled_${job.id}`,
-              businessId,
-              ruleId: job.ruleId,
-              jobId: job.id,
-              leadId: job.leadId,
-              conversationId: job.conversationId,
-              appointmentId: job.appointmentId,
-              quoteId: job.quoteId,
-              messageText: message.content,
-              sentBy: FollowUpSendLogSentBy.SYSTEM,
-              deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
-              whatsappMessageId: message.providerMessageId,
-              failureReason: "FOLLOW_UP_DELIVERY_RECONCILED_FAILED",
-            },
-            update: {
-              deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
-              whatsappMessageId: message.providerMessageId,
-              failureReason: "FOLLOW_UP_DELIVERY_RECONCILED_FAILED",
-            },
+          await settleReconciledSendLog(tx, {
+            businessId,
+            premiumExecutionId,
+            job,
+            message,
+            deliveryStatus: FollowUpSendLogDeliveryStatus.FAILED,
+            failureReason: "FOLLOW_UP_DELIVERY_RECONCILED_FAILED",
           });
+          await updatePremiumExecution(
+            PremiumFollowUpExecutionStatus.FAILED,
+            "FOLLOW_UP_DELIVERY_RECONCILED_FAILED",
+          );
           return { job: updatedJob, message, reason: "FOLLOW_UP_DELIVERY_RECONCILED_FAILED" };
         }
 
@@ -244,6 +416,10 @@ export const followUpJobProcessorService = {
           where: { id: job.id },
           data: { status: FollowUpJobStatus.FAILED, failureReason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION", processingStartedAt: null },
         });
+        await updatePremiumExecution(
+          PremiumFollowUpExecutionStatus.BLOCKED,
+          "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION",
+        );
         return { job: updatedJob, message, reason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION" };
       });
 
@@ -278,6 +454,11 @@ export const followUpJobProcessorService = {
         conversation: true,
         appointment: { include: { service: { select: { name: true } } } },
         business: true,
+        premiumInsights: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { id: true },
+        },
       },
     });
     const results = [];
@@ -355,8 +536,22 @@ export const followUpJobProcessorService = {
         continue;
       }
 
+      const premiumNoResponseSubscription = job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+        ? await prisma.subscription.findFirst({
+          where: {
+            businessAccountId: job.business.businessAccountId,
+            status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] },
+          },
+          include: { plan: true },
+        })
+        : null;
+      const isPremiumNoResponseJob = job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
+        && (
+          premiumNoResponseSubscription?.plan.code === PlanCode.PREMIUM
+          || job.premiumInsights.length > 0
+        );
       const eligibility = await followUpEligibilityService.checkJob(job.id);
-      if (!eligibility.eligible) {
+      if (!eligibility.eligible && !isPremiumNoResponseJob) {
         const status = eligibility.action === "CANCEL" ? FollowUpJobStatus.CANCELLED : FollowUpJobStatus.SKIPPED;
         const updated = await prisma.followUpJob.updateMany({
           where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
@@ -372,76 +567,45 @@ export const followUpJobProcessorService = {
         results.push(record);
         continue;
       }
-      const premiumNoResponseSubscription = job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE
-        ? await prisma.subscription.findFirst({
-          where: {
-            businessAccountId: job.business.businessAccountId,
-            status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] },
-          },
-          include: { plan: true },
+      const premiumExecution: PremiumFollowUpPreparedExecution | null = isPremiumNoResponseJob
+        ? await followUpPremiumExecutionService.prepare(job.id).catch(async (error: unknown) => {
+          const reason = error instanceof Error
+            ? error.message.slice(0, 500)
+            : "PREMIUM_EXECUTION_PIPELINE_FAILED";
+          await prisma.followUpJob.updateMany({
+            where: {
+              id: job.id,
+              businessId,
+              status: FollowUpJobStatus.PROCESSING,
+            },
+            data: {
+              status: FollowUpJobStatus.FAILED,
+              failureReason: "PREMIUM_EXECUTION_PIPELINE_FAILED",
+              processingStartedAt: null,
+            },
+          });
+          await auditService.log({
+            action: AuditAction.FOLLOW_UP_JOB_FAILED,
+            businessId,
+            metadata: json({
+              jobId: job.id,
+              ruleId: job.ruleId,
+              premiumRound: 4,
+              reason: "PREMIUM_EXECUTION_PIPELINE_FAILED",
+              detail: reason,
+            }),
+          });
+          return null;
         })
         : null;
-      const isPremiumNoResponseJob = premiumNoResponseSubscription?.plan.code === PlanCode.PREMIUM;
-
-      if (isPremiumNoResponseJob) {
-        const premiumDecision = await followUpPremiumIntelligenceService.evaluateBeforeSend(job.id);
-        if (premiumDecision.action === "CANCEL") {
-          const updated = await prisma.followUpJob.updateMany({
-            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
-            data: { status: FollowUpJobStatus.CANCELLED, cancelReason: premiumDecision.reason, processingStartedAt: null },
-          });
-          if (updated.count !== 1) continue;
-          const record = await prisma.followUpJob.findUniqueOrThrow({ where: { id: job.id } });
-          await auditService.log({
-            action: AuditAction.FOLLOW_UP_JOB_CANCELLED,
-            businessId,
-            metadata: json({
-              jobId: job.id,
-              reason: premiumDecision.reason,
-              premiumIntelligence: true,
-              snapshotId: "snapshot" in premiumDecision ? premiumDecision.snapshot?.id ?? null : null,
-            }),
-          });
-          realtimeService.publish({
-            type: "business.follow_up.premium.no_response.cancelled",
-            businessId,
-            conversationId: job.conversationId ?? undefined,
-            leadId: job.leadId ?? undefined,
-            payload: { job: record, reason: premiumDecision.reason },
-            broadcastToStaff: true,
-          });
-          results.push(record);
-          continue;
-        }
-        if (premiumDecision.action === "RESCHEDULE") {
-          const updated = await prisma.followUpJob.updateMany({
-            where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
-            data: { status: FollowUpJobStatus.SCHEDULED, scheduledFor: premiumDecision.rescheduledFor, processingStartedAt: null },
-          });
-          if (updated.count !== 1) continue;
-          const record = await prisma.followUpJob.findUniqueOrThrow({ where: { id: job.id } });
-          await auditService.log({
-            action: AuditAction.FOLLOW_UP_JOB_RESCHEDULED,
-            businessId,
-            metadata: json({
-              jobId: job.id,
-              reason: premiumDecision.reason,
-              rescheduledFor: premiumDecision.rescheduledFor,
-              premiumIntelligence: true,
-              snapshotId: premiumDecision.snapshot.id,
-            }),
-          });
-          realtimeService.publish({
-            type: "business.follow_up.premium.no_response.rescheduled",
-            businessId,
-            conversationId: job.conversationId ?? undefined,
-            leadId: job.leadId ?? undefined,
-            payload: { job: record, reason: premiumDecision.reason, rescheduledFor: premiumDecision.rescheduledFor },
-            broadcastToStaff: true,
-          });
-          results.push(record);
-          continue;
-        }
+      if (isPremiumNoResponseJob && !premiumExecution) {
+        const failedJob = await prisma.followUpJob.findUnique({ where: { id: job.id } });
+        if (failedJob) results.push(failedJob);
+        continue;
+      }
+      if (premiumExecution?.handled) {
+        if (premiumExecution.job) results.push(premiumExecution.job);
+        continue;
       }
       const renderedMessageText = followUpTemplateRendererService.render(job.rule.messageTemplate, {
         customerName: job.lead?.fullName,
@@ -450,24 +614,19 @@ export const followUpJobProcessorService = {
         appointmentDate: job.appointment ? humanDate(job.appointment.startTime, job.appointment.timezone) : null,
         appointmentTime: job.appointment ? humanTime(job.appointment.startTime, job.appointment.timezone) : null,
       });
-      const premiumMessage = isPremiumNoResponseJob && job.conversationId
-        ? await followUpPremiumIntelligenceService.composeMessage({
-          businessId,
-          businessAccountId: job.business.businessAccountId,
-          businessName: job.business.name,
-          conversationId: job.conversationId,
-          leadName: job.lead?.fullName ?? null,
-          jobId: job.id,
-          fallbackText: renderedMessageText,
-        })
-        : { text: renderedMessageText, usedPremiumIntelligence: false as const };
-      const rewrite = premiumMessage.usedPremiumIntelligence
+      const rewrite = premiumExecution?.messageText
         ? {
-          text: premiumMessage.text,
+          text: premiumExecution.messageText,
           usedAiRewrite: true,
-          failed: "failed" in premiumMessage ? premiumMessage.failed === true : false,
-          reason: "failed" in premiumMessage && premiumMessage.failed ? "PREMIUM_INTELLIGENCE_MESSAGE_FALLBACK" as const : null,
-          providerMetadata: "providerMetadata" in premiumMessage ? premiumMessage.providerMetadata : undefined,
+          failed: false,
+          reason: null,
+          providerMetadata: {
+            premiumRound: 4,
+            executionId: premiumExecution.executionId,
+            generationId: premiumExecution.generation?.generationId,
+            messageSource: premiumExecution.generation?.messageSource,
+            fallbackMessageUsed: premiumExecution.generation?.fallbackMessageUsed,
+          },
         }
         : job.rule.useAiRewrite
         ? await followUpAiRewriteService.rewrite({
@@ -487,19 +646,33 @@ export const followUpJobProcessorService = {
           metadata: json({
             jobId: job.id,
             ruleId: job.ruleId,
-            usageEvent: premiumMessage.usedPremiumIntelligence
+            usageEvent: premiumExecution
               ? "PREMIUM_FOLLOW_UP_MESSAGE_COMPOSED"
               : rewrite.usedAiRewrite
                 ? "PLUS_AI_REWRITE_USED"
                 : "PLUS_AI_REWRITE_FAILED",
             reason: rewrite.reason,
-            premiumIntelligence: premiumMessage.usedPremiumIntelligence,
-            snapshotId: "snapshotId" in premiumMessage ? premiumMessage.snapshotId : null,
+            premiumIntelligence: Boolean(premiumExecution),
+            executionId: premiumExecution?.executionId ?? null,
             aiRewrite: "providerMetadata" in rewrite ? rewrite.providerMetadata : null,
           }),
         });
       }
-      if (!job.conversationId || !job.leadId || !job.lead?.phone || job.conversation?.channel !== ConversationChannel.WHATSAPP) {
+      if (
+        !job.conversationId
+        || !job.leadId
+        || (!premiumExecution && !job.lead?.phone)
+        || job.conversation?.channel !== ConversationChannel.WHATSAPP
+      ) {
+        if (premiumExecution) {
+          await followUpPremiumExecutionService.blockBeforeDelivery(
+            premiumExecution,
+            "CUSTOMER_CONTACT_UNAVAILABLE",
+          );
+          const blockedJob = await prisma.followUpJob.findUnique({ where: { id: job.id } });
+          if (blockedJob) results.push(blockedJob);
+          continue;
+        }
         const failed = await prisma.$transaction(async (tx) => {
           const markedFailed = await tx.followUpJob.updateMany({
             where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
@@ -531,12 +704,21 @@ export const followUpJobProcessorService = {
       }
       const conversationId = job.conversationId;
       const leadId = job.leadId;
-      const destinationPhone = job.lead.phone;
+      let destinationPhone = job.lead?.phone ?? null;
 
       let integration;
       try {
         integration = await getWhatsAppIntegration(businessId);
       } catch {
+        if (premiumExecution) {
+          await followUpPremiumExecutionService.blockBeforeDelivery(
+            premiumExecution,
+            "WHATSAPP_DISCONNECTED",
+          );
+          const blockedJob = await prisma.followUpJob.findUnique({ where: { id: job.id } });
+          if (blockedJob) results.push(blockedJob);
+          continue;
+        }
         const failed = await prisma.$transaction(async (tx) => {
           const markedFailed = await tx.followUpJob.updateMany({
             where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
@@ -567,6 +749,20 @@ export const followUpJobProcessorService = {
         continue;
       }
 
+      if (premiumExecution) {
+        const finalCheck = await followUpPremiumExecutionService.finalDeliveryCheck(premiumExecution);
+        if (!finalCheck.allowed) {
+          await followUpPremiumExecutionService.blockBeforeDelivery(
+            premiumExecution,
+            finalCheck.reason,
+          );
+          const blockedJob = await prisma.followUpJob.findUnique({ where: { id: job.id } });
+          if (blockedJob) results.push(blockedJob);
+          continue;
+        }
+        destinationPhone = finalCheck.destinationPhone;
+      }
+
       const prepared = await prisma.$transaction(async (tx) => {
         const stopProcessing = async (input: { status: "CANCELLED" | "SKIPPED"; reason: string }) => {
           const stopped = await tx.followUpJob.updateMany({
@@ -586,6 +782,60 @@ export const followUpJobProcessorService = {
           include: { rule: true, business: true },
         });
         if (!currentJob) return null;
+        const reserveSendLog = async () => {
+          const data = {
+            businessId,
+            ruleId: job.ruleId,
+            jobId: job.id,
+            leadId,
+            conversationId,
+            appointmentId: job.appointmentId,
+            quoteId: job.quoteId,
+            messageText,
+            sentBy: rewrite.usedAiRewrite
+              ? FollowUpSendLogSentBy.AI
+              : FollowUpSendLogSentBy.SYSTEM,
+            deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
+          };
+          if (!premiumExecution) return tx.followUpSendLog.create({ data });
+          return tx.followUpSendLog.upsert({
+            where: {
+              executionIdempotencyKey: premiumExecution.executionIdempotencyKey,
+            },
+            create: {
+              ...data,
+              executionIdempotencyKey: premiumExecution.executionIdempotencyKey,
+            },
+            update: {
+              messageText,
+              deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
+              failureReason: null,
+            },
+          });
+        };
+        const linkPremiumDelivery = async (messageId: string, sendLogId: string) => {
+          if (!premiumExecution) return;
+          const linked = await tx.premiumFollowUpExecution.updateMany({
+            where: {
+              id: premiumExecution.executionId,
+              executionStatus: PremiumFollowUpExecutionStatus.READY_TO_SEND,
+              processingLeaseToken: premiumExecution.executionLeaseToken,
+            },
+            data: {
+              outboundMessageId: messageId,
+              sendLogId,
+            },
+          });
+          if (linked.count !== 1) {
+            throw new Error("PREMIUM_EXECUTION_LEASE_LOST");
+          }
+          if (premiumExecution.generation?.generationId) {
+            await tx.premiumFollowUpMessageGeneration.update({
+              where: { id: premiumExecution.generation.generationId },
+              data: { messageId },
+            });
+          }
+        };
         if (!currentJob.business.followUpAutomationEnabled) {
           return stopProcessing({ status: FollowUpJobStatus.CANCELLED, reason: "FOLLOW_UP_AUTOMATION_DISABLED" });
         }
@@ -764,6 +1014,44 @@ export const followUpJobProcessorService = {
               where: { id: job.id },
               data: { status: FollowUpJobStatus.SENT, sentAt: existingMessage.createdAt, processingStartedAt: null, failureReason: null },
             });
+            if (premiumExecution) {
+              const continuationRequired = premiumContinuationRequired({
+                providerAccepted: true,
+                sequenceStage: premiumExecution.validation.sequenceStage,
+                executionAction: premiumExecution.plan.action,
+              });
+              const completedExecution = await tx.premiumFollowUpExecution.updateMany({
+                where: {
+                  id: premiumExecution.executionId,
+                  executionStatus: PremiumFollowUpExecutionStatus.READY_TO_SEND,
+                  processingLeaseToken: premiumExecution.executionLeaseToken,
+                },
+                data: {
+                  executionStatus: premiumExecution.plan.action === "ESCALATE"
+                    ? PremiumFollowUpExecutionStatus.ESCALATED
+                    : premiumExecution.validation.sequenceStage
+                        === PremiumFollowUpSequenceStage.FINAL_POLITE_FOLLOW_UP
+                      ? PremiumFollowUpExecutionStatus.EXHAUSTED
+                      : PremiumFollowUpExecutionStatus.SENT,
+                  outboundMessageId: existingMessage.id,
+                  executedAt: existingMessage.createdAt,
+                  completedAt: new Date(),
+                  continuationStatus: continuationRequired
+                    ? PREMIUM_CONTINUATION_STATUS.PENDING
+                    : PREMIUM_CONTINUATION_STATUS.NOT_REQUIRED,
+                  continuationJobId: null,
+                  continuationReason: continuationRequired
+                    ? "PREMIUM_NEXT_STAGE_REQUIRED"
+                    : "PREMIUM_NEXT_STAGE_NOT_REQUIRED",
+                  continuationProcessingStartedAt: null,
+                  continuationNextAttemptAt: continuationRequired ? new Date() : null,
+                  continuationCompletedAt: continuationRequired ? null : new Date(),
+                },
+              });
+              if (completedExecution.count !== 1) {
+                throw new Error("PREMIUM_EXECUTION_LEASE_LOST");
+              }
+            }
             return { job: updatedJob, message: existingMessage, sent: false, reason: "FOLLOW_UP_ALREADY_DELIVERED" };
           }
           const existingMetadata = jsonObject(existingMessage.metadata);
@@ -772,6 +1060,25 @@ export const followUpJobProcessorService = {
               where: { id: job.id },
               data: { status: FollowUpJobStatus.FAILED, failureReason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION", processingStartedAt: null },
             });
+            if (premiumExecution) {
+              const blockedExecution = await tx.premiumFollowUpExecution.updateMany({
+                where: {
+                  id: premiumExecution.executionId,
+                  executionStatus: PremiumFollowUpExecutionStatus.READY_TO_SEND,
+                  processingLeaseToken: premiumExecution.executionLeaseToken,
+                },
+                data: {
+                  executionStatus: PremiumFollowUpExecutionStatus.BLOCKED,
+                  executionBlocked: true,
+                  blockReason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION",
+                  outboundMessageId: existingMessage.id,
+                  completedAt: new Date(),
+                },
+              });
+              if (blockedExecution.count !== 1) {
+                throw new Error("PREMIUM_EXECUTION_LEASE_LOST");
+              }
+            }
             return { job: updatedJob, message: existingMessage, sent: false, reason: "FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION" };
           }
           const message = await tx.message.update({
@@ -791,36 +1098,11 @@ export const followUpJobProcessorService = {
               }),
             },
           });
-          const reservedSendLog = await tx.followUpSendLog.create({
-            data: {
-              businessId,
-              ruleId: job.ruleId,
-              jobId: job.id,
-              leadId,
-              conversationId,
-              appointmentId: job.appointmentId,
-              quoteId: job.quoteId,
-              messageText,
-              sentBy: rewrite.usedAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
-              deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
-            },
-          });
+          const reservedSendLog = await reserveSendLog();
+          await linkPremiumDelivery(message.id, reservedSendLog.id);
           return { message, sent: true as const, reusedMessage: true as const, sendLogId: reservedSendLog.id };
         }
-        const reservedSendLog = await tx.followUpSendLog.create({
-          data: {
-            businessId,
-            ruleId: job.ruleId,
-            jobId: job.id,
-            leadId,
-            conversationId,
-            appointmentId: job.appointmentId,
-            quoteId: job.quoteId,
-            messageText,
-            sentBy: rewrite.usedAiRewrite ? FollowUpSendLogSentBy.AI : FollowUpSendLogSentBy.SYSTEM,
-            deliveryStatus: FollowUpSendLogDeliveryStatus.QUEUED,
-          },
-        });
+        const reservedSendLog = await reserveSendLog();
         const message = await tx.message.create({
           data: {
             businessId,
@@ -831,7 +1113,21 @@ export const followUpJobProcessorService = {
             direction: MessageDirection.OUTBOUND,
             deliveryStatus: MessageDeliveryStatus.PENDING,
             content: messageText,
-            metadata: json({ source: "FOLLOW_UP_AUTOMATION", jobId: job.id, ruleId: job.ruleId, contextType: job.contextType }),
+            metadata: json({
+              source: "FOLLOW_UP_AUTOMATION",
+              jobId: job.id,
+              ruleId: job.ruleId,
+              contextType: job.contextType,
+              premiumExecutionId: premiumExecution?.executionId ?? null,
+              premiumExecutionIdempotencyKey: premiumExecution?.executionIdempotencyKey ?? null,
+              premiumExecutionAction: premiumExecution?.plan.action ?? null,
+              premiumSequenceStage: premiumExecution?.validation.sequenceStage ?? null,
+              premiumMessageSource: premiumExecution?.generation?.messageSource ?? null,
+              premiumFallbackMessageUsed: premiumExecution?.generation?.fallbackMessageUsed ?? false,
+              premiumPromptVersions: premiumExecution?.validation.promptVersions ?? null,
+              premiumMemoryVersion: premiumExecution?.validation.memoryVersion ?? null,
+              premiumContextVersion: premiumExecution?.generation?.contextVersion ?? null,
+            }),
           },
         });
         await tx.conversation.update({
@@ -846,6 +1142,7 @@ export const followUpJobProcessorService = {
             metadata: json({ conversationId, messageId: message.id, senderType: MessageSenderType.SYSTEM, source: "FOLLOW_UP_AUTOMATION", jobId: job.id }),
           },
         });
+        await linkPremiumDelivery(message.id, reservedSendLog.id);
         return { message, sent: true as const, reusedMessage: false as const, sendLogId: reservedSendLog.id };
       });
           if (!prepared) continue;
@@ -902,11 +1199,27 @@ export const followUpJobProcessorService = {
                   customerReplyId: cancelledBeforeSend.customerReplyId,
                 }),
               });
+              if (premiumExecution) {
+                await prisma.premiumFollowUpExecution.updateMany({
+                  where: {
+                    id: premiumExecution.executionId,
+                    executionStatus: PremiumFollowUpExecutionStatus.READY_TO_SEND,
+                    processingLeaseToken: premiumExecution.executionLeaseToken,
+                  },
+                  data: {
+                    executionStatus: PremiumFollowUpExecutionStatus.BLOCKED,
+                    executionBlocked: true,
+                    blockReason: cancelledBeforeSend.reason,
+                    completedAt: new Date(),
+                  },
+                });
+              }
               results.push(cancelledBeforeSend.job);
               continue;
             }
           }
 
+          const deliveryAttemptStartedAt = new Date().toISOString();
           const deliveryGate = await prisma.$transaction(async (tx) => {
             const stopBeforeDelivery = async (input: { status: "CANCELLED" | "SKIPPED"; reason: string }) => {
               const stopped = await tx.followUpJob.updateMany({
@@ -945,9 +1258,16 @@ export const followUpJobProcessorService = {
               return { job: await tx.followUpJob.findUniqueOrThrow({ where: { id: job.id } }), reason: input.reason };
             };
 
+            await tx.$queryRaw`
+              SELECT "id"
+              FROM "Lead"
+              WHERE "id" = ${leadId}
+                AND "businessId" = ${businessId}
+              FOR UPDATE
+            `;
             const currentJob = await tx.followUpJob.findFirst({
               where: { id: job.id, businessId, status: FollowUpJobStatus.PROCESSING },
-              include: { rule: true, business: true },
+              include: { rule: true, business: true, lead: true },
             });
             if (!currentJob) return null;
             if (!currentJob.business.followUpAutomationEnabled) {
@@ -955,6 +1275,9 @@ export const followUpJobProcessorService = {
             }
             if (!currentJob.rule.enabled || currentJob.rule.deletedAt) {
               return stopBeforeDelivery({ status: FollowUpJobStatus.SKIPPED, reason: "FOLLOW_UP_RULE_DISABLED" });
+            }
+            if (currentJob.lead?.whatsAppOptedOut) {
+              return stopBeforeDelivery({ status: FollowUpJobStatus.CANCELLED, reason: "CUSTOMER_OPTED_OUT" });
             }
             const subscription = await tx.subscription.findFirst({
               where: { businessAccountId: currentJob.business.businessAccountId, status: { in: [SubscriptionStatus.ACTIVE, SubscriptionStatus.TRIALING] } },
@@ -965,10 +1288,77 @@ export const followUpJobProcessorService = {
             if (!ruleTypesForPlan(subscription.plan.code).includes(currentJob.rule.type)) {
               return stopBeforeDelivery({ status: FollowUpJobStatus.SKIPPED, reason: "PLAN_UPGRADE_REQUIRED" });
             }
-            return { job: currentJob, reason: null };
-          });
+            const currentMessage = await tx.message.findFirst({
+              where: {
+                id: followUpMessage.id,
+                businessId,
+                deliveryStatus: MessageDeliveryStatus.PENDING,
+              },
+              select: { id: true, metadata: true },
+            });
+            if (!currentMessage) {
+              return stopBeforeDelivery({
+                status: FollowUpJobStatus.CANCELLED,
+                reason: "FOLLOW_UP_MESSAGE_NOT_ELIGIBLE",
+              });
+            }
+            let currentDestinationPhone = destinationPhone;
+            if (premiumExecution) {
+              const premiumSafety = await followUpPremiumExecutionService.finalDeliveryCheck(
+                premiumExecution,
+                tx,
+                { claimDelivery: true },
+              );
+              if (!premiumSafety.allowed) {
+                return stopBeforeDelivery({
+                  status: FollowUpJobStatus.CANCELLED,
+                  reason: premiumSafety.reason,
+                });
+              }
+              currentDestinationPhone = premiumSafety.destinationPhone;
+            }
+            if (!currentDestinationPhone) {
+              return stopBeforeDelivery({
+                status: FollowUpJobStatus.CANCELLED,
+                reason: "CUSTOMER_CONTACT_UNAVAILABLE",
+              });
+            }
+            await tx.message.update({
+              where: { id: currentMessage.id },
+              data: {
+                metadata: json({
+                  ...jsonObject(currentMessage.metadata),
+                  source: "FOLLOW_UP_AUTOMATION",
+                  jobId: job.id,
+                  ruleId: job.ruleId,
+                  contextType: job.contextType,
+                  deliveryAttemptStartedAt,
+                }),
+              },
+            });
+            return {
+              job: currentJob,
+              reason: null,
+              destinationPhone: currentDestinationPhone,
+            };
+          }, { maxWait: 10_000, timeout: 30_000 });
           if (!deliveryGate) continue;
           if (deliveryGate.reason) {
+            if (premiumExecution) {
+              await prisma.premiumFollowUpExecution.updateMany({
+                where: {
+                  id: premiumExecution.executionId,
+                  executionStatus: PremiumFollowUpExecutionStatus.READY_TO_SEND,
+                  processingLeaseToken: premiumExecution.executionLeaseToken,
+                },
+                data: {
+                  executionStatus: PremiumFollowUpExecutionStatus.BLOCKED,
+                  executionBlocked: true,
+                  blockReason: deliveryGate.reason,
+                  completedAt: new Date(),
+                },
+              });
+            }
             await auditService.log({
               action: deliveryGate.job.status === FollowUpJobStatus.CANCELLED ? AuditAction.FOLLOW_UP_JOB_CANCELLED : AuditAction.FOLLOW_UP_JOB_SKIPPED,
               businessId,
@@ -977,37 +1367,13 @@ export const followUpJobProcessorService = {
             results.push(deliveryGate.job);
             continue;
           }
+          if (!("destinationPhone" in deliveryGate)) continue;
 
-          if (!prepared.reusedMessage) {
-            realtimeService.publish({
-              type: "message.created",
-              businessId,
-              conversationId,
-              leadId,
-              messageId: followUpMessage.id,
-              assignedStaffId: job.conversation?.assignedStaffId,
-              payload: { message: followUpMessage },
-            });
-          }
-
-          const deliveryAttemptStartedAt = new Date().toISOString();
-          await prisma.message.update({
-            where: { id: followUpMessage.id },
-            data: {
-              metadata: json({
-                ...jsonObject(followUpMessage.metadata),
-                source: "FOLLOW_UP_AUTOMATION",
-                jobId: job.id,
-                ruleId: job.ruleId,
-                contextType: job.contextType,
-                deliveryAttemptStartedAt,
-              }),
-            },
-          });
-
+          // DELIVERY_STARTED is the durable handoff boundary. Keep the provider
+          // submission immediately after the claim and reconcile any crash here.
           const providerResult = await sendWhatsAppText(integration, {
             phoneNumberId: integration.phoneNumberId,
-            to: destinationPhone,
+            to: deliveryGate.destinationPhone,
             message: messageText,
             businessId,
             conversationId,
@@ -1071,6 +1437,54 @@ export const followUpJobProcessorService = {
             },
           });
         }
+        if (premiumExecution) {
+          const successfulStatus = premiumExecution.plan.action === "ESCALATE"
+            ? PremiumFollowUpExecutionStatus.ESCALATED
+            : premiumExecution.validation.sequenceStage
+                === PremiumFollowUpSequenceStage.FINAL_POLITE_FOLLOW_UP
+              ? PremiumFollowUpExecutionStatus.EXHAUSTED
+              : PremiumFollowUpExecutionStatus.SENT;
+          const continuationRequired = premiumContinuationRequired({
+            providerAccepted: providerResult.success,
+            sequenceStage: premiumExecution.validation.sequenceStage,
+            executionAction: premiumExecution.plan.action,
+          });
+          const completedExecution = await tx.premiumFollowUpExecution.updateMany({
+            where: {
+              id: premiumExecution.executionId,
+              executionStatus: PremiumFollowUpExecutionStatus.DELIVERY_STARTED,
+              processingLeaseToken: premiumExecution.executionLeaseToken,
+            },
+            data: {
+              executionStatus: providerResult.success
+                ? successfulStatus
+                : PremiumFollowUpExecutionStatus.FAILED,
+              executionReason: providerResult.success
+                ? successfulStatus === PremiumFollowUpExecutionStatus.EXHAUSTED
+                  ? "FINAL_STAGE_SENT_SEQUENCE_EXHAUSTED"
+                  : premiumExecution.plan.reason
+                : providerResult.error ?? "WHATSAPP_SEND_FAILED",
+              outboundMessageId: followUpMessage.id,
+              sendLogId: "sendLogId" in prepared ? prepared.sendLogId : null,
+              executedAt: new Date(),
+              completedAt: new Date(),
+              errorCode: providerResult.success ? null : "WHATSAPP_SEND_FAILED",
+              continuationStatus: continuationRequired
+                ? PREMIUM_CONTINUATION_STATUS.PENDING
+                : PREMIUM_CONTINUATION_STATUS.NOT_REQUIRED,
+              continuationJobId: null,
+              continuationReason: continuationRequired
+                ? "PREMIUM_NEXT_STAGE_REQUIRED"
+                : "PREMIUM_NEXT_STAGE_NOT_REQUIRED",
+              continuationProcessingStartedAt: null,
+              continuationNextAttemptAt: continuationRequired ? new Date() : null,
+              continuationCompletedAt: continuationRequired ? null : new Date(),
+            },
+          });
+          if (completedExecution.count !== 1) {
+            throw new Error("PREMIUM_EXECUTION_LEASE_LOST");
+          }
+        }
         await tx.leadActivity.create({
               data: {
                 businessId,
@@ -1081,6 +1495,17 @@ export const followUpJobProcessorService = {
         });
         return { job: updatedJob, message: updatedMessage };
       });
+      if (!prepared.reusedMessage) {
+        realtimeService.publish({
+          type: "message.created",
+          businessId,
+          conversationId,
+          leadId,
+          messageId: followUpMessage.id,
+          assignedStaffId: job.conversation?.assignedStaffId,
+          payload: { message: completed.message },
+        });
+      }
       realtimeService.publish({
             type: "message.status.updated",
             businessId,
@@ -1090,6 +1515,37 @@ export const followUpJobProcessorService = {
             assignedStaffId: job.conversation?.assignedStaffId,
             payload: { messageId: followUpMessage.id, conversationId, previousStatus: MessageDeliveryStatus.PENDING, newStatus: deliveryStatus, updatedAt: completed.message.updatedAt },
       });
+      if (premiumExecution) {
+        const executionStatus = providerResult.success
+          ? premiumExecution.plan.action === "ESCALATE"
+            ? PremiumFollowUpExecutionStatus.ESCALATED
+            : premiumExecution.validation.sequenceStage
+                === PremiumFollowUpSequenceStage.FINAL_POLITE_FOLLOW_UP
+              ? PremiumFollowUpExecutionStatus.EXHAUSTED
+              : PremiumFollowUpExecutionStatus.SENT
+          : PremiumFollowUpExecutionStatus.FAILED;
+        try {
+          realtimeService.publish({
+            type: "business.follow_up.premium.execution.updated",
+            businessId,
+            conversationId,
+            leadId,
+            payload: {
+              executionId: premiumExecution.executionId,
+              followUpJobId: job.id,
+              sequenceStage: premiumExecution.validation.sequenceStage,
+              finalDecision: premiumExecution.validation.finalDecision,
+              executionStatus,
+              reason: providerResult.success
+                ? premiumExecution.plan.reason
+                : providerResult.error ?? "WHATSAPP_SEND_FAILED",
+            },
+            broadcastToStaff: true,
+          });
+        } catch {
+          // A successful outbound message must not roll back for realtime failure.
+        }
+      }
       if (!providerResult.success) {
         await auditService.log({ action: AuditAction.FOLLOW_UP_JOB_FAILED, businessId, metadata: json({ jobId: job.id, ruleId: job.ruleId, reason: providerResult.error ?? "WHATSAPP_SEND_FAILED" }) });
             realtimeService.publish({ type: "business.follow_up.job.failed", businessId, conversationId, leadId, payload: { job: completed.job, reason: providerResult.error ?? "WHATSAPP_SEND_FAILED" }, broadcastToStaff: true });
@@ -1101,14 +1557,11 @@ export const followUpJobProcessorService = {
           realtimeService.publish({ type: "business.follow_up.job.sent", businessId, conversationId, leadId, payload: { job: completed.job }, broadcastToStaff: true });
           realtimeService.publish({ type: basicSentEventType(job.rule.type), businessId, conversationId, leadId, payload: { job: completed.job, message: completed.message }, broadcastToStaff: true });
           if (job.rule.type === FollowUpRuleType.NO_RESPONSE_AFTER_MESSAGE) {
-            const premiumNext = await followUpPremiumIntelligenceService.scheduleNoResponseAfterOutboundMessage({
-              businessId,
-              leadId,
-              conversationId,
-              messageId: followUpMessage.id,
-              messageCreatedAt: completed.message.createdAt,
-            });
-            if (!premiumNext.scheduled && premiumNext.reason === "PLAN_NOT_PREMIUM") {
+            if (premiumExecution) {
+              await followUpPremiumContinuationService
+                .processExecution(premiumExecution.executionId)
+                .catch(() => undefined);
+            } else {
               await followUpBasicService.scheduleNoResponseAfterOutboundMessage({
                 businessId,
                 leadId,

@@ -35,6 +35,10 @@ let running = false;
 const MAX_ATTEMPTS = 5;
 const STALE_PROCESSING_MS = 10 * 60_000;
 const AI_USAGE_RECONCILIATION_REQUIRED = "CUSTOMER_MEMORY_AI_USAGE_RECONCILIATION_REQUIRED";
+const CUSTOMER_MEMORY_WORKER_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: 30_000,
+} as const;
 
 function retryAt(attempt: number) {
   const delayMinutes = Math.min(2 ** Math.max(attempt - 1, 0), 60);
@@ -43,7 +47,23 @@ function retryAt(attempt: number) {
 
 function errorCode(error: unknown) {
   if (error instanceof Error && error.message.startsWith("CUSTOMER_MEMORY_")) return error.message.slice(0, 120);
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === "P2028") return "CUSTOMER_MEMORY_TRANSACTION_TIMEOUT";
+    if (typeof code === "string" && /^P\d{4}$/.test(code)) {
+      return `CUSTOMER_MEMORY_DATABASE_${code}`;
+    }
+  }
   return "CUSTOMER_MEMORY_EXTRACTION_FAILED";
+}
+
+function isTransactionApiError(error: unknown) {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "code" in error
+    && (error as { code?: unknown }).code === "P2028",
+  );
 }
 
 function providerUsageFromError(error: unknown): CustomerMemoryExtractionUsage | null {
@@ -236,7 +256,7 @@ async function discoverBusinessMessages(businessId: string) {
       },
     });
     return created.count;
-  });
+  }, CUSTOMER_MEMORY_WORKER_TRANSACTION_OPTIONS);
 }
 
 async function discoverMessages() {
@@ -248,7 +268,16 @@ async function discoverMessages() {
     select: { businessId: true },
   });
   let created = 0;
-  for (const cursor of cursors) created += await discoverBusinessMessages(cursor.businessId);
+  for (const cursor of cursors) {
+    try {
+      created += await discoverBusinessMessages(cursor.businessId);
+    } catch (error) {
+      if (!isTransactionApiError(error)) throw error;
+      // Discovery is safe to retry: cursor movement and deduplicated job
+      // creation commit in the same transaction.
+      created += await discoverBusinessMessages(cursor.businessId);
+    }
+  }
   return created;
 }
 
@@ -332,7 +361,7 @@ async function claimNextBatch(preferRecent: boolean) {
         data: { lastProcessedAt: now },
       });
       return processingBatchId;
-    });
+    }, CUSTOMER_MEMORY_WORKER_TRANSACTION_OPTIONS);
     if (result) return result;
   }
   return null;
@@ -589,7 +618,7 @@ async function processBatch(processingBatchId: string) {
         },
       });
       return exhausted;
-    });
+    }, CUSTOMER_MEMORY_WORKER_TRANSACTION_OPTIONS);
     if (exhaustedJobs.length) {
       await reportExhaustedJobs({
         businessId: job.businessId,
@@ -690,7 +719,7 @@ async function recoverStaleProcessingJobs(staleBefore: Date, ambiguousBatchIds: 
           });
         }
         return changed;
-      })
+      }, CUSTOMER_MEMORY_WORKER_TRANSACTION_OPTIONS)
     : [];
 
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]));

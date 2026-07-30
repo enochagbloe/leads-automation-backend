@@ -21,7 +21,7 @@ import { subscriptionService } from "../subscription.service";
 import { aiPromptResolverService } from "../ai-prompt/resolution/ai-prompt-resolver.service";
 import { FollowUpPromptCompiled } from "../ai-prompt/core/ai-prompt.types";
 import { scheduleFollowUpAutomationJob } from "./follow-up-basic.service";
-import { FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES, json, jsonObject } from "./follow-up.shared";
+import { FOLLOW_UP_SUCCESSFUL_ATTEMPT_DELIVERY_STATUSES, json, jsonObject } from "./follow-up.shared";
 
 export const PREMIUM_NO_RESPONSE_MAX_ATTEMPTS = 3;
 
@@ -151,10 +151,10 @@ async function resolvePremiumPromptRuntime(input: {
     });
     const compiled = followUpCompiled(resolved.modulePrompt?.compiled);
     const global = globalCompiled(resolved.globalPrompt?.compiled);
-    const requestedMax = compiled?.maximumAttempts && Number.isFinite(compiled.maximumAttempts)
+    const requestedMax = typeof compiled?.maximumAttempts === "number" && Number.isFinite(compiled.maximumAttempts)
       ? compiled.maximumAttempts
       : PREMIUM_NO_RESPONSE_MAX_ATTEMPTS;
-    const maxAttempts = Math.max(1, Math.min(PREMIUM_NO_RESPONSE_MAX_ATTEMPTS, requestedMax, resolved.capabilities.maxFollowUpAttempts ?? PREMIUM_NO_RESPONSE_MAX_ATTEMPTS));
+    const maxAttempts = Math.max(0, Math.min(PREMIUM_NO_RESPONSE_MAX_ATTEMPTS, requestedMax, resolved.capabilities.maxFollowUpAttempts ?? PREMIUM_NO_RESPONSE_MAX_ATTEMPTS));
     return {
       maxAttempts,
       followUpConfig: compiled,
@@ -209,7 +209,7 @@ async function countNoResponseAttempts(input: {
       businessId: input.businessId,
       ruleId: input.ruleId,
       conversationId: input.conversationId,
-      deliveryStatus: { in: [...FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES] },
+      deliveryStatus: { in: [...FOLLOW_UP_SUCCESSFUL_ATTEMPT_DELIVERY_STATUSES] },
     },
   });
 }

@@ -1,0 +1,45 @@
+**Production Findings**
+
+1. **P1: Customer phone can change, but delivery uses a stale number.**  
+`processDueJobs()` loads the lead before processing. Round 1–3 reload current state, but the final destination is still taken from the original job snapshot. If staff changes the customer’s phone during processing, validation can approve the new lead state while WhatsApp sends to the old number.  
+[follow-up-processor.service.ts:447](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:447)  
+[follow-up-processor.service.ts:702](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:702)
+
+2. **P1: Final safety validation still has a post-commit race.**  
+The final delivery transaction verifies opt-out, takeover, complaints, staff activity, prompt versions, and lifecycle state, then commits. `sendWhatsAppText()` runs afterward. Any stop condition occurring between commit and provider submission will not prevent delivery.  
+[follow-up-processor.service.ts:1217](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1217)  
+[follow-up-processor.service.ts:1354](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1354)
+
+3. **P1: Customer opt-out is not persisted authoritatively.**  
+The validator and final gate scan only the latest 50 customer messages using regex. There is no durable contact-restriction record in the schema. An older opt-out can eventually disappear from the safety window. Opt-out must remain active until an explicit opt-in changes it.  
+[follow-up-premium-lifecycle-validator.service.ts:535](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-lifecycle-validator.service.ts:535)  
+[follow-up-premium-execution.service.ts:761](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-execution.service.ts:761)
+
+4. **P1: Premium AI generation is checked against one quota counter but recorded against another.**  
+`assertCanUseAiReplies()` checks `aiRepliesUsed`. Premium generation then calls `trackRequest()`, which only increments `aiRequestsUsed`. Therefore these provider calls do not consume the counter used to enforce the limit. Regeneration can make two unbounded paid requests.  
+[ai-usage.service.ts:248](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-usage.service.ts:248)  
+[ai-usage.service.ts:266](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-usage.service.ts:266)  
+[follow-up-premium-message-generator.service.ts:900](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-message-generator.service.ts:900)
+
+5. **P1/P2: Some delivered-message recovery paths do not settle the send log or continuation.**  
+Stale recovery can mark a job `SENT` from the message status without changing its `QUEUED` send log to `SENT` or marking the Premium continuation pending. Attempt counting can remain wrong and the next sequence stage may never be created.  
+[follow-up-processor.service.ts:219](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:219)  
+[follow-up-processor.service.ts:1005](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1005)
+
+6. **P2: `RECALCULATE` cancels the job without creating durable recalculation work.**  
+The execution changes the job to `CANCELLED` and the execution to `RECALCULATION_REQUIRED`, but no worker processes that status. Prompt, rule, appointment, or assignment changes can therefore terminate the sequence instead of recalculating it.  
+[follow-up-premium-execution.service.ts:419](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-execution.service.ts:419)
+
+7. **P2: Natural-language timing is initially interpreted in UTC.**  
+“Tonight,” “tomorrow,” and “next Monday” are calculated with UTC setters. Business-hours validation can adjust invalid times, but it cannot reliably recover the customer’s intended local meaning.  
+[follow-up-premium-decision-context.service.ts:180](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-decision-context.service.ts:180)
+
+8. **P2: Premium continuation businesses can be starved by ordinary scheduled jobs.**  
+Business IDs are concatenated with scheduled jobs first and then sliced to the global limit. Under sustained load, businesses appearing only in the Premium continuation result can repeatedly be excluded.  
+[follow-up-worker.service.ts:77](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-worker.service.ts:77)
+
+**Verification**
+
+TypeScript and all six Premium/follow-up test suites pass: 53 tests total. However, the current tests are primarily policy-unit tests; they do not exercise provider crash gaps, stale phone delivery, persistent opt-out, usage accounting, recovery settlement, or worker fairness.
+
+The first bug to resolve should be the stale destination-phone issue because it can send a customer’s message to the wrong person.

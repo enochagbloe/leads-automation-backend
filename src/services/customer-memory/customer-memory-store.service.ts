@@ -41,6 +41,13 @@ const TERMINAL_REQUEST_STATES = new Set<CustomerMemoryMissingDetailState>([
   CustomerMemoryMissingDetailState.EXPIRED,
 ]);
 
+// Applying a batch holds a lead-scoped advisory lock while it validates and
+// persists each memory. Remote databases can exceed Prisma's 5-second default.
+const CUSTOMER_MEMORY_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: 30_000,
+} as const;
+
 function resolvedRequestState(memory: ExtractedMemory, existingState: CustomerMemoryMissingDetailState | null) {
   if (memory.missingDetailState && TERMINAL_REQUEST_STATES.has(memory.missingDetailState)) {
     return memory.missingDetailState;
@@ -493,6 +500,6 @@ export const customerMemoryStoreService = {
         });
       }
       return { created, superseded, conflicts, rejected, updated };
-    });
+    }, CUSTOMER_MEMORY_TRANSACTION_OPTIONS);
   },
 };

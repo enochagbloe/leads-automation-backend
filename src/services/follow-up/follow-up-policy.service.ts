@@ -29,9 +29,16 @@ export function requiredPlanForRuleType(type: FollowUpRuleType): PlanCode {
   return PlanCode.BASIC;
 }
 
+export function maxAttemptsForRule(plan: PlanCode, _type: FollowUpRuleType) {
+  if (plan === PlanCode.PREMIUM) return 3;
+  if (plan === PlanCode.PLUS) return 2;
+  return 1;
+}
+
 export type FollowUpPlanPolicy = Awaited<ReturnType<typeof followUpPlanPolicyService.policy>>;
 
 export function assertFollowUpRuleSettingsWithinPolicy(policy: FollowUpPlanPolicy, input: {
+  type: FollowUpRuleType;
   useAiRewrite: boolean;
   maxSendsPerLead: number;
   maxSendsPerConversation: number;
@@ -42,6 +49,24 @@ export function assertFollowUpRuleSettingsWithinPolicy(policy: FollowUpPlanPolic
       requiredPlan: PlanCode.PLUS,
       feature: "follow_up_ai_rewrite",
     });
+  }
+  const maximumAttempts = maxAttemptsForRule(policy.plan, input.type);
+  if (
+    input.maxSendsPerLead > maximumAttempts
+    || input.maxSendsPerConversation > maximumAttempts
+  ) {
+    throw new AppError(
+      403,
+      `This follow-up rule supports at most ${maximumAttempts} automated ${maximumAttempts === 1 ? "attempt" : "attempts"} on your current plan.`,
+      "PLAN_LIMIT_REACHED",
+      {
+        currentPlan: policy.plan,
+        ruleType: input.type,
+        limit: maximumAttempts,
+        attemptedPerLead: input.maxSendsPerLead,
+        attemptedPerConversation: input.maxSendsPerConversation,
+      },
+    );
   }
   if (input.maxSendsPerLead > policy.maxSendsPerLead) {
     throw new AppError(403, "Max sends per lead exceeds your plan limit.", "PLAN_LIMIT_REACHED", {
