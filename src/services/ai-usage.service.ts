@@ -34,6 +34,7 @@ export function getCustomerMemoryAiRequestLimit(planCode: PlanCode) {
 }
 
 const CUSTOMER_MEMORY_RESERVATION_FEATURE = "CUSTOMER_MEMORY_EXTRACTION";
+const PREMIUM_FOLLOW_UP_GENERATION_FEATURE = "PREMIUM_FOLLOW_UP_MESSAGE_GENERATION";
 
 function customerMemoryReservationKey(processingBatchId: string) {
   return `customer-memory:${processingBatchId}`;
@@ -44,6 +45,253 @@ async function lockAiBudget(tx: Prisma.TransactionClient, businessAccountId: str
 }
 
 export const aiUsageService = {
+  async reservePremiumFollowUpGeneration(input: {
+    businessAccountId: string;
+    idempotencyKey: string;
+    processingBatchId: string;
+  }) {
+    const subscription = await subscriptionService.getCurrentRecord(input.businessAccountId);
+    const usage = subscription.usageRecords[0];
+    if (!usage) throw new AppError(500, "Current account usage record is unavailable", "USAGE_RECORD_UNAVAILABLE");
+    const permissions = getAiPlanPermissions(subscription.plan.code, subscription.plan.maxAiRepliesPerMonth);
+    if (!permissions.aiReplies) {
+      throw new AppError(403, "AI replies are not available on this plan.", "AI_DISABLED");
+    }
+    const reservedRequests =
+      1 + Math.min(env.OPENROUTER_MAX_FALLBACK_ATTEMPTS, env.OPENROUTER_FALLBACK_MODELS.length);
+
+    return prisma.$transaction(async (tx) => {
+      await lockAiBudget(tx, input.businessAccountId);
+      const existing = await tx.aiUsageReservation.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+      });
+      if (existing) {
+        throw new AppError(
+          409,
+          "This Premium follow-up AI generation attempt has already been processed.",
+          "AI_USAGE_RESERVATION_NOT_RETRYABLE",
+        );
+      }
+
+      const current = await tx.accountUsageRecord.findUnique({
+        where: { id: usage.id },
+        select: { aiRepliesUsed: true },
+      });
+      if (!current) {
+        throw new AppError(500, "Current account usage record is unavailable", "USAGE_RECORD_UNAVAILABLE");
+      }
+      const limit = permissions.monthlyAiReplyLimit;
+      if (limit !== null && current.aiRepliesUsed + 1 > limit) {
+        throw new AppError(
+          403,
+          "Your account has reached the monthly AI reply limit for the current plan.",
+          "AI_QUOTA_EXCEEDED",
+          {
+            current: current.aiRepliesUsed,
+            limit,
+            currentPlan: subscription.plan.code,
+            requested: 1,
+          },
+        );
+      }
+
+      await tx.accountUsageRecord.update({
+        where: { id: usage.id },
+        data: {
+          aiRepliesUsed: { increment: 1 },
+          aiRequestsUsed: { increment: reservedRequests },
+        },
+      });
+      const reservation = await tx.aiUsageReservation.create({
+        data: {
+          businessAccountId: input.businessAccountId,
+          accountUsageId: usage.id,
+          idempotencyKey: input.idempotencyKey,
+          feature: PREMIUM_FOLLOW_UP_GENERATION_FEATURE,
+          processingBatchId: input.processingBatchId,
+          reservedRequests,
+        },
+      });
+      return {
+        allowed: true as const,
+        reservationId: reservation.id,
+        reservedRequests,
+      };
+    });
+  },
+
+  async markPremiumFollowUpGenerationAttemptStarted(idempotencyKey: string) {
+    const changed = await prisma.aiUsageReservation.updateMany({
+      where: {
+        idempotencyKey,
+        feature: PREMIUM_FOLLOW_UP_GENERATION_FEATURE,
+        status: AiUsageReservationStatus.RESERVED,
+        providerAttemptStartedAt: null,
+      },
+      data: { providerAttemptStartedAt: new Date() },
+    });
+    if (changed.count !== 1) {
+      throw new AppError(
+        409,
+        "Premium follow-up AI generation usage could not be claimed.",
+        "AI_USAGE_RESERVATION_NOT_RETRYABLE",
+      );
+    }
+  },
+
+  async settlePremiumFollowUpGeneration(input: {
+    idempotencyKey: string;
+    providerRequestCount: number;
+    tokens?: number;
+    providerRequestId?: string;
+    failureCode?: string;
+  }) {
+    const actualRequests = Math.max(0, Math.floor(input.providerRequestCount));
+    const actualTokens = Math.max(0, Math.floor(input.tokens ?? 0));
+    return prisma.$transaction(async (tx) => {
+      const initial = await tx.aiUsageReservation.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+      });
+      if (!initial || initial.feature !== PREMIUM_FOLLOW_UP_GENERATION_FEATURE) {
+        throw new AppError(404, "AI usage reservation not found.", "AI_USAGE_RESERVATION_NOT_FOUND");
+      }
+      await lockAiBudget(tx, initial.businessAccountId);
+      const reservation = await tx.aiUsageReservation.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+      });
+      if (!reservation) {
+        throw new AppError(404, "AI usage reservation not found.", "AI_USAGE_RESERVATION_NOT_FOUND");
+      }
+      if (reservation.status === AiUsageReservationStatus.SETTLED) return reservation;
+      if (reservation.status !== AiUsageReservationStatus.RESERVED) {
+        throw new AppError(
+          409,
+          "AI usage reservation cannot be settled in its current state.",
+          "AI_USAGE_RESERVATION_NOT_SETTLEABLE",
+        );
+      }
+
+      const requestDelta = actualRequests - reservation.reservedRequests;
+      const replyDelta = (actualRequests > 0 ? 1 : 0) - 1;
+      await tx.accountUsageRecord.update({
+        where: { id: reservation.accountUsageId },
+        data: {
+          ...(replyDelta < 0 ? {
+            aiRepliesUsed: { decrement: Math.abs(replyDelta) },
+          } : {}),
+          ...(requestDelta > 0 ? {
+            aiRequestsUsed: { increment: requestDelta },
+          } : requestDelta < 0 ? {
+            aiRequestsUsed: { decrement: Math.abs(requestDelta) },
+          } : {}),
+          ...(actualTokens > 0 ? {
+            aiTokensUsed: { increment: actualTokens },
+          } : {}),
+        },
+      });
+      return tx.aiUsageReservation.update({
+        where: { id: reservation.id },
+        data: {
+          status: AiUsageReservationStatus.SETTLED,
+          actualRequests,
+          actualTokens,
+          providerRequestId: input.providerRequestId,
+          failureCode: input.failureCode,
+          settledAt: new Date(),
+          reconciliationRequiredAt: null,
+        },
+      });
+    });
+  },
+
+  async releasePremiumFollowUpGeneration(input: {
+    idempotencyKey: string;
+    failureCode?: string;
+  }) {
+    return prisma.$transaction(async (tx) => {
+      const initial = await tx.aiUsageReservation.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+      });
+      if (!initial || initial.feature !== PREMIUM_FOLLOW_UP_GENERATION_FEATURE) return null;
+      await lockAiBudget(tx, initial.businessAccountId);
+      const reservation = await tx.aiUsageReservation.findUnique({
+        where: { idempotencyKey: input.idempotencyKey },
+      });
+      if (!reservation || reservation.status !== AiUsageReservationStatus.RESERVED) {
+        return reservation;
+      }
+      if (reservation.providerAttemptStartedAt) {
+        return tx.aiUsageReservation.update({
+          where: { id: reservation.id },
+          data: {
+            status: AiUsageReservationStatus.RECONCILIATION_REQUIRED,
+            failureCode: input.failureCode ?? "PREMIUM_FOLLOW_UP_AI_USAGE_AMBIGUOUS",
+            reconciliationRequiredAt: new Date(),
+          },
+        });
+      }
+      await tx.accountUsageRecord.update({
+        where: { id: reservation.accountUsageId },
+        data: {
+          aiRepliesUsed: { decrement: 1 },
+          aiRequestsUsed: { decrement: reservation.reservedRequests },
+        },
+      });
+      return tx.aiUsageReservation.update({
+        where: { id: reservation.id },
+        data: {
+          status: AiUsageReservationStatus.RELEASED,
+          actualRequests: 0,
+          actualTokens: 0,
+          failureCode: input.failureCode,
+          releasedAt: new Date(),
+        },
+      });
+    });
+  },
+
+  async reconcileStalePremiumFollowUpGenerationReservations(staleBefore: Date) {
+    const reservations = await prisma.aiUsageReservation.findMany({
+      where: {
+        feature: PREMIUM_FOLLOW_UP_GENERATION_FEATURE,
+        status: AiUsageReservationStatus.RESERVED,
+        createdAt: { lt: staleBefore },
+      },
+      select: {
+        id: true,
+        idempotencyKey: true,
+        providerAttemptStartedAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+      take: 100,
+    });
+    let released = 0;
+    let reconciliationRequired = 0;
+    for (const reservation of reservations) {
+      if (reservation.providerAttemptStartedAt) {
+        const changed = await prisma.aiUsageReservation.updateMany({
+          where: {
+            id: reservation.id,
+            status: AiUsageReservationStatus.RESERVED,
+          },
+          data: {
+            status: AiUsageReservationStatus.RECONCILIATION_REQUIRED,
+            failureCode: "PREMIUM_FOLLOW_UP_AI_USAGE_AMBIGUOUS_CRASH",
+            reconciliationRequiredAt: new Date(),
+          },
+        });
+        reconciliationRequired += changed.count;
+      } else {
+        const result = await aiUsageService.releasePremiumFollowUpGeneration({
+          idempotencyKey: reservation.idempotencyKey,
+          failureCode: "PREMIUM_FOLLOW_UP_AI_USAGE_RELEASED_BEFORE_PROVIDER",
+        });
+        if (result?.status === AiUsageReservationStatus.RELEASED) released += 1;
+      }
+    }
+    return { released, reconciliationRequired };
+  },
+
   async reserveCustomerMemoryExtraction(input: { businessAccountId: string; processingBatchId: string }) {
     const { businessAccountId, processingBatchId } = input;
     const idempotencyKey = customerMemoryReservationKey(processingBatchId);
@@ -263,12 +511,14 @@ export const aiUsageService = {
     return { subscription, usage, permissions };
   },
 
-  async trackRequest(input: { accountUsageId: string; tokens?: number }) {
+  async trackRequest(input: { accountUsageId: string; tokens?: number; requests?: number }) {
+    const requests = Math.max(0, Math.floor(input.requests ?? 1));
+    const tokens = Math.max(0, Math.floor(input.tokens ?? 0));
     return prisma.accountUsageRecord.update({
       where: { id: input.accountUsageId },
       data: {
-        aiRequestsUsed: { increment: 1 },
-        ...(input.tokens ? { aiTokensUsed: { increment: input.tokens } } : {}),
+        aiRequestsUsed: { increment: requests },
+        ...(tokens > 0 ? { aiTokensUsed: { increment: tokens } } : {}),
       },
     });
   },

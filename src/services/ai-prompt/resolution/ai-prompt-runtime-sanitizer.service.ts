@@ -31,7 +31,7 @@ const globalInstructionsSchema = z.object({
 const followUpSchema = z.object({
   tone: z.enum(["professional", "friendly", "polite", "concise"]).optional(),
   responseLength: z.enum(["short", "medium"]).optional(),
-  maximumAttempts: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  maximumAttempts: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   defaultDelayMinutes: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   needsApprovalDelayMinutes: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   allowAdaptiveTiming: z.boolean().optional(),
@@ -145,7 +145,7 @@ export function sanitizeCompiledPromptForRuntime(value: unknown, capabilities: A
     const followUp = { ...compiled.followUp };
     if (typeof capabilities.maxFollowUpAttempts === "number") {
       const stored = followUp.maximumAttempts;
-      followUp.maximumAttempts = Math.max(1, Math.min(stored ?? capabilities.maxFollowUpAttempts, capabilities.maxFollowUpAttempts));
+      followUp.maximumAttempts = Math.max(0, Math.min(stored ?? capabilities.maxFollowUpAttempts, capabilities.maxFollowUpAttempts));
       if (stored !== undefined && stored !== followUp.maximumAttempts) {
         warnings.push({
           code: "AI_PROMPT_FOLLOW_UP_ATTEMPTS_CLAMPED",
@@ -154,7 +154,7 @@ export function sanitizeCompiledPromptForRuntime(value: unknown, capabilities: A
         });
       }
     } else if (typeof followUp.maximumAttempts === "number") {
-      followUp.maximumAttempts = Math.max(1, followUp.maximumAttempts);
+      followUp.maximumAttempts = Math.max(0, followUp.maximumAttempts);
     }
     followUp.defaultDelayMinutes = clampDelay({ value: followUp.defaultDelayMinutes, field: "defaultDelayMinutes", warnings });
     followUp.needsApprovalDelayMinutes = clampDelay({ value: followUp.needsApprovalDelayMinutes, field: "needsApprovalDelayMinutes", warnings });

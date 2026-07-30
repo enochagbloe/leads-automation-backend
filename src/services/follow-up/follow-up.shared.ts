@@ -37,6 +37,9 @@ export const sendLogInclude = {
 } satisfies Prisma.FollowUpSendLogInclude;
 
 export const FOLLOW_UP_MONTHLY_LIMIT_DELIVERY_STATUSES = [FollowUpSendLogDeliveryStatus.QUEUED, FollowUpSendLogDeliveryStatus.SENT] as const;
+// QUEUED reserves monthly quota but does not advance a customer-facing
+// sequence. Only provider-accepted sends count as completed attempts.
+export const FOLLOW_UP_SUCCESSFUL_ATTEMPT_DELIVERY_STATUSES = [FollowUpSendLogDeliveryStatus.SENT] as const;
 export const FOLLOW_UP_PROCESSING_STALE_MS = 10 * 60 * 1000;
 export const FOLLOW_UP_DELIVERED_MESSAGE_STATUSES: MessageDeliveryStatus[] = [MessageDeliveryStatus.SENT, MessageDeliveryStatus.DELIVERED, MessageDeliveryStatus.READ];
 
@@ -46,6 +49,23 @@ export function json(value: unknown): Prisma.InputJsonValue {
 
 export function jsonObject(value: Prisma.JsonValue | null | undefined): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? { ...value } as Record<string, unknown> : {};
+}
+
+export function followUpActivityBaseline(input: {
+  createdAt: Date;
+  metadata: Prisma.JsonValue | null;
+}, now = new Date()) {
+  const value = jsonObject(input.metadata).premiumRecalculationBaselineAt;
+  if (typeof value !== "string") return input.createdAt;
+  const baseline = new Date(value);
+  if (
+    !Number.isFinite(baseline.getTime())
+    || baseline < input.createdAt
+    || baseline > now
+  ) {
+    return input.createdAt;
+  }
+  return baseline;
 }
 
 export function isManager(actor: FollowUpActor) {
@@ -135,7 +155,7 @@ export function dateInTimezone(date: Date, timezone: string) {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function timeInTimezone(date: Date, timezone: string) {
+export function timeInTimezone(date: Date, timezone: string) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone,
     hour: "2-digit",
@@ -162,7 +182,7 @@ function offsetMs(date: Date, timezone: string) {
   return asUtc - date.getTime();
 }
 
-function zonedDateTimeToUtc(date: string, time: string, timezone: string) {
+export function zonedDateTimeToUtc(date: string, time: string, timezone: string) {
   const [year, month, day] = date.split("-").map(Number);
   const { hour, minute } = parseTime(time);
   const localAsUtc = Date.UTC(year!, month! - 1, day!, hour, minute, 0, 0);

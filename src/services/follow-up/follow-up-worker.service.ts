@@ -12,11 +12,16 @@ import {
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { isDatabaseUnavailableError } from "../../utils/database-error";
+import { aiUsageService } from "../ai-usage.service";
 import { followUpPlusService } from "./follow-up-plus.service";
 import { followUpJobProcessorService } from "./follow-up-processor.service";
+import { followUpPremiumContinuationService } from "./follow-up-premium-continuation.service";
+import { PREMIUM_CONTINUATION_STATUS } from "./follow-up-premium-continuation-policy";
+import { fairMergeBusinessIds } from "./follow-up-worker-policy";
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
+let dueBusinessSourceCursor = 0;
 let databaseUnavailableSince: Date | null = null;
 let databaseUnavailableLogCount = 0;
 let nextDatabaseRetryAt: Date | null = null;
@@ -74,10 +79,12 @@ function markDatabaseAvailable() {
 
 async function dueBusinessIds(limit: number) {
   const now = new Date();
-  const [scheduled, ambiguous, pendingMessages] = await Promise.all([
+  const staleContinuationClaim = new Date(now.getTime() - 10 * 60_000);
+  const [scheduled, ambiguous, pendingMessages, premiumContinuations] = await Promise.all([
     prisma.followUpJob.findMany({
       where: { status: FollowUpJobStatus.SCHEDULED, scheduledFor: { lte: now } },
       distinct: ["businessId"],
+      orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
       select: { businessId: true },
       take: limit,
     }),
@@ -87,6 +94,7 @@ async function dueBusinessIds(limit: number) {
         failureReason: { in: ["FOLLOW_UP_DELIVERY_PENDING_RECONCILIATION", "FOLLOW_UP_STALE_PROCESSING_PENDING_MESSAGE"] },
       },
       distinct: ["businessId"],
+      orderBy: [{ updatedAt: "asc" }],
       select: { businessId: true },
       take: limit,
     }),
@@ -99,11 +107,47 @@ async function dueBusinessIds(limit: number) {
         metadata: { path: ["source"], equals: "FOLLOW_UP_AUTOMATION" },
       },
       distinct: ["businessId"],
+      orderBy: [{ createdAt: "asc" }],
+      select: { businessId: true },
+      take: limit,
+    }),
+    prisma.premiumFollowUpExecution.findMany({
+      where: {
+        continuationAttemptCount: { lt: 5 },
+        OR: [
+          {
+            continuationStatus: {
+              in: [
+                PREMIUM_CONTINUATION_STATUS.PENDING,
+                PREMIUM_CONTINUATION_STATUS.FAILED,
+              ],
+            },
+            OR: [
+              { continuationNextAttemptAt: null },
+              { continuationNextAttemptAt: { lte: now } },
+            ],
+          },
+          {
+            continuationStatus: PREMIUM_CONTINUATION_STATUS.PROCESSING,
+            continuationProcessingStartedAt: { lt: staleContinuationClaim },
+          },
+        ],
+      },
+      distinct: ["businessId"],
+      orderBy: [{ continuationNextAttemptAt: "asc" }, { updatedAt: "asc" }],
       select: { businessId: true },
       take: limit,
     }),
   ]);
-  return Array.from(new Set([...scheduled, ...ambiguous, ...pendingMessages].map((row) => row.businessId))).slice(0, limit);
+  const sources = [
+    scheduled.map((row) => row.businessId),
+    ambiguous.map((row) => row.businessId),
+    pendingMessages.map((row) => row.businessId),
+    premiumContinuations.map((row) => row.businessId),
+  ];
+  const selected = fairMergeBusinessIds(sources, limit, dueBusinessSourceCursor);
+  dueBusinessSourceCursor = (dueBusinessSourceCursor + 1) % sources.length;
+  return selected;
 }
 
 async function scheduleStaleLeadJobs(limit: number) {
@@ -185,10 +229,17 @@ export const followUpWorkerService = {
     if (shouldSkipForDatabaseBackoff()) return;
     running = true;
     try {
+      await aiUsageService.reconcileStalePremiumFollowUpGenerationReservations(
+        new Date(Date.now() - 10 * 60_000),
+      );
       await scheduleStaleLeadJobs(env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
       const businessIds = await dueBusinessIds(env.FOLLOW_UP_WORKER_BUSINESS_BATCH_SIZE);
       for (const businessId of businessIds) {
         await followUpJobProcessorService.reconcileLocalPendingFollowUpState(businessId);
+        await followUpPremiumContinuationService.reconcilePending(
+          businessId,
+          env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE,
+        );
         await followUpJobProcessorService.processDueJobs(businessId, env.FOLLOW_UP_WORKER_JOB_BATCH_SIZE);
       }
       markDatabaseAvailable();
@@ -222,5 +273,6 @@ export const followUpWorkerService = {
     databaseUnavailableSince = null;
     databaseUnavailableLogCount = 0;
     nextDatabaseRetryAt = null;
+    dueBusinessSourceCursor = 0;
   },
 };

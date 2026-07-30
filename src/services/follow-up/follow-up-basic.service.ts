@@ -84,8 +84,20 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
     });
     if (!rule) return { scheduled: false, reason: "FOLLOW_UP_RULE_DISABLED" as const };
 
+    if (input.leadId) {
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "Lead"
+        WHERE "id" = ${input.leadId}
+          AND "businessId" = ${input.businessId}
+        FOR UPDATE
+      `;
+    }
     const [lead, conversation, appointment] = await Promise.all([
-      input.leadId ? tx.lead.findFirst({ where: { id: input.leadId, businessId: input.businessId, deletedAt: null }, select: { id: true, status: true, email: true } }) : Promise.resolve(null),
+      input.leadId ? tx.lead.findFirst({
+        where: { id: input.leadId, businessId: input.businessId, deletedAt: null },
+        select: { id: true, status: true, email: true, whatsAppOptedOut: true },
+      }) : Promise.resolve(null),
       input.conversationId ? tx.conversation.findFirst({
         where: { id: input.conversationId, businessId: input.businessId, deletedAt: null },
         select: { id: true, leadId: true, status: true, needsHumanReview: true, humanTakeover: true, assignedStaffId: true },
@@ -99,6 +111,7 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
     if (input.leadId && !lead) return { scheduled: false, reason: "LEAD_NOT_FOUND" as const };
     if (input.conversationId && !conversation) return { scheduled: false, reason: "CONVERSATION_NOT_FOUND" as const };
     if (input.appointmentId && !appointment) return { scheduled: false, reason: "APPOINTMENT_NOT_FOUND" as const };
+    if (lead?.whatsAppOptedOut) return { scheduled: false, reason: "CUSTOMER_OPTED_OUT" as const };
     if (input.leadId && conversation && conversation.leadId !== input.leadId) {
       return { scheduled: false, reason: "FOLLOW_UP_TARGET_MISMATCH" as const };
     }
@@ -174,6 +187,32 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
     if (input.leadId && leadSends >= maxSendsPerLead) return { scheduled: false, reason: "MAX_SENDS_PER_LEAD_REACHED" as const };
     if (input.conversationId && conversationSends >= maxSendsPerConversation) return { scheduled: false, reason: "MAX_SENDS_PER_CONVERSATION_REACHED" as const };
 
+    const scheduledFor = input.scheduledFor ?? new Date(Date.now() + rule.delayMinutes * 60_000);
+    const dedupeKey = followUpJobDedupeKey({
+      businessId: input.businessId,
+      ruleId: rule.id,
+      contextType: input.contextType,
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      appointmentId: input.appointmentId ?? null,
+      relatedMessageId: input.relatedMessageId ?? null,
+    });
+    const duplicate = await tx.followUpJob.findFirst({
+      where: {
+        businessId: input.businessId,
+        dedupeKey,
+        status: {
+          in: [
+            FollowUpJobStatus.SCHEDULED,
+            FollowUpJobStatus.PROCESSING,
+            FollowUpJobStatus.SENT,
+          ],
+        },
+      },
+      select: { id: true },
+    });
+    if (duplicate) return { scheduled: false, reason: "FOLLOW_UP_DUPLICATE_JOB" as const, jobId: duplicate.id };
+
     if (input.replaceScheduledNoResponse && input.conversationId) {
       await tx.followUpJob.updateMany({
         where: {
@@ -186,22 +225,6 @@ export async function scheduleFollowUpAutomationJob(input: BasicFollowUpSchedule
         data: { status: FollowUpJobStatus.CANCELLED, cancelReason: "REPLACED_BY_NEW_OUTBOUND_MESSAGE" },
       });
     }
-
-    const scheduledFor = input.scheduledFor ?? new Date(Date.now() + rule.delayMinutes * 60_000);
-    const dedupeKey = followUpJobDedupeKey({
-      businessId: input.businessId,
-      ruleId: rule.id,
-      contextType: input.contextType,
-      leadId: input.leadId,
-      conversationId: input.conversationId,
-      appointmentId: input.appointmentId ?? null,
-      relatedMessageId: input.relatedMessageId ?? null,
-    });
-    const duplicate = await tx.followUpJob.findFirst({
-      where: { businessId: input.businessId, dedupeKey, status: FollowUpJobStatus.SCHEDULED },
-      select: { id: true },
-    });
-    if (duplicate) return { scheduled: false, reason: "FOLLOW_UP_DUPLICATE_JOB" as const, jobId: duplicate.id };
 
     const job = await tx.followUpJob.create({
       data: {

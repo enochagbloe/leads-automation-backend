@@ -1,0 +1,2 @@
+ALTER TYPE "PremiumFollowUpExecutionStatus"
+ADD VALUE IF NOT EXISTS 'DELIVERY_STARTED';

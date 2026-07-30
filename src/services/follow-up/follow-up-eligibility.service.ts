@@ -22,6 +22,7 @@ export const followUpEligibilityService = {
     if (!job.rule.enabled || job.rule.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "FOLLOW_UP_RULE_DISABLED" };
     if (!job.business.followUpAutomationEnabled) return { eligible: false, action: "CANCEL" as const, reason: "FOLLOW_UP_AUTOMATION_DISABLED" };
     if (job.business.status !== BusinessStatus.ACTIVE || job.business.deletedAt) return { eligible: false, action: "SKIP" as const, reason: "BUSINESS_INACTIVE" };
+    if (job.lead?.whatsAppOptedOut) return { eligible: false, action: "CANCEL" as const, reason: "CUSTOMER_OPTED_OUT" };
     if (job.rule.type === FollowUpRuleType.AFTER_QUOTE_SENT) return { eligible: false, action: "SKIP" as const, reason: "FOLLOW_UP_DEPENDENCY_NOT_READY" };
     if (job.rule.type === FollowUpRuleType.BEFORE_APPOINTMENT && (!job.appointment || job.appointment.startTime <= new Date())) {
       return { eligible: false, action: "CANCEL" as const, reason: "APPOINTMENT_ALREADY_STARTED" };

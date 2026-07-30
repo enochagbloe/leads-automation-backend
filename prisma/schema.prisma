@@ -76,6 +76,8 @@ enum LeadActivityAction {
   CONVERSATION_REOPENED
   CONVERSATION_DELETED
   MESSAGE_CREATED
+  CUSTOMER_WHATSAPP_OPTED_OUT
+  CUSTOMER_WHATSAPP_OPTED_IN
   MESSAGE_SENT
   MESSAGE_SEND_FAILED
   MESSAGE_STATUS_UPDATED
@@ -315,6 +317,39 @@ enum PremiumFollowUpSequenceStage {
   INITIAL_CHECK_IN
   HELPFUL_CLARIFICATION
   FINAL_POLITE_FOLLOW_UP
+}
+
+enum PremiumFollowUpGenerationStatus {
+  GENERATING
+  GENERATED
+  FALLBACK_GENERATED
+  NOT_REQUIRED
+  REJECTED
+  RECALCULATION_REQUIRED
+  ESCALATION_REQUIRED
+  GENERATION_FAILED
+}
+
+enum PremiumFollowUpMessageSource {
+  AI_GENERATED
+  DETERMINISTIC_FALLBACK
+  ESCALATION_TEMPLATE
+  NONE
+}
+
+enum PremiumFollowUpExecutionStatus {
+  EXECUTING
+  READY_TO_SEND
+  DELIVERY_STARTED
+  SCHEDULED
+  STOPPED
+  RECALCULATION_REQUIRED
+  ESCALATION_STARTED
+  ESCALATED
+  SENT
+  BLOCKED
+  FAILED
+  EXHAUSTED
 }
 
 enum WhatsAppProvider {
@@ -1006,6 +1041,8 @@ model Business {
   followUpJobs                  FollowUpJob[]
   followUpSendLogs              FollowUpSendLog[]
   premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
+  premiumFollowUpGenerations    PremiumFollowUpMessageGeneration[]
+  premiumFollowUpExecutions     PremiumFollowUpExecution[]
   aiPromptConfigurations        AiPromptConfiguration[]
   aiPromptVersions              AiPromptVersion[]
   aiPromptDraftMutations        AiPromptDraftMutation[]
@@ -1400,22 +1437,25 @@ model AuditLog {
 }
 
 model Lead {
-  id              String     @id @default(cuid())
-  businessId      String
-  fullName        String
-  phone           String
-  email           String?
-  source          LeadSource
-  status          LeadStatus @default(NEW)
-  assignedStaffId String?
-  notes           String?
-  tags            String[]   @default([])
-  customFields    Json?
-  lastContactedAt DateTime?
-  createdById     String?
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
-  deletedAt       DateTime?
+  id                             String     @id @default(cuid())
+  businessId                     String
+  fullName                       String
+  phone                          String
+  email                          String?
+  source                         LeadSource
+  status                         LeadStatus @default(NEW)
+  assignedStaffId                String?
+  notes                          String?
+  tags                           String[]   @default([])
+  customFields                   Json?
+  lastContactedAt                DateTime?
+  whatsAppOptedOut               Boolean    @default(false)
+  whatsAppConsentUpdatedAt       DateTime?
+  whatsAppConsentSourceMessageId String?
+  createdById                    String?
+  createdAt                      DateTime   @default(now())
+  updatedAt                      DateTime   @updatedAt
+  deletedAt                      DateTime?
 
   business                      Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   assignedStaff                 BusinessMember?                       @relation("LeadAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
@@ -1430,6 +1470,8 @@ model Lead {
   followUpJobs                  FollowUpJob[]
   followUpSendLogs              FollowUpSendLog[]
   premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
+  premiumFollowUpGenerations    PremiumFollowUpMessageGeneration[]
+  premiumFollowUpExecutions     PremiumFollowUpExecution[]
   customerMemoryProfile         CustomerMemoryProfile?
   customerMemoryItems           CustomerMemoryItem[]
   customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
@@ -1441,6 +1483,7 @@ model Lead {
   @@index([businessId, status])
   @@index([businessId, source])
   @@index([businessId, assignedStaffId])
+  @@index([businessId, whatsAppOptedOut])
   @@index([businessId, createdAt])
   @@index([businessId, deletedAt])
 }
@@ -1490,21 +1533,23 @@ model Conversation {
   closedAt                          DateTime?
   deletedAt                         DateTime?
 
-  business                      Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  lead                          Lead                                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  assignedStaff                 BusinessMember?                       @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
-  messages                      Message[]
-  appointments                  Appointment[]
-  appointmentRescheduleRequests AppointmentRescheduleRequest[]
-  customerIssueLogs             CustomerIssueLog[]
-  aiInteractionLogs             AiInteractionLog[]
-  knowledgeAssetSendLogs        KnowledgeAssetSendLog[]
-  followUpJobs                  FollowUpJob[]
-  followUpSendLogs              FollowUpSendLog[]
-  premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
-  customerMemoryItems           CustomerMemoryItem[]
-  customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
-  customerMemoryTombstone       CustomerMemoryConversationTombstone?
+  business                          Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lead                              Lead                                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignedStaff                     BusinessMember?                       @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  messages                          Message[]
+  appointments                      Appointment[]
+  appointmentRescheduleRequests     AppointmentRescheduleRequest[]
+  customerIssueLogs                 CustomerIssueLog[]
+  aiInteractionLogs                 AiInteractionLog[]
+  knowledgeAssetSendLogs            KnowledgeAssetSendLog[]
+  followUpJobs                      FollowUpJob[]
+  followUpSendLogs                  FollowUpSendLog[]
+  premiumFollowUpInsights           PremiumFollowUpIntelligenceSnapshot[]
+  customerMemoryItems               CustomerMemoryItem[]
+  customerMemoryExtractionJobs      CustomerMemoryExtractionJob[]
+  customerMemoryTombstone           CustomerMemoryConversationTombstone?
+  premiumFollowUpMessageGenerations PremiumFollowUpMessageGeneration[]
+  premiumFollowUpExecutions         PremiumFollowUpExecution[]
 
   @@index([businessId])
   @@index([businessId, leadId])
@@ -1550,6 +1595,7 @@ model Message {
   knowledgeAssetSendLogs      KnowledgeAssetSendLog[]
   attachments                 ConversationMessageAttachment[]
   premiumFollowUpInsights     PremiumFollowUpIntelligenceSnapshot[]
+  premiumFollowUpGenerations  PremiumFollowUpMessageGeneration[]
   customerMemoryItems         CustomerMemoryItem[]
   customerMemoryExtractionJob CustomerMemoryExtractionJob?
 
@@ -1703,7 +1749,7 @@ model CustomerMemoryItemTombstone {
   deletedMemoryId       String
   category              CustomerMemoryCategory
   memoryKey             String
-  mode                   CustomerMemorySuppressionMode
+  mode                  CustomerMemorySuppressionMode
   suppressionKey        String
   sourceConversationId  String?
   sourceMessageId       String?
@@ -1871,11 +1917,13 @@ model FollowUpAutomationRule {
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  business  Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdBy BusinessMember    @relation("FollowUpRuleCreator", fields: [createdByMembershipId], references: [id], onDelete: Restrict)
-  updatedBy BusinessMember?   @relation("FollowUpRuleUpdater", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
-  jobs      FollowUpJob[]
-  sendLogs  FollowUpSendLog[]
+  business                  Business                           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy                 BusinessMember                     @relation("FollowUpRuleCreator", fields: [createdByMembershipId], references: [id], onDelete: Restrict)
+  updatedBy                 BusinessMember?                    @relation("FollowUpRuleUpdater", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
+  jobs                      FollowUpJob[]
+  sendLogs                  FollowUpSendLog[]
+  premiumMessageGenerations PremiumFollowUpMessageGeneration[]
+  premiumExecutions         PremiumFollowUpExecution[]
 
   @@unique([businessId, type])
   @@index([businessId])
@@ -1908,13 +1956,15 @@ model FollowUpJob {
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 
-  business        Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  rule            FollowUpAutomationRule                @relation(fields: [ruleId], references: [id], onDelete: Cascade)
-  lead            Lead?                                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
-  conversation    Conversation?                         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  appointment     Appointment?                          @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
-  sendLogs        FollowUpSendLog[]
-  premiumInsights PremiumFollowUpIntelligenceSnapshot[]
+  business           Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  rule               FollowUpAutomationRule                @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  lead               Lead?                                 @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation       Conversation?                         @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  appointment        Appointment?                          @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  sendLogs           FollowUpSendLog[]
+  premiumInsights    PremiumFollowUpIntelligenceSnapshot[]
+  messageGenerations PremiumFollowUpMessageGeneration[]
+  premiumExecutions  PremiumFollowUpExecution[]
 
   @@index([businessId])
   @@index([businessId, status, scheduledFor])
@@ -1928,20 +1978,21 @@ model FollowUpJob {
 }
 
 model FollowUpSendLog {
-  id                String                        @id @default(cuid())
-  businessId        String
-  ruleId            String
-  jobId             String
-  leadId            String?
-  conversationId    String?
-  appointmentId     String?
-  quoteId           String?
-  messageText       String
-  sentBy            FollowUpSendLogSentBy         @default(SYSTEM)
-  deliveryStatus    FollowUpSendLogDeliveryStatus @default(QUEUED)
-  whatsappMessageId String?
-  failureReason     String?
-  createdAt         DateTime                      @default(now())
+  id                      String                        @id @default(cuid())
+  businessId              String
+  ruleId                  String
+  jobId                   String
+  leadId                  String?
+  conversationId          String?
+  appointmentId           String?
+  quoteId                 String?
+  messageText             String
+  sentBy                  FollowUpSendLogSentBy         @default(SYSTEM)
+  deliveryStatus          FollowUpSendLogDeliveryStatus @default(QUEUED)
+  whatsappMessageId       String?
+  executionIdempotencyKey String?                       @unique
+  failureReason           String?
+  createdAt               DateTime                      @default(now())
 
   business     Business               @relation(fields: [businessId], references: [id], onDelete: Cascade)
   rule         FollowUpAutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
@@ -2086,6 +2137,117 @@ model PremiumFollowUpIntelligenceSnapshot {
   @@index([businessId, leadId, createdAt])
   @@index([businessId, jobId])
   @@index([businessId, decision])
+}
+
+model PremiumFollowUpMessageGeneration {
+  id                    String                          @id @default(cuid())
+  businessId            String
+  jobId                 String
+  ruleId                String
+  leadId                String?
+  conversationId        String?
+  contextType           FollowUpContextType
+  sequenceStage         PremiumFollowUpSequenceStage
+  finalDecision         String
+  validationStatus      String
+  generationStatus      PremiumFollowUpGenerationStatus @default(GENERATING)
+  generatedMessage      String?
+  fallbackMessageUsed   Boolean                         @default(false)
+  messageSource         PremiumFollowUpMessageSource    @default(NONE)
+  customerGoalUsed      String?
+  customerObjectionUsed String?
+  timingContextUsed     String?
+  unresolvedRequestUsed String?
+  appointmentFactsUsed  Json?
+  promptVersionsUsed    Json?
+  memoryVersionUsed     String?
+  generationModelUsed   String?
+  promptConflict        Boolean                         @default(false)
+  missingKnowledge      Boolean                         @default(false)
+  validationPassed      Boolean                         @default(false)
+  validationIssues      Json
+  regenerationAttempted Boolean                         @default(false)
+  idempotencyKey        String                          @unique
+  contextVersion        String
+  inputSnapshot         Json
+  providerMetadata      Json?
+  processingStartedAt   DateTime                        @default(now())
+  generatedAt           DateTime?
+  completedAt           DateTime?
+  errorCode             String?
+  createdAt             DateTime                        @default(now())
+  updatedAt             DateTime                        @updatedAt
+
+  business     Business                   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  job          FollowUpJob                @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  rule         FollowUpAutomationRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  lead         Lead?                      @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation Conversation?              @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  message      Message?                   @relation(fields: [messageId], references: [id])
+  messageId    String?
+  executions   PremiumFollowUpExecution[]
+
+  @@unique([jobId, contextVersion, sequenceStage])
+  @@index([businessId, createdAt])
+  @@index([businessId, jobId])
+  @@index([businessId, conversationId])
+  @@index([businessId, generationStatus])
+}
+
+model PremiumFollowUpExecution {
+  id                      String                         @id @default(cuid())
+  businessId              String
+  jobId                   String
+  ruleId                  String
+  leadId                  String?
+  conversationId          String?
+  generationId            String?
+  sequenceStage           PremiumFollowUpSequenceStage
+  finalDecision           String
+  validationStatus        String
+  executionStatus         PremiumFollowUpExecutionStatus @default(EXECUTING)
+  executionReason         String?
+  executionBlocked        Boolean                        @default(false)
+  blockReason             String?
+  messageSource           PremiumFollowUpMessageSource   @default(NONE)
+  fallbackMessageUsed     Boolean                        @default(false)
+  contextVersion          String
+  promptVersions          Json?
+  memoryVersion           String?
+  validationSnapshot      Json
+  executionIdempotencyKey String                         @unique
+  recalculationCount      Int                            @default(0)
+  outboundMessageId       String?
+  sendLogId               String?
+  scheduledFor            DateTime?
+  processingStartedAt     DateTime                       @default(now())
+  processingLeaseToken    String?
+  executedAt              DateTime?
+  completedAt             DateTime?
+  errorCode                         String?
+  continuationStatus                String                         @default("NOT_REQUIRED")
+  continuationJobId                 String?
+  continuationReason                String?
+  continuationAttemptCount          Int                            @default(0)
+  continuationProcessingStartedAt DateTime?
+  continuationNextAttemptAt         DateTime?
+  continuationCompletedAt           DateTime?
+  createdAt                         DateTime                       @default(now())
+  updatedAt                         DateTime                       @updatedAt
+
+  business     Business                          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  job          FollowUpJob                       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  rule         FollowUpAutomationRule            @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  lead         Lead?                             @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  conversation Conversation?                     @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  generation   PremiumFollowUpMessageGeneration? @relation(fields: [generationId], references: [id], onDelete: SetNull)
+
+  @@unique([jobId, contextVersion, sequenceStage])
+  @@index([businessId, createdAt])
+  @@index([businessId, jobId])
+  @@index([businessId, conversationId])
+  @@index([businessId, executionStatus])
+  @@index([businessId, continuationStatus, continuationNextAttemptAt])
 }
 
 model ConversationMessageAttachment {

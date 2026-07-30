@@ -30,6 +30,22 @@ export const followUpJobSchedulerService = {
       relatedMessageId: input.relatedMessageId ?? null,
     });
     const created = await prisma.$transaction(async (tx) => {
+      if (input.leadId) {
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Lead"
+          WHERE "id" = ${input.leadId}
+            AND "businessId" = ${actor.businessId}
+          FOR UPDATE
+        `;
+        const lead = await tx.lead.findFirst({
+          where: { id: input.leadId, businessId: actor.businessId, deletedAt: null },
+          select: { whatsAppOptedOut: true },
+        });
+        if (lead?.whatsAppOptedOut) {
+          throw new AppError(409, "This customer has opted out of WhatsApp messages.", "CUSTOMER_OPTED_OUT");
+        }
+      }
       const duplicate = await tx.followUpJob.findFirst({
         where: {
           businessId: actor.businessId,

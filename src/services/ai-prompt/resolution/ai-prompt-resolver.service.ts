@@ -107,6 +107,7 @@ export const aiPromptResolverService = {
     businessId: string;
     businessAccountId: string;
     scope: AiPromptScope;
+    auditWarnings?: boolean;
   }): Promise<ResolvedAiPrompt> {
     const business = await prisma.business.findFirst({
       where: {
@@ -136,7 +137,7 @@ export const aiPromptResolverService = {
       ? sanitizeCompiledPromptForRuntime(modulePrompt.compiled, capabilities)
       : { compiled: null, warnings: [] };
     const warnings = [...sanitizedGlobal.warnings, ...sanitizedModule.warnings];
-    if (sanitizedGlobal.warnings.length) {
+    if (input.auditWarnings !== false && sanitizedGlobal.warnings.length) {
       await auditRuntimeWarningsOnce({
         businessId: input.businessId,
         scope: AiPromptScope.GLOBAL,
@@ -145,7 +146,7 @@ export const aiPromptResolverService = {
         warnings: sanitizedGlobal.warnings,
       });
     }
-    if (sanitizedModule.warnings.length) {
+    if (input.auditWarnings !== false && sanitizedModule.warnings.length) {
       await auditRuntimeWarningsOnce({
         businessId: input.businessId,
         scope: input.scope,

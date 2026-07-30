@@ -32,6 +32,7 @@ import { realtimeService } from "./realtime.service";
 import { aiReplyEngine } from "./ai-reply-engine.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { reopenConversationFromMessageActivity } from "./conversation-lifecycle.service";
+import { persistCustomerWhatsAppConsentSignal } from "./customer-contact-consent.service";
 import { notificationService } from "./notification.service";
 import { followUpCancellationService } from "./follow-up.service";
 
@@ -409,6 +410,14 @@ async function persistInbound(
           },
           createdAt: input.timestamp,
         },
+      });
+      await persistCustomerWhatsAppConsentSignal(tx, {
+        businessId: business.id,
+        leadId: lead.id,
+        conversationId: conversation.id,
+        messageId: message.id,
+        messageText: message.content,
+        messageCreatedAt: message.createdAt,
       });
       const updatedConversation = await tx.conversation.update({
         where: { id: conversation.id },

@@ -52,7 +52,11 @@ export { followUpEligibilityService } from "./follow-up/follow-up-eligibility.se
 export { followUpJobProcessorService } from "./follow-up/follow-up-processor.service";
 export { followUpJobSchedulerService } from "./follow-up/follow-up-scheduler.service";
 export { followUpPlanPolicyService } from "./follow-up/follow-up-policy.service";
+export { followUpPremiumDecisionContextService } from "./follow-up/follow-up-premium-decision-context.service";
+export { followUpPremiumExecutionService } from "./follow-up/follow-up-premium-execution.service";
 export { followUpPremiumIntelligenceService } from "./follow-up/follow-up-premium-intelligence.service";
+export { followUpPremiumLifecycleValidatorService } from "./follow-up/follow-up-premium-lifecycle-validator.service";
+export { followUpPremiumMessageGeneratorService } from "./follow-up/follow-up-premium-message-generator.service";
 export { followUpPlusService } from "./follow-up/follow-up-plus.service";
 export { followUpTemplateRendererService } from "./follow-up/follow-up-template.service";
 
@@ -283,6 +287,7 @@ export const followUpService = {
     assertCanManage(actor);
     const policy = await followUpPlanPolicyService.assertRuleAllowed(actor, { type: input.type });
     assertFollowUpRuleSettingsWithinPolicy(policy, {
+      type: input.type,
       useAiRewrite: input.useAiRewrite,
       maxSendsPerLead: input.maxSendsPerLead,
       maxSendsPerConversation: input.maxSendsPerConversation,
@@ -340,6 +345,7 @@ export const followUpService = {
     const type = existing.type;
     const policy = await followUpPlanPolicyService.assertRuleAllowed(actor, { type });
     assertFollowUpRuleSettingsWithinPolicy(policy, {
+      type,
       useAiRewrite: input.useAiRewrite ?? existing.useAiRewrite,
       maxSendsPerLead: input.maxSendsPerLead ?? existing.maxSendsPerLead,
       maxSendsPerConversation: input.maxSendsPerConversation ?? existing.maxSendsPerConversation,

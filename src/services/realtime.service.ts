@@ -106,6 +106,7 @@ export type RealtimeEventType =
   | "business.follow_up.premium.no_response.scheduled"
   | "business.follow_up.premium.no_response.cancelled"
   | "business.follow_up.premium.no_response.rescheduled"
+  | "business.follow_up.premium.execution.updated"
   | "business.ai_prompt.created"
   | "business.ai_prompt.updated"
   | "business.ai_prompt.draft.saved"

@@ -19,6 +19,7 @@ import { getWhatsAppIntegration, sendWhatsAppText, WhatsAppSendResult } from "./
 import { realtimeService } from "./realtime.service";
 import { invalidateAiBusinessContext } from "./ai-context-builder.service";
 import { reopenConversationFromMessageActivity, type ReopenState } from "./conversation-lifecycle.service";
+import { persistCustomerWhatsAppConsentSignal } from "./customer-contact-consent.service";
 import { followUpCancellationService, followUpService } from "./follow-up.service";
 
 export type ConversationActor = {
@@ -280,6 +281,16 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
         deliveryStatus: MessageDeliveryStatus.DELIVERED,
       },
     });
+    if (conversation.channel === ConversationChannel.WHATSAPP) {
+      await persistCustomerWhatsAppConsentSignal(tx, {
+        businessId: input.businessId,
+        leadId: input.leadId,
+        conversationId: input.conversationId,
+        messageId: created.id,
+        messageText: created.content,
+        messageCreatedAt: created.createdAt,
+      });
+    }
     await tx.conversation.update({
       where: { id: input.conversationId },
       data: {
