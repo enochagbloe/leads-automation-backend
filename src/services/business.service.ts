@@ -74,6 +74,7 @@ export const businessService = {
           role: BusinessRole.BUSINESS_OWNER,
           status: MembershipStatus.ACTIVE,
           joinedAt: now,
+          canManageKnowledgeHub: true,
         },
       });
       await tx.businessUsageRecord.create({
@@ -140,6 +141,7 @@ export const businessService = {
         serviceTags: true,
         isAiHandoffEligible: true,
         canTakeAppointments: true,
+        canManageKnowledgeHub: true,
         aiHandoffPriority: true,
         joinedAt: true,
         user: { select: { id: true, firstName: true, lastName: true, email: true } },
@@ -165,6 +167,7 @@ export const businessService = {
         serviceTags: membership.serviceTags,
         isAiHandoffEligible: membership.isAiHandoffEligible,
         canTakeAppointments: membership.canTakeAppointments,
+        canManageKnowledgeHub: membership.canManageKnowledgeHub,
         aiHandoffPriority: membership.aiHandoffPriority,
         userId: membership.user.id,
         name: `${membership.user.firstName} ${membership.user.lastName}`.trim(),
@@ -177,6 +180,7 @@ export const businessService = {
           role: membership.role,
           membershipStatus: membership.status,
           canCreateBusiness: user?.canCreateBusiness ?? true,
+          canManageKnowledgeHub: membership.canManageKnowledgeHub,
         }),
       })),
     };

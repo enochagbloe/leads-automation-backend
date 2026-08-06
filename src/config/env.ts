@@ -1,11 +1,17 @@
 import "dotenv/config";
 import { z } from "zod";
+import {
+  STORAGE_ENVIRONMENTS,
+  type StorageEnvironment,
+  validateStorageEnvironment,
+} from "./storage-environment-policy";
 
 const optionalString = z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional());
 const credentialKeyId = z.string().regex(/^[A-Za-z0-9_-]+$/).default("primary");
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  DEPLOYMENT_ENVIRONMENT: z.enum(STORAGE_ENVIRONMENTS).optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1),
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(3),
@@ -67,6 +73,34 @@ const schema = z.object({
   KNOWLEDGE_PREMIUM_STORAGE_LIMIT_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024 * 1024),
   KNOWLEDGE_UPLOAD_MAX_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
   KNOWLEDGE_STORAGE_DIR: z.string().min(1).default("storage/knowledge"),
+  KNOWLEDGE_STORAGE_PROVIDER: z.enum(["local", "s3"]).default("local"),
+  KNOWLEDGE_S3_ENDPOINT: optionalString,
+  KNOWLEDGE_S3_REGION: z.string().min(1).default("auto"),
+  KNOWLEDGE_S3_BUCKET: optionalString,
+  KNOWLEDGE_S3_ACCESS_KEY_ID: optionalString,
+  KNOWLEDGE_S3_SECRET_ACCESS_KEY: optionalString,
+  KNOWLEDGE_S3_FORCE_PATH_STYLE: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  KNOWLEDGE_DOWNLOAD_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).default(300),
+  AWS_REGION: optionalString,
+  AWS_S3_BUCKET: optionalString,
+  AWS_S3_BUCKET_ENVIRONMENT: z.enum(STORAGE_ENVIRONMENTS).optional(),
+  AWS_ACCESS_KEY_ID: optionalString,
+  AWS_SECRET_ACCESS_KEY: optionalString,
+  AWS_S3_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(3600).optional(),
+  KNOWLEDGE_MALWARE_SCANNER_MODE: z.enum(["disabled", "clamav"]).default("disabled"),
+  KNOWLEDGE_CLAMAV_HOST: optionalString,
+  KNOWLEDGE_CLAMAV_PORT: z.coerce.number().int().positive().max(65_535).default(3310),
+  KNOWLEDGE_CLAMAV_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
+  KNOWLEDGE_DOCUMENT_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  KNOWLEDGE_DOCUMENT_WORKER_INTERVAL_SECONDS: z.coerce.number().int().positive().max(3600).default(30),
+  KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
+  KNOWLEDGE_DOCUMENT_WORKER_STALE_SECONDS: z.coerce.number().int().min(60).max(86_400).default(600),
+  KNOWLEDGE_DOCUMENT_WORKER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+  KNOWLEDGE_DOCUMENT_STALE_UPLOAD_MINUTES: z.coerce.number().int().min(5).max(1440).default(10),
+  KNOWLEDGE_DOCUMENT_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(30),
+  KNOWLEDGE_DOCUMENT_CLEANUP_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
+  KNOWLEDGE_DOCUMENT_CLEANUP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
+  KNOWLEDGE_DOCUMENT_CLEANUP_STALE_SECONDS: z.coerce.number().int().min(60).max(86_400).default(900),
   FOLLOW_UP_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   FOLLOW_UP_WORKER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
   FOLLOW_UP_WORKER_BUSINESS_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(25),
@@ -120,6 +154,65 @@ const schema = z.object({
       });
     }
   }
+  const storageProvider = process.env.KNOWLEDGE_STORAGE_PROVIDER
+    ? value.KNOWLEDGE_STORAGE_PROVIDER
+    : value.AWS_S3_BUCKET || value.KNOWLEDGE_S3_BUCKET
+      ? "s3"
+      : "local";
+  const s3Bucket = value.AWS_S3_BUCKET ?? value.KNOWLEDGE_S3_BUCKET;
+  const s3AccessKeyId = value.AWS_ACCESS_KEY_ID ?? value.KNOWLEDGE_S3_ACCESS_KEY_ID;
+  const s3SecretAccessKey = value.AWS_SECRET_ACCESS_KEY ?? value.KNOWLEDGE_S3_SECRET_ACCESS_KEY;
+  if (value.NODE_ENV === "production" && storageProvider !== "s3") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["KNOWLEDGE_STORAGE_PROVIDER"],
+      message: "S3-compatible private storage is required in production",
+    });
+  }
+  if (storageProvider === "s3") {
+    if (!s3Bucket) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["AWS_S3_BUCKET"],
+        message: "AWS_S3_BUCKET is required for S3 storage",
+      });
+    }
+    if (Boolean(s3AccessKeyId) !== Boolean(s3SecretAccessKey)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["AWS_ACCESS_KEY_ID"],
+        message: "Both S3 access-key fields must be provided together, or both omitted for the default credential chain",
+      });
+    }
+    if (s3Bucket) {
+      const deploymentEnvironment = (value.DEPLOYMENT_ENVIRONMENT ?? value.NODE_ENV) as StorageEnvironment;
+      for (const issue of validateStorageEnvironment({
+        deploymentEnvironment,
+        bucketEnvironment: value.AWS_S3_BUCKET_ENVIRONMENT,
+        bucketName: s3Bucket,
+      })) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [issue.field],
+          message: `${issue.code}: ${issue.message}`,
+        });
+      }
+    }
+  }
+  if (value.NODE_ENV === "production" && value.KNOWLEDGE_MALWARE_SCANNER_MODE !== "clamav") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["KNOWLEDGE_MALWARE_SCANNER_MODE"],
+      message: "ClamAV malware scanning is required for knowledge-document uploads in production",
+    });
+  }
+  if (value.KNOWLEDGE_MALWARE_SCANNER_MODE === "clamav" && !value.KNOWLEDGE_CLAMAV_HOST) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["KNOWLEDGE_CLAMAV_HOST"],
+      message: "KNOWLEDGE_CLAMAV_HOST is required when ClamAV scanning is enabled",
+    });
+  }
   if (value.AI_REPLY_ENABLED && !value.OPENROUTER_API_KEY) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -142,5 +235,24 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-export const env = parsed.data;
+const awsStorageConfigured = Boolean(parsed.data.AWS_S3_BUCKET);
+
+export const env = {
+  ...parsed.data,
+  DEPLOYMENT_ENVIRONMENT: (parsed.data.DEPLOYMENT_ENVIRONMENT ?? parsed.data.NODE_ENV) as StorageEnvironment,
+  KNOWLEDGE_STORAGE_PROVIDER: (process.env.KNOWLEDGE_STORAGE_PROVIDER
+    ? parsed.data.KNOWLEDGE_STORAGE_PROVIDER
+    : awsStorageConfigured || parsed.data.KNOWLEDGE_S3_BUCKET
+      ? "s3"
+      : "local") as "local" | "s3",
+  KNOWLEDGE_S3_REGION: parsed.data.AWS_REGION ?? parsed.data.KNOWLEDGE_S3_REGION,
+  KNOWLEDGE_S3_BUCKET: parsed.data.AWS_S3_BUCKET ?? parsed.data.KNOWLEDGE_S3_BUCKET,
+  KNOWLEDGE_S3_ACCESS_KEY_ID: parsed.data.AWS_ACCESS_KEY_ID ?? parsed.data.KNOWLEDGE_S3_ACCESS_KEY_ID,
+  KNOWLEDGE_S3_SECRET_ACCESS_KEY: parsed.data.AWS_SECRET_ACCESS_KEY ?? parsed.data.KNOWLEDGE_S3_SECRET_ACCESS_KEY,
+  KNOWLEDGE_S3_FORCE_PATH_STYLE: awsStorageConfigured && process.env.KNOWLEDGE_S3_FORCE_PATH_STYLE === undefined
+    ? false
+    : parsed.data.KNOWLEDGE_S3_FORCE_PATH_STYLE,
+  KNOWLEDGE_DOWNLOAD_URL_TTL_SECONDS: parsed.data.AWS_S3_SIGNED_URL_TTL_SECONDS
+    ?? parsed.data.KNOWLEDGE_DOWNLOAD_URL_TTL_SECONDS,
+};
 export const corsOrigins = env.CORS_ORIGINS.split(",").map((origin) => origin.trim());

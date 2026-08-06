@@ -27,13 +27,14 @@ export type PermissionFlags = {
   canManageBilling: boolean;
   canManageTeam: boolean;
   canManageBusinessSettings: boolean;
+  canManageKnowledgeHub: boolean;
   canCreateBusiness: boolean;
 };
 
-export function permissionList(role?: BusinessRole | PlatformRole | null) {
+export function permissionList(role?: BusinessRole | PlatformRole | null, canManageKnowledgeHub = false) {
   if (role === PlatformRole.PLATFORM_ADMIN) return ["platform:admin"];
-  if (role === BusinessRole.BUSINESS_OWNER) return ["business:manage", "subscription:manage", "members:manage", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
-  if (role === BusinessRole.MANAGER) return ["business:manage", "members:view", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
+  if (role === BusinessRole.BUSINESS_OWNER) return ["business:manage", "subscription:manage", "members:manage", "knowledge:manage", "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
+  if (role === BusinessRole.MANAGER) return ["business:manage", "members:view", ...(canManageKnowledgeHub ? ["knowledge:manage"] : []), "leads:view_all", "leads:create", "leads:update_all", "leads:assign", "leads:delete", "conversations:view_all", "conversations:create", "conversations:send", "conversations:assign", "conversations:update_status", "conversations:delete"];
   if (role === BusinessRole.STAFF) return ["business:view", "leads:view_assigned", "leads:create", "leads:update_assigned", "conversations:view_assigned", "conversations:create_assigned", "conversations:send_assigned", "conversations:update_status_assigned"];
   return [];
 }
@@ -42,6 +43,7 @@ export function permissionFlags(input: {
   role?: BusinessRole | PlatformRole | null;
   membershipStatus?: MembershipStatus | null;
   canCreateBusiness?: boolean;
+  canManageKnowledgeHub?: boolean;
 }): PermissionFlags {
   const active = input.membershipStatus === MembershipStatus.ACTIVE;
   const owner = active && input.role === BusinessRole.BUSINESS_OWNER;
@@ -78,6 +80,7 @@ export function permissionFlags(input: {
     canManageBilling: platformAdmin || owner,
     canManageTeam: platformAdmin || owner,
     canManageBusinessSettings: platformAdmin || owner || manager,
+    canManageKnowledgeHub: platformAdmin || owner || (manager && Boolean(input.canManageKnowledgeHub)),
     canCreateBusiness: Boolean(input.canCreateBusiness),
   };
 }

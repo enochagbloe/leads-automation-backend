@@ -14,6 +14,7 @@ import {
   KnowledgeArticleStatus,
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
+  KnowledgeDocumentProcessingStatus,
   CustomerIssueCategory,
   CustomerIssueSeverity,
   CustomerIssueStatus,
@@ -427,6 +428,7 @@ export const aiBusinessContextService = {
           businessId: input.businessId,
           document: {
             status: KnowledgeDocumentStatus.ACTIVE,
+            processingStatus: KnowledgeDocumentProcessingStatus.READY,
             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
           },
         },

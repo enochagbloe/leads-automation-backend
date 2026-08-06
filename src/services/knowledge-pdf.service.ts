@@ -1,8 +1,19 @@
 import { AuditAction, Prisma } from "@prisma/client";
 import PDFDocument from "pdfkit";
 import { prisma } from "../config/prisma";
+import { AppError } from "../utils/errors";
 import { auditService } from "./audit.service";
-import { storageService } from "./storage.service";
+import {
+  currentKnowledgeHubSubscription,
+  knowledgeStorageLimit,
+  lockKnowledgeHubQuota,
+} from "./knowledge-hub-capability.service";
+import {
+  assertKnowledgeStorageUsageMeasured,
+  calculateKnowledgeStorageUsage,
+  reconcileKnowledgeArticlePdfSizes,
+} from "./knowledge-storage-usage.service";
+import { resolveStorageObjectProvider, storageService } from "./storage.service";
 
 type ArticlePdfInput = {
   title: string;
@@ -191,18 +202,41 @@ export const knowledgePdfService = {
   ) {
     const article = await prisma.knowledgeArticle.findFirst({
       where: { id: articleId, businessId },
-      include: { business: { select: { name: true, phone: true, email: true, website: true } } },
+      include: {
+        business: {
+          select: { name: true, phone: true, email: true, website: true, businessAccountId: true },
+        },
+      },
     });
     if (!article) return null;
-    if (article.pdfFileKey && article.pdfFileUrl && article.lastPdfGeneratedAt && article.lastPdfGeneratedAt >= article.updatedAt) {
+    const existingObjectKey = article.pdfStorageObjectKey ?? article.pdfFileKey;
+    const existingProvider = existingObjectKey
+      ? await resolveStorageObjectProvider(existingObjectKey, article.pdfStorageProvider).catch(() => null)
+      : null;
+    if (existingObjectKey && existingProvider && article.pdfFileUrl && article.lastPdfGeneratedAt && article.lastPdfGeneratedAt >= article.updatedAt) {
       try {
-        const info = await storageService.statFile(article.pdfFileKey);
+        const info = await storageService.statFile(existingObjectKey, existingProvider);
+        if (
+          article.pdfFileSize !== info.fileSize
+          || article.pdfStorageProvider !== existingProvider
+          || article.pdfStorageObjectKey !== existingObjectKey
+        ) {
+          await prisma.knowledgeArticle.updateMany({
+            where: { id: article.id, pdfFileKey: article.pdfFileKey },
+            data: {
+              pdfFileSize: info.fileSize,
+              pdfStorageProvider: existingProvider,
+              pdfStorageObjectKey: existingObjectKey,
+            },
+          });
+        }
         return {
-          fileKey: article.pdfFileKey,
+          fileKey: existingObjectKey,
           fileUrl: articleDownloadUrl(article.id),
           fileName: safePdfFileName(article.slug ?? article.title),
           mimeType: "application/pdf",
           fileSize: info.fileSize,
+          storageProvider: existingProvider,
         };
       } catch (error) {
         console.error("Cached article PDF is missing or unreadable; regenerating", { articleId, fileKey: article.pdfFileKey, error });
@@ -210,7 +244,9 @@ export const knowledgePdfService = {
     }
 
     const buffer = await createArticlePdf(article);
-    const oldFileKey = article.pdfFileKey;
+    await reconcileKnowledgeArticlePdfSizes(article.business.businessAccountId);
+    const oldFileKey = existingObjectKey;
+    const oldStorageProvider = existingProvider;
     const stored = await storageService.uploadBuffer({
       businessId,
       folder: "article-pdfs",
@@ -218,16 +254,78 @@ export const knowledgePdfService = {
       contentType: "application/pdf",
       buffer,
     });
-    await prisma.knowledgeArticle.update({
-      where: { id: article.id },
-      data: {
-        pdfFileKey: stored.fileKey,
-        pdfFileUrl: articleDownloadUrl(article.id),
-        lastPdfGeneratedAt: new Date(),
-      },
-    });
+    try {
+      await prisma.$transaction(async (tx) => {
+        await lockKnowledgeHubQuota(tx, article.business.businessAccountId);
+        const subscription = await currentKnowledgeHubSubscription(tx, article.business.businessAccountId);
+        const currentUsage = await calculateKnowledgeStorageUsage(tx, article.business.businessAccountId);
+        assertKnowledgeStorageUsageMeasured(currentUsage);
+        const currentArticle = await tx.knowledgeArticle.findFirst({
+          where: { id: article.id, businessId },
+          select: {
+            pdfFileKey: true,
+            pdfFileSize: true,
+            pdfStorageProvider: true,
+            pdfStorageObjectKey: true,
+            updatedAt: true,
+          },
+        });
+        if (!currentArticle || currentArticle.updatedAt.getTime() !== article.updatedAt.getTime()) {
+          throw new AppError(
+            409,
+            "The article changed while its PDF was generated.",
+            "KNOWLEDGE_ARTICLE_PDF_STATE_CHANGED",
+          );
+        }
+        const currentObjectKey = currentArticle.pdfStorageObjectKey ?? currentArticle.pdfFileKey;
+        const replacedBytes = currentObjectKey ? currentArticle.pdfFileSize ?? 0 : 0;
+        const projectedUsage = currentUsage.totalBytes - replacedBytes + stored.fileSize;
+        const storageLimit = knowledgeStorageLimit(subscription.plan.code);
+        if (projectedUsage > storageLimit) {
+          throw new AppError(
+            403,
+            "Your plan's Knowledge Hub storage limit has been reached.",
+            "KNOWLEDGE_STORAGE_LIMIT_REACHED",
+            {
+              currentPlan: subscription.plan.code,
+              currentUsage: currentUsage.totalBytes,
+              limit: storageLimit,
+              attemptedAmount: stored.fileSize,
+            },
+          );
+        }
+        const changed = await tx.knowledgeArticle.updateMany({
+          where: {
+            id: article.id,
+            businessId,
+            updatedAt: currentArticle.updatedAt,
+            pdfFileKey: currentArticle.pdfFileKey,
+            pdfStorageObjectKey: currentArticle.pdfStorageObjectKey,
+          },
+          data: {
+            pdfFileKey: stored.fileKey,
+            pdfFileUrl: articleDownloadUrl(article.id),
+            pdfFileSize: stored.fileSize,
+            pdfStorageProvider: stored.storageProvider,
+            pdfStorageObjectKey: stored.fileKey,
+            lastPdfGeneratedAt: new Date(),
+          },
+        });
+        if (changed.count !== 1) {
+          throw new AppError(
+            409,
+            "The article changed while its PDF was generated.",
+            "KNOWLEDGE_ARTICLE_PDF_STATE_CHANGED",
+          );
+        }
+      });
+    } catch (error) {
+      await storageService.deleteFile(stored.fileKey, stored.storageProvider).catch(() => undefined);
+      throw error;
+    }
     if (oldFileKey && oldFileKey !== stored.fileKey) {
-      await storageService.deleteFile(oldFileKey).catch((error) => {
+      const provider = oldStorageProvider ?? await resolveStorageObjectProvider(oldFileKey).catch(() => null);
+      if (provider) await storageService.deleteFile(oldFileKey, provider).catch((error) => {
         console.error("Failed to delete stale article PDF", { articleId, fileKey: oldFileKey, error });
       });
     }

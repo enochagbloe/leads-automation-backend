@@ -3,6 +3,7 @@ import {
   KnowledgeAssetSendType,
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
+  KnowledgeDocumentProcessingStatus,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -64,8 +65,17 @@ export const knowledgeDocumentListQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
   search: optionalTrimmed,
   status: z.nativeEnum(KnowledgeDocumentStatus).optional(),
+  processingStatus: z.nativeEnum(KnowledgeDocumentProcessingStatus).optional(),
   visibility: z.nativeEnum(KnowledgeAssetVisibility).optional(),
   category: optionalTrimmed,
+  uploaderId: optionalTrimmed,
+  sortBy: z.enum(["createdAt", "updatedAt"]).default("updatedAt"),
+  sortOrder: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const knowledgeDocumentVersionListQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
 export const uploadKnowledgeDocumentMetadataSchema = z.object({
@@ -76,11 +86,16 @@ export const uploadKnowledgeDocumentMetadataSchema = z.object({
   relatedServiceIds: idList,
   visibility: z.nativeEnum(KnowledgeAssetVisibility).default(KnowledgeAssetVisibility.INTERNAL_ONLY),
   fileName: trimmed.min(1).max(220),
-  mimeType: z.literal("application/pdf"),
+  mimeType: trimmed.min(1).max(160),
 });
 
 export const uploadKnowledgeDocumentSchema = uploadKnowledgeDocumentMetadataSchema.extend({
   fileBase64: trimmed.min(10),
+});
+
+export const replaceKnowledgeDocumentMetadataSchema = z.object({
+  fileName: trimmed.min(1).max(220),
+  mimeType: trimmed.min(1).max(160),
 });
 
 export const updateKnowledgeDocumentSchema = z.object({
@@ -122,8 +137,10 @@ export type UpdateKnowledgeArticleInput = z.infer<typeof updateKnowledgeArticleS
 export type DraftKnowledgeArticleInput = z.infer<typeof draftKnowledgeArticleSchema>;
 export type GenerateStarterArticlesInput = z.infer<typeof generateStarterArticlesSchema>;
 export type KnowledgeDocumentListQuery = z.infer<typeof knowledgeDocumentListQuerySchema>;
+export type KnowledgeDocumentVersionListQuery = z.infer<typeof knowledgeDocumentVersionListQuerySchema>;
 export type UploadKnowledgeDocumentInput = z.infer<typeof uploadKnowledgeDocumentSchema>;
 export type UploadKnowledgeDocumentMetadataInput = z.infer<typeof uploadKnowledgeDocumentMetadataSchema>;
+export type ReplaceKnowledgeDocumentMetadataInput = z.infer<typeof replaceKnowledgeDocumentMetadataSchema>;
 export type UpdateKnowledgeDocumentInput = z.infer<typeof updateKnowledgeDocumentSchema>;
 export type KnowledgeSearchQuery = z.infer<typeof knowledgeSearchQuerySchema>;
 export type SendKnowledgeAssetInput = z.infer<typeof sendKnowledgeAssetSchema>;

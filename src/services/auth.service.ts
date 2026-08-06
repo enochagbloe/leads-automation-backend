@@ -1,4 +1,4 @@
-import { AuditAction, AuthTokenType, BusinessRole, MembershipStatus, PlanCode, PlatformRole, SubscriptionStatus, UserAccountType, UserStatus } from "@prisma/client";
+import { AuditAction, AuthTokenType, BusinessRole, MembershipStatus, PlanCode, PlatformRole, Prisma, SubscriptionStatus, UserAccountType, UserStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { prisma } from "../config/prisma";
 import { createOpaqueToken, hashToken } from "../utils/crypto";
@@ -12,6 +12,17 @@ import { tokenService } from "./token.service";
 
 const VERIFY_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const RESET_EXPIRY_MS = 30 * 60 * 1000;
+const INITIAL_TRIAL_DAYS = 14;
+const REGISTRATION_TRANSACTION_OPTIONS = {
+  maxWait: 10_000,
+  timeout: 30_000,
+} as const;
+
+export function initialTrialWindow(now: Date) {
+  const startsAt = new Date(now);
+  const trialEndsAt = new Date(startsAt.getTime() + INITIAL_TRIAL_DAYS * 86_400_000);
+  return { startsAt, trialEndsAt, currentPeriodStart: startsAt, currentPeriodEnd: trialEndsAt };
+}
 const publicUser = (user: { id: string; firstName: string; lastName: string; email: string; emailVerified: boolean; status: UserStatus; accountType: UserAccountType; canCreateBusiness: boolean; createdAt: Date }) => ({
   id: user.id,
   firstName: user.firstName,
@@ -46,22 +57,52 @@ export const authService = {
 
     const passwordHash = await bcrypt.hash(input.password, 12);
     const now = new Date();
-    const periodEnd = new Date(now);
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
-    const trialEndsAt = new Date(now.getTime() + 14 * 86_400_000);
+    const trial = initialTrialWindow(now);
     const { token, tokenHash } = createOpaqueToken();
 
-    const result = await prisma.$transaction(async (tx) => {
-      const user = await tx.user.create({ data: { firstName: input.firstName, lastName: input.lastName, email: input.email, passwordHash } });
-      const account = await tx.businessAccount.create({ data: { name: `${input.businessName} Workspace`, ownerId: user.id } });
-      const business = await tx.business.create({ data: { businessAccountId: account.id, name: input.businessName, industry: input.industry, slug: makeBusinessSlug(input.businessName), ownerId: user.id, email: input.email } });
-      await tx.businessMember.create({ data: { userId: user.id, businessId: business.id, role: BusinessRole.BUSINESS_OWNER, status: MembershipStatus.ACTIVE, joinedAt: now } });
-      const subscription = await tx.subscription.create({ data: { businessAccountId: account.id, planId: basicPlan.id, status: SubscriptionStatus.TRIALING, startsAt: now, trialEndsAt, currentPeriodStart: now, currentPeriodEnd: periodEnd } });
-      await tx.accountUsageRecord.create({ data: { businessAccountId: account.id, subscriptionId: subscription.id, businessesCount: 1, staffCount: 1, periodStart: now, periodEnd } });
-      await tx.businessUsageRecord.create({ data: { businessId: business.id, periodStart: now, periodEnd } });
-      await tx.authToken.create({ data: { userId: user.id, type: AuthTokenType.EMAIL_VERIFICATION, tokenHash, expiresAt: new Date(Date.now() + VERIFY_EXPIRY_MS) } });
-      return { user, account, business, subscription };
-    });
+    let result;
+    try {
+      result = await prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({ data: { firstName: input.firstName, lastName: input.lastName, email: input.email, passwordHash } });
+        const account = await tx.businessAccount.create({ data: { name: `${input.businessName} Workspace`, ownerId: user.id } });
+        const business = await tx.business.create({ data: { businessAccountId: account.id, name: input.businessName, industry: input.industry, slug: makeBusinessSlug(input.businessName), ownerId: user.id, email: input.email } });
+        await tx.businessMember.create({ data: { userId: user.id, businessId: business.id, role: BusinessRole.BUSINESS_OWNER, status: MembershipStatus.ACTIVE, joinedAt: now, canManageKnowledgeHub: true } });
+        const subscription = await tx.subscription.create({
+          data: {
+            businessAccountId: account.id,
+            planId: basicPlan.id,
+            status: SubscriptionStatus.TRIALING,
+            startsAt: trial.startsAt,
+            trialEndsAt: trial.trialEndsAt,
+            currentPeriodStart: trial.currentPeriodStart,
+            currentPeriodEnd: trial.currentPeriodEnd,
+          },
+        });
+        await tx.accountUsageRecord.create({
+          data: {
+            businessAccountId: account.id,
+            subscriptionId: subscription.id,
+            businessesCount: 1,
+            staffCount: 1,
+            periodStart: trial.currentPeriodStart,
+            periodEnd: trial.currentPeriodEnd,
+          },
+        });
+        await tx.businessUsageRecord.create({
+          data: { businessId: business.id, periodStart: trial.currentPeriodStart, periodEnd: trial.currentPeriodEnd },
+        });
+        await tx.authToken.create({ data: { userId: user.id, type: AuthTokenType.EMAIL_VERIFICATION, tokenHash, expiresAt: new Date(Date.now() + VERIFY_EXPIRY_MS) } });
+        return { user, account, business, subscription };
+      }, REGISTRATION_TRANSACTION_OPTIONS);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const target = Array.isArray(error.meta?.target) ? error.meta.target : [];
+        if (target.includes("email")) {
+          throw new AppError(409, "An account with this email already exists", "EMAIL_EXISTS");
+        }
+      }
+      throw error;
+    }
 
     const verificationSent = await emailService.sendVerification(input.email, input.businessName, token);
     await Promise.all([
@@ -83,7 +124,19 @@ export const authService = {
       auditService.log({ ...context, action: AuditAction.SUBSCRIPTION_CREATED, userId: result.user.id, businessId: result.business.id }),
       auditService.log({ ...context, action: AuditAction.PLAN_ASSIGNED, userId: result.user.id, businessId: result.business.id, metadata: { plan: PlanCode.BASIC } }),
     ]);
-    return { user: publicUser(result.user), business: result.business, message: "Registration successful. Check your email to verify your account." };
+    return {
+      user: publicUser(result.user),
+      business: result.business,
+      subscription: {
+        plan: PlanCode.BASIC,
+        status: result.subscription.status,
+        startsAt: result.subscription.startsAt,
+        trialEndsAt: result.subscription.trialEndsAt,
+        currentPeriodStart: result.subscription.currentPeriodStart,
+        currentPeriodEnd: result.subscription.currentPeriodEnd,
+      },
+      message: "Registration successful. Your 14-day Basic trial is active. Check your email to verify your account.",
+    };
   },
 
   async verifyEmail(token: string, context: Omit<AuditInput, "action">) {
@@ -205,13 +258,14 @@ export const authService = {
       serviceTags: item.serviceTags,
       isAiHandoffEligible: item.isAiHandoffEligible,
       canTakeAppointments: item.canTakeAppointments,
+      canManageKnowledgeHub: item.canManageKnowledgeHub,
       aiHandoffPriority: item.aiHandoffPriority,
       accountType: user.accountType,
       canCreateBusiness: user.canCreateBusiness,
       joinedAt: item.joinedAt,
       lastAccessedAt: null,
       business: item.business,
-      permissions: permissionFlags({ role: item.role, membershipStatus: item.status, canCreateBusiness: user.canCreateBusiness }),
+      permissions: permissionFlags({ role: item.role, membershipStatus: item.status, canCreateBusiness: user.canCreateBusiness, canManageKnowledgeHub: item.canManageKnowledgeHub }),
     }));
     return {
       user: publicUser(user),
@@ -251,13 +305,14 @@ export const authService = {
           serviceTags: membership.serviceTags,
           isAiHandoffEligible: membership.isAiHandoffEligible,
           canTakeAppointments: membership.canTakeAppointments,
+          canManageKnowledgeHub: membership.canManageKnowledgeHub,
           aiHandoffPriority: membership.aiHandoffPriority,
         },
         account: {
           accountType: user.accountType,
           canCreateBusiness: user.canCreateBusiness,
         },
-        permissions: permissionFlags({ role, membershipStatus: membership.status, canCreateBusiness: user.canCreateBusiness }),
+        permissions: permissionFlags({ role, membershipStatus: membership.status, canCreateBusiness: user.canCreateBusiness, canManageKnowledgeHub: membership.canManageKnowledgeHub }),
       } : null,
       role,
       subscription: subscription ? {
@@ -281,8 +336,8 @@ export const authService = {
       businessUsage: getBusinessUsage(businessUsage ?? undefined),
       limits: subscription ? getPlanLimits(subscription.plan) : null,
       features: subscription ? getPlanFeatures(subscription.plan) : null,
-      permissions: permissionList(role),
-      permissionFlags: permissionFlags({ role, membershipStatus: membership?.status ?? null, canCreateBusiness: user.canCreateBusiness }),
+      permissions: permissionList(role, membership?.canManageKnowledgeHub ?? false),
+      permissionFlags: permissionFlags({ role, membershipStatus: membership?.status ?? null, canCreateBusiness: user.canCreateBusiness, canManageKnowledgeHub: membership?.canManageKnowledgeHub ?? false }),
       requestedBusinessUnavailable,
       requestedBusinessId: requestedBusinessUnavailable ? activeBusinessId : null,
     };

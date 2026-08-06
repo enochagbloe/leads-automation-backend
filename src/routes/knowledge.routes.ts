@@ -4,13 +4,18 @@ import { authenticate } from "../middleware/auth";
 import { mutationLimiter } from "../middleware/rate-limit";
 import { requireBusiness } from "../middleware/rbac";
 import { validate, validateQuery } from "../middleware/validate";
-import { uploadKnowledgePdf, validateKnowledgeUploadMetadata } from "../middleware/knowledge-upload";
+import {
+  uploadKnowledgeDocument,
+  validateKnowledgeReplacementMetadata,
+  validateKnowledgeUploadMetadata,
+} from "../middleware/knowledge-upload";
 import {
   createKnowledgeArticleSchema,
   draftKnowledgeArticleSchema,
   generateStarterArticlesSchema,
   knowledgeArticleListQuerySchema,
   knowledgeDocumentListQuerySchema,
+  knowledgeDocumentVersionListQuerySchema,
   knowledgeSearchQuerySchema,
   updateKnowledgeArticleSchema,
   updateKnowledgeArticleStatusSchema,
@@ -35,9 +40,15 @@ knowledgeRouter.patch("/articles/:articleId/status", mutationLimiter, validate(u
 knowledgeRouter.delete("/articles/:articleId", mutationLimiter, knowledgeController.archiveArticle);
 
 knowledgeRouter.get("/documents", validateQuery(knowledgeDocumentListQuerySchema), knowledgeController.listDocuments);
-knowledgeRouter.post("/documents/upload", mutationLimiter, uploadKnowledgePdf, validateKnowledgeUploadMetadata, knowledgeController.uploadDocument);
+knowledgeRouter.post("/documents/upload", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeUploadMetadata, knowledgeController.uploadDocument);
+knowledgeRouter.post("/documents/:documentId/versions", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeReplacementMetadata, knowledgeController.replaceDocument);
+knowledgeRouter.get("/documents/:documentId/versions", validateQuery(knowledgeDocumentVersionListQuerySchema), knowledgeController.documentVersions);
+knowledgeRouter.get("/documents/:documentId/download-url", knowledgeController.documentDownloadUrl);
 knowledgeRouter.get("/documents/:documentId/download", knowledgeController.downloadDocument);
 knowledgeRouter.get("/documents/:documentId", knowledgeController.documentDetail);
 knowledgeRouter.patch("/documents/:documentId", mutationLimiter, validate(updateKnowledgeDocumentSchema), knowledgeController.updateDocument);
 knowledgeRouter.patch("/documents/:documentId/status", mutationLimiter, validate(updateKnowledgeDocumentStatusSchema), knowledgeController.updateDocumentStatus);
-knowledgeRouter.delete("/documents/:documentId", mutationLimiter, knowledgeController.archiveDocument);
+knowledgeRouter.post("/documents/:documentId/archive", mutationLimiter, knowledgeController.archiveDocument);
+knowledgeRouter.post("/documents/:documentId/restore", mutationLimiter, knowledgeController.restoreDocument);
+knowledgeRouter.post("/documents/:documentId/retry-processing", mutationLimiter, knowledgeController.retryDocumentProcessing);
+knowledgeRouter.delete("/documents/:documentId", mutationLimiter, knowledgeController.deleteDocument);

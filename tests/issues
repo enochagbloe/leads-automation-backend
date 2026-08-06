@@ -1,45 +1,90 @@
-**Production Findings**
+# Knowledge Hub V2 S3 Audit
 
-1. **P1: Customer phone can change, but delivery uses a stale number.**  
-`processDueJobs()` loads the lead before processing. Round 1–3 reload current state, but the final destination is still taken from the original job snapshot. If staff changes the customer’s phone during processing, validation can approve the new lead state while WhatsApp sends to the old number.  
-[follow-up-processor.service.ts:447](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:447)  
-[follow-up-processor.service.ts:702](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:702)
+**Verdict: FAIL**
 
-2. **P1: Final safety validation still has a post-commit race.**  
-The final delivery transaction verifies opt-out, takeover, complaints, staff activity, prompt versions, and lifecycle state, then commits. `sendWhatsAppText()` runs afterward. Any stop condition occurring between commit and provider submission will not prevent delivery.  
-[follow-up-processor.service.ts:1217](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1217)  
-[follow-up-processor.service.ts:1354](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1354)
+No P0 cross-business exploit was found in the routed V2 endpoints. However, several P1 lifecycle, consistency, and processing blockers remain.
 
-3. **P1: Customer opt-out is not persisted authoritatively.**  
-The validator and final gate scan only the latest 50 customer messages using regex. There is no durable contact-restriction record in the schema. An older opt-out can eventually disappear from the safety window. Opt-out must remain active until an explicit opt-in changes it.  
-[follow-up-premium-lifecycle-validator.service.ts:535](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-lifecycle-validator.service.ts:535)  
-[follow-up-premium-execution.service.ts:761](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-execution.service.ts:761)
+**P1 Findings**
 
-4. **P1: Premium AI generation is checked against one quota counter but recorded against another.**  
-`assertCanUseAiReplies()` checks `aiRepliesUsed`. Premium generation then calls `trackRequest()`, which only increments `aiRequestsUsed`. Therefore these provider calls do not consume the counter used to enforce the limit. Regeneration can make two unbounded paid requests.  
-[ai-usage.service.ts:248](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-usage.service.ts:248)  
-[ai-usage.service.ts:266](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-usage.service.ts:266)  
-[follow-up-premium-message-generator.service.ts:900](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-message-generator.service.ts:900)
+1. **Processing jobs are never consumed.** Uploads create `QUEUED` jobs, but no worker claims `KnowledgeDocumentProcessingJob`. Documents remain queued indefinitely.  
+[ingestion service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-ingestion.service.ts:238)  
+Fix: implement the Round 2 worker with conditional claims, ownership checks, stale-job recovery, and valid status transitions. Test queued processing, retries, deletion during processing, and stale recovery.
 
-5. **P1/P2: Some delivered-message recovery paths do not settle the send log or continuation.**  
-Stale recovery can mark a job `SENT` from the message status without changing its `QUEUED` send log to `SENT` or marking the Premium continuation pending. Attempt counting can remain wrong and the next sequence stage may never be created.  
-[follow-up-processor.service.ts:219](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:219)  
-[follow-up-processor.service.ts:1005](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-processor.service.ts:1005)
+2. **Upload crash gaps can leave permanent `UPLOADING` records or orphaned S3 objects.** Database preparation commits before S3 upload; the final database transaction happens afterward. A process crash bypasses the catch cleanup entirely.  
+[ingestion service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-ingestion.service.ts:90)  
+Fix: add an upload reconciliation worker keyed by deterministic object key. Reconcile stale `UPLOADING` records using `HeadObject`. Test crashes before upload, after upload, and before queue creation.
 
-6. **P2: `RECALCULATE` cancels the job without creating durable recalculation work.**  
-The execution changes the job to `CANCELLED` and the execution to `RECALCULATION_REQUIRED`, but no worker processes that status. Prompt, rule, appointment, or assignment changes can therefore terminate the sequence instead of recalculating it.  
-[follow-up-premium-execution.service.ts:419](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-execution.service.ts:419)
+3. **Database constraints do not enforce tenant consistency between document, version, and job.** `KnowledgeDocumentVersion.businessId`, `documentId`, and job identifiers have independent foreign keys. A version or job can reference entities from different businesses. `activeVersionId` can reference another document’s version.  
+[schema.prisma](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/prisma/schema.prisma:1903)  
+Fix: add composite unique keys and foreign keys for `(id,businessId)`, `(documentId,businessId)`, and `(versionId,documentId,businessId)`. Test cross-business inserts at database level.
 
-7. **P2: Natural-language timing is initially interpreted in UTC.**  
-“Tonight,” “tomorrow,” and “next Monday” are calculated with UTC setters. Business-hours validation can adjust invalid times, but it cannot reliably recover the customer’s intended local meaning.  
-[follow-up-premium-decision-context.service.ts:180](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-premium-decision-context.service.ts:180)
+4. **Concurrent retries can receive a false successful upload response.** An idempotent replay returns the existing mutable document even when the original request is still `UPLOADING` and may later fail.  
+[ingestion service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-ingestion.service.ts:92)  
+Fix: persist an upload-operation state/result snapshot. Return `202 UPLOAD_IN_PROGRESS` while incomplete and the exact committed result after completion. Test simultaneous requests using the same key.
 
-8. **P2: Premium continuation businesses can be starved by ordinary scheduled jobs.**  
-Business IDs are concatenated with scheduled jobs first and then sliced to the global limit. Under sustained load, businesses appearing only in the Premium continuation result can repeatedly be excluded.  
-[follow-up-worker.service.ts:77](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/follow-up/follow-up-worker.service.ts:77)
+5. **Old and new quota locks do not serialize with each other.** Legacy article operations use `knowledge_quota`; V2 uploads use `knowledge_document_quota`. Concurrent article creation and document upload can both pass the shared asset limit.  
+[legacy quota](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge.service.ts:229)  
+[V2 quota](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-quota.service.ts:51)  
+Fix: use one account-level Knowledge Hub quota lock and one shared capability service. Test concurrent article/document creation at the final available slot.
 
-**Verification**
+6. **Version replacement is not implemented and active-version uniqueness is not enforced.** There is no replacement upload endpoint, no transactional next-version allocation, and no constraint preventing multiple `isActive=true` versions.  
+[routes](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/routes/knowledge.routes.ts:38)  
+[schema.prisma](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/prisma/schema.prisma:1921)  
+Fix: add a locked replacement flow and partial unique index for one active version per document. Test concurrent version creation and active-version switching.
 
-TypeScript and all six Premium/follow-up test suites pass: 53 tests total. However, the current tests are primarily policy-unit tests; they do not exercise provider crash gaps, stale phone delivery, persistent opt-out, usage accounting, recovery settlement, or worker fairness.
+7. **Soft-deleted storage is never reclaimed.** Soft deletion preserves S3 objects, but there is no retention model or permanent cleanup worker. Deleted versions continue consuming enforced quota permanently.  
+[lifecycle service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-lifecycle.service.ts:94)  
+Fix: add retention state and idempotent deletion jobs. Never remove the database reference before confirmed S3 deletion. Test failed deletion and retry reconciliation.
 
-The first bug to resolve should be the stale destination-phone issue because it can send a customer’s message to the wrong person.
+**P2 Findings**
+
+8. Storage usage reporting and enforcement disagree. `/stats` counts active document rows, while V2 enforcement counts every retained version. Generated article PDFs are not included.  
+[legacy statistics](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge.service.ts:180)  
+Fix: create one shared storage-usage calculation based on retained objects.
+
+9. Switching from local storage to AWS can orphan legacy local article PDFs and attachments because those models do not store `storageProvider`. Regeneration can recover article PDFs, but stale local files are not reliably deleted.  
+[knowledge PDF service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-pdf.service.ts:197)  
+Fix: add provider/object metadata and migrate existing files before removing local-storage compatibility.
+
+10. Development and production bucket separation is not enforced. The application accepts any configured bucket.  
+[environment configuration](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/config/env.ts:136)  
+Fix: enforce an environment/bucket identifier and use IAM policies preventing development credentials from accessing production.
+
+11. The direct download endpoint buffers the complete S3 object in application memory. Upload validation also reads the entire temporary file into memory.  
+[storage service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/storage.service.ts:73)  
+Fix: redirect S3 downloads to signed URLs and use streaming/multipart upload for larger future limits.
+
+12. Malware scanning is optional and currently defaults to `NOT_CONFIGURED`. Office validation does not fully parse ZIP structures or detect decompression bombs.  
+[scanner service](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-malware-scanner.service.ts:26)  
+Fix: require scanning before processing in production and apply decompression limits.
+
+13. Managers receive full Knowledge Hub management access based only on role. There is no assigned Knowledge Hub permission. Unauthorized and mutation-based cross-business attempts are not consistently audited.  
+[permission check](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document.types.ts:12)
+
+**Current Architecture**
+
+- One lazy singleton `S3Client`.
+- One shared `storageService` used by V2 documents and generated article PDFs.
+- One V2 multipart upload handler.
+- Signed URLs exist only for V2 document downloads.
+- No duplicate S3 client or signed-URL implementation was found.
+- Legacy `knowledgeService.uploadDocument()` and status methods remain as dead/duplicate service code.
+- AWS names are canonical; `KNOWLEDGE_S3_*` aliases remain for compatibility.
+
+**Architecture Decision**
+
+**Extend and refactor the existing shared storage service.** Do not replace it or create another S3 service. Generalize it away from Knowledge-specific Prisma enums, then migrate consumers one at a time.
+
+**Safe Remediation Order**
+
+1. Add mocked AWS and database integration tests.
+2. Add composite tenant constraints and active-version uniqueness.
+3. Unify quota locks and usage calculations.
+4. Add upload/orphan reconciliation.
+5. Implement the processing worker.
+6. Add transactional version replacement.
+7. Add retention and S3 deletion reconciliation.
+8. Backfill legacy provider metadata and copy local files where required.
+9. Remove dead legacy upload/status code only after consumer verification.
+
+The migration is applied and Prisma reports the database schema up to date. The inspected database currently contains no Knowledge documents, versions, jobs, or generated article PDFs, so legacy object migration has no current data to move.
