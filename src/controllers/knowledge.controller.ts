@@ -1,11 +1,16 @@
 import { BusinessRole } from "@prisma/client";
 import { Request, RequestHandler } from "express";
 import { knowledgeService } from "../services/knowledge.service";
+import { knowledgeDocumentIngestionService } from "../services/knowledge-document/knowledge-document-ingestion.service";
+import { knowledgeDocumentLifecycleService } from "../services/knowledge-document/knowledge-document-lifecycle.service";
+import { knowledgeDocumentQueryService } from "../services/knowledge-document/knowledge-document-query.service";
+import { knowledgeDocumentReplacementService } from "../services/knowledge-document/knowledge-document-replacement.service";
 import { AppError } from "../utils/errors";
 import { requestMetadata } from "../utils/request";
 import {
   KnowledgeArticleListQuery,
   KnowledgeDocumentListQuery,
+  KnowledgeDocumentVersionListQuery,
   KnowledgeSearchQuery,
 } from "../validation/knowledge.schemas";
 
@@ -24,7 +29,23 @@ function param(req: Request, key: string) {
   return Array.isArray(value) ? value[0]! : value!;
 }
 
-function sendDownload(res: Parameters<RequestHandler>[1], file: { buffer: Buffer; fileName: string; mimeType: string; fileSize: number }) {
+function sendDownload(
+  res: Parameters<RequestHandler>[1],
+  file: {
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    buffer?: Buffer;
+    redirectUrl?: string;
+  },
+) {
+  if (file.redirectUrl) {
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.redirect(302, file.redirectUrl);
+    return;
+  }
+  if (!file.buffer) throw new AppError(503, "Document file is unavailable.", "KNOWLEDGE_ASSET_FILE_NOT_FOUND");
   res.type(file.mimeType);
   res.attachment(file.fileName);
   res.setHeader("Content-Length", file.buffer.byteLength || file.fileSize);
@@ -86,13 +107,48 @@ export const knowledgeController = {
   },
   generateStarterArticles: async (req, res) => res.status(201).json(await knowledgeService.generateStarterArticles(actor(req), req.body, requestMetadata(req))),
 
-  listDocuments: async (req, res) => res.json(await knowledgeService.listDocuments(actor(req), res.locals.validatedQuery as KnowledgeDocumentListQuery)),
-  uploadDocument: async (req, res) => res.status(201).json(await knowledgeService.uploadDocument(actor(req), req.body, req.file!, requestMetadata(req))),
-  documentDetail: async (req, res) => res.json(await knowledgeService.detailDocument(actor(req), param(req, "documentId"))),
-  downloadDocument: async (req, res) => sendDownload(res, await knowledgeService.downloadDocument(actor(req), param(req, "documentId"))),
+  listDocuments: async (req, res) => res.json(await knowledgeDocumentQueryService.list(actor(req), res.locals.validatedQuery as KnowledgeDocumentListQuery)),
+  uploadDocument: async (req, res) => {
+    const result = await knowledgeDocumentIngestionService.upload(
+      actor(req),
+      req.body,
+      req.file!,
+      requestMetadata(req),
+      req.get("Idempotency-Key"),
+    );
+    res.status(result.statusCode).json(result.response);
+  },
+  replaceDocument: async (req, res) => {
+    const result = await knowledgeDocumentReplacementService.replace(
+      actor(req),
+      param(req, "documentId"),
+      req.body,
+      req.file!,
+      requestMetadata(req),
+      req.get("Idempotency-Key"),
+    );
+    res.status(result.statusCode).json(result.response);
+  },
+  documentDetail: async (req, res) => res.json(await knowledgeDocumentQueryService.detail(actor(req), param(req, "documentId"))),
+  documentVersions: async (req, res) => res.json(await knowledgeDocumentQueryService.versions(
+    actor(req),
+    param(req, "documentId"),
+    res.locals.validatedQuery as KnowledgeDocumentVersionListQuery,
+  )),
+  documentDownloadUrl: async (req, res) => res.json(await knowledgeDocumentQueryService.downloadUrl(actor(req), param(req, "documentId"), requestMetadata(req))),
+  downloadDocument: async (req, res) => sendDownload(res, await knowledgeDocumentQueryService.download(actor(req), param(req, "documentId"), requestMetadata(req))),
   updateDocument: async (req, res) => res.json(await knowledgeService.updateDocument(actor(req), param(req, "documentId"), req.body, requestMetadata(req))),
-  updateDocumentStatus: async (req, res) => res.json(await knowledgeService.updateDocumentStatus(actor(req), param(req, "documentId"), req.body.status, requestMetadata(req))),
-  archiveDocument: async (req, res) => res.json(await knowledgeService.archiveDocument(actor(req), param(req, "documentId"), requestMetadata(req))),
+  updateDocumentStatus: async (req, res) => {
+    const status = req.body.status as string;
+    if (status === "ARCHIVED") return res.json(await knowledgeDocumentLifecycleService.archive(actor(req), param(req, "documentId"), requestMetadata(req)));
+    if (status === "ACTIVE") return res.json(await knowledgeDocumentLifecycleService.restore(actor(req), param(req, "documentId"), requestMetadata(req)));
+    if (status === "DELETED") return res.json(await knowledgeDocumentLifecycleService.softDelete(actor(req), param(req, "documentId"), requestMetadata(req)));
+    throw new AppError(422, "Unsupported document status transition.", "KNOWLEDGE_DOCUMENT_STATUS_TRANSITION_INVALID");
+  },
+  archiveDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.archive(actor(req), param(req, "documentId"), requestMetadata(req))),
+  restoreDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.restore(actor(req), param(req, "documentId"), requestMetadata(req))),
+  deleteDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.softDelete(actor(req), param(req, "documentId"), requestMetadata(req))),
+  retryDocumentProcessing: async (req, res) => res.json(await knowledgeDocumentLifecycleService.retryProcessing(actor(req), param(req, "documentId"), requestMetadata(req))),
 
   search: async (req, res) => res.json(await knowledgeService.search(actor(req), res.locals.validatedQuery as KnowledgeSearchQuery)),
   sendToConversation: async (req, res) => res.json(await knowledgeService.sendToConversation(actor(req), param(req, "id"), req.body, requestMetadata(req))),

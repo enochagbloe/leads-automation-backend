@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum BusinessRole {
@@ -627,6 +628,66 @@ enum KnowledgeAssetVisibility {
 enum KnowledgeDocumentStatus {
   ACTIVE
   ARCHIVED
+  DELETED
+}
+
+enum KnowledgeDocumentProcessingStatus {
+  UPLOADING
+  QUEUED
+  PROCESSING
+  READY
+  NEEDS_REVIEW
+  FAILED
+}
+
+enum KnowledgeDocumentMalwareScanStatus {
+  NOT_SCANNED
+  CLEAN
+  INFECTED
+  FAILED
+}
+
+enum KnowledgeStorageProvider {
+  LOCAL_PRIVATE
+  S3_COMPATIBLE
+}
+
+enum KnowledgeStorageMigrationJobStatus {
+  SCHEDULED
+  PROCESSING
+  SOURCE_CLEANUP_PENDING
+  FAILED
+  COMPLETED
+  EXHAUSTED
+}
+
+enum KnowledgeDocumentProcessingJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum KnowledgeDocumentRetentionStatus {
+  RETAINED
+  PENDING_DELETION
+  DELETION_IN_PROGRESS
+  DELETION_FAILED
+  PURGED
+}
+
+enum KnowledgeDocumentStorageDeletionJobStatus {
+  SCHEDULED
+  PROCESSING
+  FAILED
+  COMPLETED
+  EXHAUSTED
+}
+
+enum KnowledgeDocumentUploadOperationStatus {
+  UPLOADING
+  COMPLETED
+  FAILED
 }
 
 enum KnowledgeAssetSendType {
@@ -860,6 +921,21 @@ enum AuditAction {
   KNOWLEDGE_ARTICLE_ARCHIVED
   KNOWLEDGE_ARTICLE_PDF_GENERATED
   KNOWLEDGE_DOCUMENT_UPLOADED
+  KNOWLEDGE_DOCUMENT_UPLOAD_STARTED
+  KNOWLEDGE_DOCUMENT_UPLOAD_COMPLETED
+  KNOWLEDGE_DOCUMENT_UPLOAD_FAILED
+  KNOWLEDGE_DOCUMENT_PROCESSING_QUEUED
+  KNOWLEDGE_DOCUMENT_RESTORED
+  KNOWLEDGE_DOCUMENT_DELETED
+  KNOWLEDGE_DOCUMENT_PROCESSING_RETRY_REQUESTED
+  KNOWLEDGE_DOCUMENT_DOWNLOADED
+  KNOWLEDGE_DOCUMENT_DUPLICATE_DETECTED
+  KNOWLEDGE_DOCUMENT_SCOPE_VIOLATION
+  KNOWLEDGE_ARTICLE_SCOPE_VIOLATION
+  KNOWLEDGE_DOCUMENT_PERMISSION_DENIED
+  KNOWLEDGE_HUB_PERMISSION_UPDATED
+  KNOWLEDGE_DOCUMENT_STORAGE_DELETION_COMPLETED
+  KNOWLEDGE_DOCUMENT_STORAGE_DELETION_FAILED
   KNOWLEDGE_DOCUMENT_UPDATED
   KNOWLEDGE_DOCUMENT_ARCHIVED
   KNOWLEDGE_ASSET_SENT_TO_CUSTOMER
@@ -1008,50 +1084,55 @@ model Business {
   updatedAt                        DateTime                    @updatedAt
   deletedAt                        DateTime?
 
-  owner                         User                                  @relation("BusinessOwner", fields: [ownerId], references: [id])
-  businessAccount               BusinessAccount                       @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  members                       BusinessMember[]
-  invitations                   BusinessInvitation[]
-  usageRecords                  BusinessUsageRecord[]
-  auditLogs                     AuditLog[]
-  leads                         Lead[]
-  leadActivities                LeadActivity[]
-  conversations                 Conversation[]
-  messages                      Message[]
-  whatsAppIntegrations          WhatsAppIntegration[]
-  webhookEventLogs              WebhookEventLog[]
-  aiInteractionLogs             AiInteractionLog[]
-  services                      Service[]
-  availability                  BusinessAvailability[]
-  policies                      BusinessPolicy[]
-  appointments                  Appointment[]
-  appointmentRescheduleRequests AppointmentRescheduleRequest[]
-  appointmentActivities         AppointmentActivity[]
-  notifications                 BusinessNotification[]
-  customerIssueLogs             CustomerIssueLog[]
-  knowledgeArticles             KnowledgeArticle[]
-  knowledgeDocuments            KnowledgeDocument[]
-  knowledgeAssetSendLogs        KnowledgeAssetSendLog[]
-  messageAttachments            ConversationMessageAttachment[]
-  knowledgeDocumentChunks       KnowledgeDocumentChunk[]
-  complaintInsightReports       ComplaintInsightReport[]
-  customerIssueTimelineEvents   CustomerIssueTimelineEvent[]
-  customerIssueMessages         CustomerIssueMessage[]
-  followUpAutomationRules       FollowUpAutomationRule[]
-  followUpJobs                  FollowUpJob[]
-  followUpSendLogs              FollowUpSendLog[]
-  premiumFollowUpInsights       PremiumFollowUpIntelligenceSnapshot[]
-  premiumFollowUpGenerations    PremiumFollowUpMessageGeneration[]
-  premiumFollowUpExecutions     PremiumFollowUpExecution[]
-  aiPromptConfigurations        AiPromptConfiguration[]
-  aiPromptVersions              AiPromptVersion[]
-  aiPromptDraftMutations        AiPromptDraftMutation[]
-  customerMemoryProfiles        CustomerMemoryProfile[]
-  customerMemoryItems           CustomerMemoryItem[]
-  customerMemoryExtractionJobs  CustomerMemoryExtractionJob[]
-  customerMemoryTombstones      CustomerMemoryConversationTombstone[]
-  customerMemoryItemTombstones  CustomerMemoryItemTombstone[]
-  customerMemoryDiscoveryCursor CustomerMemoryDiscoveryCursor?
+  owner                                User                                  @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount                      BusinessAccount                       @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members                              BusinessMember[]
+  invitations                          BusinessInvitation[]
+  usageRecords                         BusinessUsageRecord[]
+  auditLogs                            AuditLog[]
+  leads                                Lead[]
+  leadActivities                       LeadActivity[]
+  conversations                        Conversation[]
+  messages                             Message[]
+  whatsAppIntegrations                 WhatsAppIntegration[]
+  webhookEventLogs                     WebhookEventLog[]
+  aiInteractionLogs                    AiInteractionLog[]
+  services                             Service[]
+  availability                         BusinessAvailability[]
+  policies                             BusinessPolicy[]
+  appointments                         Appointment[]
+  appointmentRescheduleRequests        AppointmentRescheduleRequest[]
+  appointmentActivities                AppointmentActivity[]
+  notifications                        BusinessNotification[]
+  customerIssueLogs                    CustomerIssueLog[]
+  knowledgeArticles                    KnowledgeArticle[]
+  knowledgeDocuments                   KnowledgeDocument[]
+  knowledgeDocumentVersions            KnowledgeDocumentVersion[]
+  knowledgeDocumentStorageDeletionJobs KnowledgeDocumentStorageDeletionJob[]
+  knowledgeStorageMigrationJobs        KnowledgeStorageMigrationJob[]
+  knowledgeDocumentProcessingJobs      KnowledgeDocumentProcessingJob[]
+  knowledgeDocumentUploadOperations    KnowledgeDocumentUploadOperation[]
+  knowledgeAssetSendLogs               KnowledgeAssetSendLog[]
+  messageAttachments                   ConversationMessageAttachment[]
+  knowledgeDocumentChunks              KnowledgeDocumentChunk[]
+  complaintInsightReports              ComplaintInsightReport[]
+  customerIssueTimelineEvents          CustomerIssueTimelineEvent[]
+  customerIssueMessages                CustomerIssueMessage[]
+  followUpAutomationRules              FollowUpAutomationRule[]
+  followUpJobs                         FollowUpJob[]
+  followUpSendLogs                     FollowUpSendLog[]
+  premiumFollowUpInsights              PremiumFollowUpIntelligenceSnapshot[]
+  premiumFollowUpGenerations           PremiumFollowUpMessageGeneration[]
+  premiumFollowUpExecutions            PremiumFollowUpExecution[]
+  aiPromptConfigurations               AiPromptConfiguration[]
+  aiPromptVersions                     AiPromptVersion[]
+  aiPromptDraftMutations               AiPromptDraftMutation[]
+  customerMemoryProfiles               CustomerMemoryProfile[]
+  customerMemoryItems                  CustomerMemoryItem[]
+  customerMemoryExtractionJobs         CustomerMemoryExtractionJob[]
+  customerMemoryTombstones             CustomerMemoryConversationTombstone[]
+  customerMemoryItemTombstones         CustomerMemoryItemTombstone[]
+  customerMemoryDiscoveryCursor        CustomerMemoryDiscoveryCursor?
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -1192,6 +1273,7 @@ model BusinessMember {
   serviceTags             String[]         @default([])
   isAiHandoffEligible     Boolean          @default(true)
   canTakeAppointments     Boolean          @default(true)
+  canManageKnowledgeHub   Boolean          @default(false)
   aiHandoffPriority       Int?
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
@@ -1228,6 +1310,7 @@ model BusinessMember {
   @@unique([businessId, userId])
   @@index([userId])
   @@index([businessId, status])
+  @@index([businessId, canManageKnowledgeHub])
   @@index([invitedById])
   @@index([disabledByMembershipId])
   @@index([removedByMembershipId])
@@ -1769,25 +1852,28 @@ model CustomerMemoryItemTombstone {
 }
 
 model KnowledgeArticle {
-  id                      String                   @id @default(cuid())
+  id                      String                    @id @default(cuid())
   businessId              String
   title                   String
   slug                    String?
   summary                 String?
   body                    String
   category                String?
-  tags                    String[]                 @default([])
-  relatedServiceIds       String[]                 @default([])
-  relatedPolicyIds        String[]                 @default([])
-  status                  KnowledgeArticleStatus   @default(DRAFT)
-  source                  KnowledgeArticleSource   @default(MANUAL)
-  visibility              KnowledgeAssetVisibility @default(INTERNAL_ONLY)
-  aiGenerated             Boolean                  @default(false)
+  tags                    String[]                  @default([])
+  relatedServiceIds       String[]                  @default([])
+  relatedPolicyIds        String[]                  @default([])
+  status                  KnowledgeArticleStatus    @default(DRAFT)
+  source                  KnowledgeArticleSource    @default(MANUAL)
+  visibility              KnowledgeAssetVisibility  @default(INTERNAL_ONLY)
+  aiGenerated             Boolean                   @default(false)
   aiPromptVersion         String?
   aiDraftReason           String?
   aiConfidence            Float?
   pdfFileKey              String?
   pdfFileUrl              String?
+  pdfFileSize             Int?
+  pdfStorageProvider      KnowledgeStorageProvider?
+  pdfStorageObjectKey     String?
   lastPdfGeneratedAt      DateTime?
   reviewedByMembershipId  String?
   reviewedAt              DateTime?
@@ -1795,8 +1881,8 @@ model KnowledgeArticle {
   publishedAt             DateTime?
   createdByMembershipId   String?
   updatedByMembershipId   String?
-  createdAt               DateTime                 @default(now())
-  updatedAt               DateTime                 @updatedAt
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
 
   business    Business                        @relation(fields: [businessId], references: [id], onDelete: Cascade)
   reviewedBy  BusinessMember?                 @relation("KnowledgeArticleReviewer", fields: [reviewedByMembershipId], references: [id], onDelete: SetNull)
@@ -1813,38 +1899,184 @@ model KnowledgeArticle {
   @@index([businessId, source])
   @@index([businessId, category])
   @@index([businessId, updatedAt])
+  @@index([businessId, pdfFileKey])
+  @@index([businessId, pdfStorageProvider])
 }
 
 model KnowledgeDocument {
-  id                     String                   @id @default(cuid())
+  id                     String                            @id @default(cuid())
   businessId             String
   title                  String
   description            String?
   category               String?
-  tags                   String[]                 @default([])
-  relatedServiceIds      String[]                 @default([])
+  tags                   String[]                          @default([])
+  relatedServiceIds      String[]                          @default([])
   fileUrl                String
   fileKey                String?
   fileName               String
   mimeType               String
   fileSize               Int
-  status                 KnowledgeDocumentStatus  @default(ACTIVE)
-  visibility             KnowledgeAssetVisibility @default(INTERNAL_ONLY)
+  status                 KnowledgeDocumentStatus           @default(ACTIVE)
+  visibility             KnowledgeAssetVisibility          @default(INTERNAL_ONLY)
   uploadedByMembershipId String?
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @updatedAt
+  originalFileName       String
+  safeFileName           String
+  fileExtension          String
+  storageProvider        KnowledgeStorageProvider          @default(LOCAL_PRIVATE)
+  storageObjectKey       String?
+  checksum               String
+  processingStatus       KnowledgeDocumentProcessingStatus @default(READY)
+  processingErrorCode    String?
+  processingErrorMessage String?
+  activeVersionId        String?
+  uploadedByUserId       String?
+  archivedAt             DateTime?
+  deletedAt              DateTime?
+  retentionStatus        KnowledgeDocumentRetentionStatus  @default(RETAINED)
+  retentionExpiresAt     DateTime?
+  storageDeletedAt       DateTime?
+  createdAt              DateTime                          @default(now())
+  updatedAt              DateTime                          @updatedAt
 
-  business    Business                        @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  uploadedBy  BusinessMember?                 @relation("KnowledgeDocumentUploader", fields: [uploadedByMembershipId], references: [id], onDelete: SetNull)
-  sendLogs    KnowledgeAssetSendLog[]
-  attachments ConversationMessageAttachment[]
-  chunks      KnowledgeDocumentChunk[]
+  business            Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  uploadedBy          BusinessMember?                       @relation("KnowledgeDocumentUploader", fields: [uploadedByMembershipId], references: [id], onDelete: SetNull)
+  sendLogs            KnowledgeAssetSendLog[]
+  attachments         ConversationMessageAttachment[]
+  chunks              KnowledgeDocumentChunk[]
+  versions            KnowledgeDocumentVersion[]            @relation("KnowledgeDocumentVersions")
+  activeVersion       KnowledgeDocumentVersion?             @relation("ActiveKnowledgeDocumentVersion", fields: [activeVersionId, id, businessId], references: [id, documentId, businessId], onDelete: NoAction)
+  processingJobs      KnowledgeDocumentProcessingJob[]
+  storageDeletionJobs KnowledgeDocumentStorageDeletionJob[]
 
+  @@unique([id, businessId])
   @@index([businessId])
   @@index([businessId, status])
   @@index([businessId, visibility])
   @@index([businessId, category])
   @@index([businessId, updatedAt])
+  @@index([businessId, processingStatus])
+  @@index([businessId, checksum])
+  @@index([businessId, deletedAt])
+  @@index([businessId, retentionStatus, retentionExpiresAt], map: "KnowledgeDocument_business_retention_expiry_idx")
+}
+
+model KnowledgeDocumentVersion {
+  id                     String                            @id @default(cuid())
+  documentId             String
+  businessId             String
+  versionNumber          Int
+  originalFileName       String
+  safeFileName           String
+  fileExtension          String
+  storageProvider        KnowledgeStorageProvider
+  storageObjectKey       String?
+  fileSize               Int
+  mimeType               String
+  checksum               String
+  malwareScanStatus      KnowledgeDocumentMalwareScanStatus @default(NOT_SCANNED)
+  malwareScannedAt       DateTime?
+  malwareScanner         String?
+  uploadedByUserId       String?
+  uploadedByMembershipId String?
+  processingStatus       KnowledgeDocumentProcessingStatus @default(UPLOADING)
+  processingErrorCode    String?
+  processingErrorMessage String?
+  isActive               Boolean                           @default(false)
+  uploadIdempotencyKey   String?
+  storageDeletedAt       DateTime?
+  createdAt              DateTime                          @default(now())
+  updatedAt              DateTime                          @updatedAt
+
+  document           KnowledgeDocument                    @relation("KnowledgeDocumentVersions", fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  business           Business                             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  activeForDocuments KnowledgeDocument[]                  @relation("ActiveKnowledgeDocumentVersion")
+  processingJob      KnowledgeDocumentProcessingJob?
+  storageDeletionJob KnowledgeDocumentStorageDeletionJob?
+
+  @@unique([documentId, versionNumber])
+  @@unique([businessId, uploadIdempotencyKey])
+  @@unique([id, businessId])
+  @@unique([id, documentId, businessId])
+  // A partial unique index on documentId where isActive=true is enforced by migration.
+  @@index([documentId, isActive])
+  @@index([businessId, checksum])
+  @@index([businessId, processingStatus])
+  @@index([businessId, malwareScanStatus])
+}
+
+model KnowledgeDocumentStorageDeletionJob {
+  id                  String                                    @id @default(cuid())
+  businessId          String
+  documentId          String
+  versionId           String                                    @unique
+  storageProvider     KnowledgeStorageProvider
+  storageObjectKey    String
+  status              KnowledgeDocumentStorageDeletionJobStatus @default(SCHEDULED)
+  attemptCount        Int                                       @default(0)
+  scheduledFor        DateTime
+  nextAttemptAt       DateTime?
+  processingStartedAt DateTime?
+  completedAt         DateTime?
+  lastErrorCode       String?
+  lastErrorMessage    String?
+  createdAt           DateTime                                  @default(now())
+  updatedAt           DateTime                                  @updatedAt
+
+  business Business                 @relation(fields: [businessId], references: [id], onDelete: Cascade, map: "KnowledgeDocumentStorageDeletionJob_businessId_fkey")
+  document KnowledgeDocument        @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade, map: "KnowledgeDocumentStorageDeletionJob_document_business_fkey")
+  version  KnowledgeDocumentVersion @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade, map: "KDStorageDeleteJob_version_document_business_fkey")
+
+  @@unique([versionId, documentId, businessId], map: "KDStorageDeleteJob_version_document_business_key")
+  @@index([status, nextAttemptAt, scheduledFor], map: "KnowledgeDocumentStorageDeletionJob_status_next_scheduled_idx")
+  @@index([businessId, documentId], map: "KnowledgeDocumentStorageDeletionJob_business_document_idx")
+}
+
+model KnowledgeDocumentProcessingJob {
+  id                  String                               @id @default(cuid())
+  businessId          String
+  documentId          String
+  versionId           String                               @unique
+  status              KnowledgeDocumentProcessingJobStatus @default(QUEUED)
+  attemptCount        Int                                  @default(0)
+  nextAttemptAt       DateTime?
+  processingStartedAt DateTime?
+  completedAt         DateTime?
+  errorCode           String?
+  errorMessage        String?
+  createdAt           DateTime                             @default(now())
+  updatedAt           DateTime                             @updatedAt
+
+  business Business                 @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument        @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version  KnowledgeDocumentVersion @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+
+  @@unique([versionId, documentId, businessId])
+  @@index([businessId, status, nextAttemptAt])
+  @@index([businessId, documentId])
+}
+
+model KnowledgeDocumentUploadOperation {
+  id                  String                                 @id @default(cuid())
+  businessId          String
+  idempotencyKey      String
+  requestChecksum     String
+  status              KnowledgeDocumentUploadOperationStatus @default(UPLOADING)
+  documentId          String?
+  versionId           String?
+  duplicateDocumentId String?
+  resultSnapshot      Json?
+  failureStatusCode   Int?
+  failureCode         String?
+  failureMessage      String?
+  completedAt         DateTime?
+  createdAt           DateTime                               @default(now())
+  updatedAt           DateTime                               @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId, status, updatedAt])
+  @@index([businessId, versionId])
 }
 
 model KnowledgeDocumentChunk {
@@ -2195,45 +2427,45 @@ model PremiumFollowUpMessageGeneration {
 }
 
 model PremiumFollowUpExecution {
-  id                      String                         @id @default(cuid())
-  businessId              String
-  jobId                   String
-  ruleId                  String
-  leadId                  String?
-  conversationId          String?
-  generationId            String?
-  sequenceStage           PremiumFollowUpSequenceStage
-  finalDecision           String
-  validationStatus        String
-  executionStatus         PremiumFollowUpExecutionStatus @default(EXECUTING)
-  executionReason         String?
-  executionBlocked        Boolean                        @default(false)
-  blockReason             String?
-  messageSource           PremiumFollowUpMessageSource   @default(NONE)
-  fallbackMessageUsed     Boolean                        @default(false)
-  contextVersion          String
-  promptVersions          Json?
-  memoryVersion           String?
-  validationSnapshot      Json
-  executionIdempotencyKey String                         @unique
-  recalculationCount      Int                            @default(0)
-  outboundMessageId       String?
-  sendLogId               String?
-  scheduledFor            DateTime?
-  processingStartedAt     DateTime                       @default(now())
-  processingLeaseToken    String?
-  executedAt              DateTime?
-  completedAt             DateTime?
-  errorCode                         String?
-  continuationStatus                String                         @default("NOT_REQUIRED")
-  continuationJobId                 String?
-  continuationReason                String?
-  continuationAttemptCount          Int                            @default(0)
+  id                              String                         @id @default(cuid())
+  businessId                      String
+  jobId                           String
+  ruleId                          String
+  leadId                          String?
+  conversationId                  String?
+  generationId                    String?
+  sequenceStage                   PremiumFollowUpSequenceStage
+  finalDecision                   String
+  validationStatus                String
+  executionStatus                 PremiumFollowUpExecutionStatus @default(EXECUTING)
+  executionReason                 String?
+  executionBlocked                Boolean                        @default(false)
+  blockReason                     String?
+  messageSource                   PremiumFollowUpMessageSource   @default(NONE)
+  fallbackMessageUsed             Boolean                        @default(false)
+  contextVersion                  String
+  promptVersions                  Json?
+  memoryVersion                   String?
+  validationSnapshot              Json
+  executionIdempotencyKey         String                         @unique
+  recalculationCount              Int                            @default(0)
+  outboundMessageId               String?
+  sendLogId                       String?
+  scheduledFor                    DateTime?
+  processingStartedAt             DateTime                       @default(now())
+  processingLeaseToken            String?
+  executedAt                      DateTime?
+  completedAt                     DateTime?
+  errorCode                       String?
+  continuationStatus              String                         @default("NOT_REQUIRED")
+  continuationJobId               String?
+  continuationReason              String?
+  continuationAttemptCount        Int                            @default(0)
   continuationProcessingStartedAt DateTime?
-  continuationNextAttemptAt         DateTime?
-  continuationCompletedAt           DateTime?
-  createdAt                         DateTime                       @default(now())
-  updatedAt                         DateTime                       @updatedAt
+  continuationNextAttemptAt       DateTime?
+  continuationCompletedAt         DateTime?
+  createdAt                       DateTime                       @default(now())
+  updatedAt                       DateTime                       @updatedAt
 
   business     Business                          @relation(fields: [businessId], references: [id], onDelete: Cascade)
   job          FollowUpJob                       @relation(fields: [jobId], references: [id], onDelete: Cascade)
@@ -2251,18 +2483,20 @@ model PremiumFollowUpExecution {
 }
 
 model ConversationMessageAttachment {
-  id         String                 @id @default(cuid())
-  businessId String
-  messageId  String
-  fileName   String
-  fileUrl    String
-  fileKey    String?
-  mimeType   String
-  fileSize   Int
-  assetType  KnowledgeAssetSendType
-  articleId  String?
-  documentId String?
-  createdAt  DateTime               @default(now())
+  id               String                    @id @default(cuid())
+  businessId       String
+  messageId        String
+  fileName         String
+  fileUrl          String
+  fileKey          String?
+  storageProvider  KnowledgeStorageProvider?
+  storageObjectKey String?
+  mimeType         String
+  fileSize         Int
+  assetType        KnowledgeAssetSendType
+  articleId        String?
+  documentId       String?
+  createdAt        DateTime                  @default(now())
 
   business Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
   message  Message            @relation(fields: [messageId], references: [id], onDelete: Cascade)
@@ -2273,6 +2507,31 @@ model ConversationMessageAttachment {
   @@index([messageId])
   @@index([businessId, articleId])
   @@index([businessId, documentId])
+  @@index([businessId, storageProvider])
+}
+
+model KnowledgeStorageMigrationJob {
+  id                  String                             @id @default(cuid())
+  businessId          String
+  sourceProvider      KnowledgeStorageProvider
+  sourceObjectKey     String
+  targetProvider      KnowledgeStorageProvider
+  targetObjectKey     String
+  status              KnowledgeStorageMigrationJobStatus @default(SCHEDULED)
+  attemptCount        Int                                @default(0)
+  nextAttemptAt       DateTime?
+  processingStartedAt DateTime?
+  completedAt         DateTime?
+  errorCode           String?
+  errorMessage        String?
+  createdAt           DateTime                           @default(now())
+  updatedAt           DateTime                           @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, sourceProvider, sourceObjectKey, targetProvider], map: "KnowledgeStorageMigrationJob_source_target_key")
+  @@index([status, nextAttemptAt, createdAt], map: "KnowledgeStorageMigrationJob_status_next_created_idx")
+  @@index([businessId, status], map: "KnowledgeStorageMigrationJob_business_status_idx")
 }
 
 model CustomerIssueLog {

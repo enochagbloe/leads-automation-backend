@@ -272,9 +272,10 @@ async function discoverMessages() {
     try {
       created += await discoverBusinessMessages(cursor.businessId);
     } catch (error) {
-      if (!isTransactionApiError(error)) throw error;
+      if (!isTransactionApiError(error) || isDatabaseUnavailableError(error)) throw error;
       // Discovery is safe to retry: cursor movement and deduplicated job
-      // creation commit in the same transaction.
+      // creation commit in the same transaction. Acquisition/connectivity
+      // failures are left for the next worker tick to avoid database pressure.
       created += await discoverBusinessMessages(cursor.businessId);
     }
   }

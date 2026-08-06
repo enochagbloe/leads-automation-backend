@@ -330,6 +330,7 @@ export const businessMemberAccessService = {
         serviceTags: true,
         isAiHandoffEligible: true,
         canTakeAppointments: true,
+        canManageKnowledgeHub: true,
         aiHandoffPriority: true,
         joinedAt: true,
         createdAt: true,
@@ -371,6 +372,7 @@ export const businessMemberAccessService = {
         serviceTags: member.serviceTags,
         isAiHandoffEligible: member.isAiHandoffEligible,
         canTakeAppointments: member.canTakeAppointments,
+        canManageKnowledgeHub: member.canManageKnowledgeHub,
         aiHandoffPriority: member.aiHandoffPriority,
         joinedAt: member.joinedAt,
         createdAt: member.createdAt,
@@ -384,6 +386,7 @@ export const businessMemberAccessService = {
           role: member.role,
           membershipStatus: member.status,
           canCreateBusiness: false,
+          canManageKnowledgeHub: member.canManageKnowledgeHub,
         }),
       })),
     };
@@ -633,6 +636,7 @@ export const businessMemberAccessService = {
       serviceTags?: string[];
       isAiHandoffEligible?: boolean;
       canTakeAppointments?: boolean;
+      canManageKnowledgeHub?: boolean;
       aiHandoffPriority?: number | null;
     },
     context: Omit<AuditInput, "action">,
@@ -642,6 +646,12 @@ export const businessMemberAccessService = {
       const target = await loadTarget(tx, actor.businessId, targetMembershipId);
       if (target.status === MembershipStatus.REMOVED) {
         throw new AppError(409, "Business member has already been removed.", "BUSINESS_MEMBER_ALREADY_REMOVED");
+      }
+      if (input.canManageKnowledgeHub === true && target.role !== BusinessRole.MANAGER && target.role !== BusinessRole.BUSINESS_OWNER) {
+        throw new AppError(422, "Knowledge Hub management can only be assigned to managers.", "KNOWLEDGE_HUB_PERMISSION_ROLE_INVALID");
+      }
+      if (input.canManageKnowledgeHub === false && target.role === BusinessRole.BUSINESS_OWNER) {
+        throw new AppError(422, "Business owners must retain Knowledge Hub management access.", "KNOWLEDGE_HUB_OWNER_PERMISSION_REQUIRED");
       }
       const changedFields = Object.keys(input).filter((field) => {
         const key = field as keyof typeof input;
@@ -663,6 +673,20 @@ export const businessMemberAccessService = {
           newValues: Object.fromEntries(result.changedFields.map((field) => [field, result.updated[field as keyof typeof result.updated] ?? null])),
         }),
         invalidateMemberCaches(actor.businessId, result.target.userId, result.target.id),
+        ...(result.changedFields.includes("canManageKnowledgeHub")
+          ? [auditService.log({
+            ...context,
+            action: AuditAction.KNOWLEDGE_HUB_PERMISSION_UPDATED,
+            businessId: actor.businessId,
+            userId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            metadata: json({
+              targetMembershipId: result.target.id,
+              previousValue: result.target.canManageKnowledgeHub,
+              newValue: result.updated.canManageKnowledgeHub,
+            }),
+          })]
+          : []),
       ]);
       realtimeService.publish({
         type: "business.member.operational_profile_updated",

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   AuditAction,
   BusinessNotificationEntityType,
@@ -12,6 +13,8 @@ import {
   KnowledgeAssetSendType,
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
+  KnowledgeDocumentProcessingStatus,
+  KnowledgeStorageProvider,
   MembershipStatus,
   PlanCode,
   Prisma,
@@ -39,12 +42,30 @@ import { AuditInput, auditService } from "./audit.service";
 import { AiCompletionResult, aiProvider } from "./ai-provider.service";
 import { cacheService } from "./cache.service";
 import { knowledgeEmbeddingService } from "./knowledge-embedding.service";
+import {
+  assertKnowledgeAssetCapacity as assertAssetCapacityTx,
+  currentKnowledgeHubSubscription as currentSubscriptionTx,
+  knowledgeAiDraftLimit as aiDraftLimitForPlan,
+  knowledgeAssetLimit,
+  knowledgeDocumentLimit as pdfUploadLimitForPlan,
+  knowledgeStorageLimit as storageLimitForPlan,
+} from "./knowledge-hub-capability.service";
 import { knowledgePdfService } from "./knowledge-pdf.service";
+import {
+  assertKnowledgeStorageUsageMeasured,
+  calculateKnowledgeStorageUsage,
+  calculateKnowledgeStorageUsageByBusiness,
+  reconcileKnowledgeArticlePdfSizes,
+} from "./knowledge-storage-usage.service";
 import { ConversationActor } from "./message.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
-import { storageService } from "./storage.service";
-import { ACTIVE_SUBSCRIPTION_STATUSES, subscriptionService } from "./subscription.service";
+import { resolveStorageObjectProvider, storageService } from "./storage.service";
+import { subscriptionService } from "./subscription.service";
+import {
+  assertCanManageKnowledgeDocuments,
+  throwKnowledgeDocumentNotFound,
+} from "./knowledge-document/knowledge-document.types";
 
 type KnowledgeActor = ConversationActor;
 
@@ -83,19 +104,31 @@ function scheduleEmbeddingSync(label: string, task: Promise<unknown>) {
   });
 }
 
-function scheduleStorageDelete(label: string, fileKey?: string | null) {
+function scheduleStorageDelete(
+  label: string,
+  fileKey?: string | null,
+  provider?: KnowledgeStorageProvider | null,
+) {
   if (!fileKey) return;
-  void storageService.deleteFile(fileKey).catch((error) => {
-    console.error("Knowledge storage cleanup failed", { label, fileKey, error });
-  });
+  void resolveStorageObjectProvider(fileKey, provider)
+    .then((resolvedProvider) => storageService.deleteFile(fileKey, resolvedProvider))
+    .catch((error) => {
+      console.error("Knowledge storage cleanup failed", { label, fileKey, error });
+    });
 }
 
 function shouldBroadcastArticle(article: { status: KnowledgeArticleStatus; visibility: KnowledgeAssetVisibility }) {
   return article.status === KnowledgeArticleStatus.PUBLISHED && article.visibility === KnowledgeAssetVisibility.CLIENT_SENDABLE;
 }
 
-function shouldBroadcastDocument(document: { status: KnowledgeDocumentStatus; visibility: KnowledgeAssetVisibility }) {
-  return document.status === KnowledgeDocumentStatus.ACTIVE && document.visibility === KnowledgeAssetVisibility.CLIENT_SENDABLE;
+function shouldBroadcastDocument(document: {
+  status: KnowledgeDocumentStatus;
+  processingStatus: KnowledgeDocumentProcessingStatus;
+  visibility: KnowledgeAssetVisibility;
+}) {
+  return document.status === KnowledgeDocumentStatus.ACTIVE
+    && document.processingStatus === KnowledgeDocumentProcessingStatus.READY
+    && document.visibility === KnowledgeAssetVisibility.CLIENT_SENDABLE;
 }
 
 function isArticleRestore(existing: KnowledgeArticleStatus, next?: KnowledgeArticleStatus) {
@@ -106,10 +139,40 @@ function isDocumentRestore(existing: KnowledgeDocumentStatus, next: KnowledgeDoc
   return existing === KnowledgeDocumentStatus.ARCHIVED && next === KnowledgeDocumentStatus.ACTIVE;
 }
 
-function managerOnly(actor: KnowledgeActor) {
-  if (actor.role === BusinessRole.STAFF) {
-    throw new AppError(403, "Only an owner or manager can manage knowledge base assets.", "FORBIDDEN");
+async function managerOnly(
+  actor: KnowledgeActor,
+  context?: Omit<AuditInput, "action">,
+  operation = "KNOWLEDGE_HUB_MUTATION",
+) {
+  await assertCanManageKnowledgeDocuments(actor, context, operation);
+}
+
+async function throwKnowledgeArticleNotFound(
+  actor: KnowledgeActor,
+  articleId: string,
+  context: Omit<AuditInput, "action">,
+  operation: string,
+): Promise<never> {
+  const foreignArticle = await prisma.knowledgeArticle.findFirst({
+    where: { id: articleId, businessId: { not: actor.businessId } },
+    select: { id: true },
+  });
+  if (foreignArticle) {
+    await auditService.log({
+      ...context,
+      action: AuditAction.KNOWLEDGE_ARTICLE_SCOPE_VIOLATION,
+      businessId: actor.businessId,
+      userId: actor.userId,
+      actorMembershipId: actor.membershipId,
+      metadata: json({
+        securityEvent: true,
+        operation,
+        requestedArticleId: articleId,
+        requestedBusinessId: actor.businessId,
+      }),
+    });
   }
+  throw new AppError(404, "Knowledge article not found.", "KNOWLEDGE_ARTICLE_NOT_FOUND");
 }
 
 function slugify(value: string) {
@@ -135,31 +198,6 @@ async function uniqueSlug(businessId: string, title: string, requested?: string 
   return `${base}-${Date.now()}`;
 }
 
-function assetLimitForPlan(planCode: PlanCode, planLimit: number | null | undefined) {
-  if (planLimit !== null && planLimit !== undefined) return planLimit;
-  if (planCode === PlanCode.PREMIUM) return env.KNOWLEDGE_PREMIUM_ASSET_LIMIT;
-  if (planCode === PlanCode.PLUS) return env.KNOWLEDGE_PLUS_ASSET_LIMIT;
-  return env.KNOWLEDGE_BASIC_ASSET_LIMIT;
-}
-
-function aiDraftLimitForPlan(planCode: PlanCode) {
-  if (planCode === PlanCode.PREMIUM) return env.KNOWLEDGE_PREMIUM_AI_DRAFT_LIMIT;
-  if (planCode === PlanCode.PLUS) return env.KNOWLEDGE_PLUS_AI_DRAFT_LIMIT;
-  return env.KNOWLEDGE_BASIC_AI_DRAFT_LIMIT;
-}
-
-function pdfUploadLimitForPlan(planCode: PlanCode) {
-  if (planCode === PlanCode.PREMIUM) return env.KNOWLEDGE_PREMIUM_PDF_UPLOAD_LIMIT;
-  if (planCode === PlanCode.PLUS) return env.KNOWLEDGE_PLUS_PDF_UPLOAD_LIMIT;
-  return env.KNOWLEDGE_BASIC_PDF_UPLOAD_LIMIT;
-}
-
-function storageLimitForPlan(planCode: PlanCode) {
-  if (planCode === PlanCode.PREMIUM) return env.KNOWLEDGE_PREMIUM_STORAGE_LIMIT_BYTES;
-  if (planCode === PlanCode.PLUS) return env.KNOWLEDGE_PLUS_STORAGE_LIMIT_BYTES;
-  return env.KNOWLEDGE_BASIC_STORAGE_LIMIT_BYTES;
-}
-
 async function activeAssetCount(businessAccountId: string) {
   const whereBusiness = { businessAccountId };
   const [articles, documents] = await Promise.all([
@@ -167,17 +205,6 @@ async function activeAssetCount(businessAccountId: string) {
     prisma.knowledgeDocument.count({ where: { status: KnowledgeDocumentStatus.ACTIVE, business: whereBusiness } }),
   ]);
   return articles + documents;
-}
-
-async function activeStorageUsed(businessAccountId: string) {
-  const result = await prisma.knowledgeDocument.aggregate({
-    where: {
-      status: KnowledgeDocumentStatus.ACTIVE,
-      business: { businessAccountId },
-    },
-    _sum: { fileSize: true },
-  });
-  return result._sum.fileSize ?? 0;
 }
 
 async function activePdfCount(businessAccountId: string) {
@@ -189,59 +216,12 @@ async function activePdfCount(businessAccountId: string) {
   });
 }
 
-async function activeAssetCountTx(tx: Prisma.TransactionClient, businessAccountId: string) {
-  const whereBusiness = { businessAccountId };
-  const [articles, documents] = await Promise.all([
-    tx.knowledgeArticle.count({ where: { status: { not: KnowledgeArticleStatus.ARCHIVED }, business: whereBusiness } }),
-    tx.knowledgeDocument.count({ where: { status: KnowledgeDocumentStatus.ACTIVE, business: whereBusiness } }),
-  ]);
-  return articles + documents;
-}
-
-async function activeStorageUsedTx(tx: Prisma.TransactionClient, businessAccountId: string) {
-  const result = await tx.knowledgeDocument.aggregate({
-    where: {
-      status: KnowledgeDocumentStatus.ACTIVE,
-      business: { businessAccountId },
-    },
-    _sum: { fileSize: true },
-  });
-  return result._sum.fileSize ?? 0;
-}
-
 async function activePdfCountTx(tx: Prisma.TransactionClient, businessAccountId: string) {
   return tx.knowledgeDocument.count({
     where: {
       status: KnowledgeDocumentStatus.ACTIVE,
       business: { businessAccountId },
     },
-  });
-}
-
-async function lockKnowledgeQuota(tx: Prisma.TransactionClient, businessAccountId: string) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('knowledge_quota'), hashtext(${businessAccountId}))`;
-}
-
-async function currentSubscriptionTx(tx: Prisma.TransactionClient, businessAccountId: string) {
-  const subscription = await tx.subscription.findFirst({
-    where: { businessAccountId, status: { in: ACTIVE_SUBSCRIPTION_STATUSES } },
-    orderBy: { createdAt: "desc" },
-    include: { plan: true },
-  });
-  if (!subscription) throw new AppError(403, "No active subscription", "SUBSCRIPTION_REQUIRED");
-  return subscription;
-}
-
-async function assertAssetCapacityTx(tx: Prisma.TransactionClient, actor: KnowledgeActor, increment = 1) {
-  const subscription = await currentSubscriptionTx(tx, actor.businessAccountId);
-  const limit = assetLimitForPlan(subscription.plan.code, subscription.plan.maxKnowledgeItems);
-  const current = await activeAssetCountTx(tx, actor.businessAccountId);
-  if (current + increment <= limit) return { subscription, current, limit };
-  throw new AppError(403, `Your ${subscription.plan.name} plan allows ${limit} active knowledge assets.`, "KNOWLEDGE_ASSET_LIMIT_REACHED", {
-    currentPlan: subscription.plan.code,
-    currentUsage: current,
-    limit,
-    attemptedAmount: increment,
   });
 }
 
@@ -287,7 +267,9 @@ async function assertPdfUploadCapacityTx(tx: Prisma.TransactionClient, actor: Kn
 async function assertStorageCapacityTx(tx: Prisma.TransactionClient, actor: KnowledgeActor, attemptedUploadSize: number) {
   const subscription = await currentSubscriptionTx(tx, actor.businessAccountId);
   const storageLimit = storageLimitForPlan(subscription.plan.code);
-  const currentStorageUsed = await activeStorageUsedTx(tx, actor.businessAccountId);
+  const usage = await calculateKnowledgeStorageUsage(tx, actor.businessAccountId);
+  assertKnowledgeStorageUsageMeasured(usage);
+  const currentStorageUsed = usage.totalBytes;
   if (currentStorageUsed + attemptedUploadSize <= storageLimit) {
     return { subscription, currentStorageUsed, storageLimit };
   }
@@ -306,7 +288,7 @@ async function assertStorageCapacityTx(tx: Prisma.TransactionClient, actor: Know
 
 async function assertAssetCapacity(actor: KnowledgeActor, increment = 1) {
   const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
-  const limit = assetLimitForPlan(subscription.plan.code, subscription.plan.maxKnowledgeItems);
+  const limit = knowledgeAssetLimit(subscription.plan);
   const current = await activeAssetCount(actor.businessAccountId);
   if (current + increment <= limit) return { subscription, current, limit };
   throw new AppError(403, `Your ${subscription.plan.name} plan allows ${limit} active knowledge assets.`, "KNOWLEDGE_ASSET_LIMIT_REACHED", {
@@ -358,9 +340,12 @@ async function assertPdfUploadCapacity(actor: KnowledgeActor, increment = 1) {
 }
 
 async function assertStorageCapacity(actor: KnowledgeActor, attemptedUploadSize: number) {
+  await reconcileKnowledgeArticlePdfSizes(actor.businessAccountId);
   const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
   const storageLimit = storageLimitForPlan(subscription.plan.code);
-  const currentStorageUsed = await activeStorageUsed(actor.businessAccountId);
+  const usage = await calculateKnowledgeStorageUsage(prisma, actor.businessAccountId);
+  assertKnowledgeStorageUsageMeasured(usage);
+  const currentStorageUsed = usage.totalBytes;
   if (currentStorageUsed + attemptedUploadSize <= storageLimit) {
     return { subscription, currentStorageUsed, storageLimit };
   }
@@ -746,6 +731,7 @@ function documentAccessWhere(actor: KnowledgeActor, documentId?: string): Prisma
     ...(documentId ? { id: documentId } : {}),
     ...(actor.role === BusinessRole.STAFF ? {
       status: KnowledgeDocumentStatus.ACTIVE,
+      processingStatus: KnowledgeDocumentProcessingStatus.READY,
       visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
     } : {}),
   };
@@ -758,7 +744,6 @@ async function saveGeneratedKnowledgeDraft(
   context: Omit<AuditInput, "action">,
 ) {
   const article = await prisma.$transaction(async (tx) => {
-    await lockKnowledgeQuota(tx, actor.businessAccountId);
     await assertAssetCapacityTx(tx, actor);
     await assertAiDraftCapacityTx(tx, actor);
     return tx.knowledgeArticle.create({
@@ -845,12 +830,14 @@ export const knowledgeService = {
   },
 
   async stats(actor: KnowledgeActor) {
-    managerOnly(actor);
+    await managerOnly(actor, undefined, "KNOWLEDGE_HUB_STATS");
+    await reconcileKnowledgeArticlePdfSizes(actor.businessAccountId);
     const subscription = await subscriptionService.getCurrentRecord(actor.businessAccountId);
-    const [assetUsed, pdfUsed, storageUsedBytes, aiDraftUsedThisMonth, businesses, articleGroups, documentGroups] = await Promise.all([
+    const [assetUsed, pdfUsed, storageUsage, storageByBusiness, aiDraftUsedThisMonth, businesses, articleGroups, documentGroups] = await Promise.all([
       activeAssetCount(actor.businessAccountId),
       activePdfCount(actor.businessAccountId),
-      activeStorageUsed(actor.businessAccountId),
+      calculateKnowledgeStorageUsage(prisma, actor.businessAccountId),
+      calculateKnowledgeStorageUsageByBusiness(prisma, actor.businessAccountId),
       prisma.knowledgeArticle.count({
         where: {
           source: KnowledgeArticleSource.AI_DRAFT,
@@ -878,37 +865,41 @@ export const knowledgeService = {
           business: { businessAccountId: actor.businessAccountId },
         },
         _count: { _all: true },
-        _sum: { fileSize: true },
       }),
     ]);
+    assertKnowledgeStorageUsageMeasured(storageUsage);
     const articleCountByBusiness = new Map(articleGroups.map((group) => [group.businessId, group._count._all]));
     const documentStatsByBusiness = new Map(documentGroups.map((group) => [group.businessId, {
       activePdfCount: group._count._all,
-      usedBytes: group._sum.fileSize ?? 0,
     }]));
     return {
       assetUsage: {
         used: assetUsed,
-        limit: assetLimitForPlan(subscription.plan.code, subscription.plan.maxKnowledgeItems),
+        limit: knowledgeAssetLimit(subscription.plan),
       },
       pdfUsage: {
         used: pdfUsed,
         limit: pdfUploadLimitForPlan(subscription.plan.code),
       },
       storageUsage: {
-        usedBytes: storageUsedBytes,
+        usedBytes: storageUsage.totalBytes,
         limitBytes: storageLimitForPlan(subscription.plan.code),
+        documentVersionBytes: storageUsage.documentVersionBytes,
+        articlePdfBytes: storageUsage.articlePdfBytes,
       },
       aiDraftUsage: {
         usedThisMonth: aiDraftUsedThisMonth,
         monthlyLimit: aiDraftLimitForPlan(subscription.plan.code),
       },
       businessStorageBreakdown: businesses.map((business) => {
-        const documentStats = documentStatsByBusiness.get(business.id) ?? { activePdfCount: 0, usedBytes: 0 };
+        const documentStats = documentStatsByBusiness.get(business.id) ?? { activePdfCount: 0 };
+        const businessStorage = storageByBusiness.get(business.id);
         return {
           businessId: business.id,
           businessName: business.name,
-          usedBytes: documentStats.usedBytes,
+          usedBytes: businessStorage?.totalBytes ?? 0,
+          documentVersionBytes: businessStorage?.documentVersionBytes ?? 0,
+          articlePdfBytes: businessStorage?.articlePdfBytes ?? 0,
           activeAssets: (articleCountByBusiness.get(business.id) ?? 0) + documentStats.activePdfCount,
           activePdfCount: documentStats.activePdfCount,
         };
@@ -917,10 +908,9 @@ export const knowledgeService = {
   },
 
   async createArticle(actor: KnowledgeActor, input: CreateKnowledgeArticleInput, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_CREATE");
     await validateRelatedIds(actor.businessId, input);
     const article = await prisma.$transaction(async (tx) => {
-      await lockKnowledgeQuota(tx, actor.businessAccountId);
       await assertAssetCapacityTx(tx, actor);
       const slug = await uniqueSlug(actor.businessId, input.title, input.slug, undefined, tx);
       return tx.knowledgeArticle.create({
@@ -963,15 +953,17 @@ export const knowledgeService = {
   },
 
   async updateArticle(actor: KnowledgeActor, articleId: string, input: UpdateKnowledgeArticleInput, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_UPDATE");
     const existing = await prisma.knowledgeArticle.findFirst({ where: { id: articleId, businessId: actor.businessId } });
-    if (!existing) throw new AppError(404, "Knowledge article not found.", "KNOWLEDGE_ARTICLE_NOT_FOUND");
+    if (!existing) return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_UPDATE");
     if (input.relatedServiceIds || input.relatedPolicyIds) await validateRelatedIds(actor.businessId, input);
     const slug = input.title || input.slug ? await uniqueSlug(actor.businessId, input.title ?? existing.title, input.slug ?? existing.slug, articleId) : undefined;
-    const oldPdfFileKey = input.body !== undefined ? existing.pdfFileKey : null;
+    const oldPdfFileKey = input.body !== undefined
+      ? existing.pdfStorageObjectKey ?? existing.pdfFileKey
+      : null;
+    const oldPdfStorageProvider = input.body !== undefined ? existing.pdfStorageProvider : null;
     const article = await prisma.$transaction(async (tx) => {
       if (isArticleRestore(existing.status, input.status)) {
-        await lockKnowledgeQuota(tx, actor.businessAccountId);
         await assertAssetCapacityTx(tx, actor);
       }
       return tx.knowledgeArticle.update({
@@ -980,7 +972,15 @@ export const knowledgeService = {
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(slug ? { slug } : {}),
           ...(input.summary !== undefined ? { summary: input.summary } : {}),
-          ...(input.body !== undefined ? { body: input.body, pdfFileKey: null, pdfFileUrl: null, lastPdfGeneratedAt: null } : {}),
+          ...(input.body !== undefined ? {
+            body: input.body,
+            pdfFileKey: null,
+            pdfFileUrl: null,
+            pdfFileSize: null,
+            pdfStorageProvider: null,
+            pdfStorageObjectKey: null,
+            lastPdfGeneratedAt: null,
+          } : {}),
           ...(input.category !== undefined ? { category: input.category } : {}),
           ...(input.tags !== undefined ? { tags: input.tags } : {}),
           ...(input.relatedServiceIds !== undefined ? { relatedServiceIds: input.relatedServiceIds } : {}),
@@ -995,7 +995,7 @@ export const knowledgeService = {
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action: AuditAction.KNOWLEDGE_ARTICLE_UPDATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId } }),
     ]);
-    scheduleStorageDelete("article.pdf_stale_after_update", oldPdfFileKey);
+    scheduleStorageDelete("article.pdf_stale_after_update", oldPdfFileKey, oldPdfStorageProvider);
     scheduleEmbeddingSync("article.updated", knowledgeEmbeddingService.syncArticle(article.id));
     realtimeService.publish({
       type: "business.knowledge.article.updated",
@@ -1007,15 +1007,14 @@ export const knowledgeService = {
   },
 
   async updateArticleStatus(actor: KnowledgeActor, articleId: string, status: KnowledgeArticleStatus, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_STATUS_UPDATE");
     const existing = await prisma.knowledgeArticle.findFirst({ where: { id: articleId, businessId: actor.businessId } });
-    if (!existing) throw new AppError(404, "Knowledge article not found.", "KNOWLEDGE_ARTICLE_NOT_FOUND");
+    if (!existing) return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_STATUS_UPDATE");
     if (status === KnowledgeArticleStatus.PUBLISHED && (!existing.title.trim() || !existing.body.trim())) {
       throw new AppError(422, "Article must have a title and body before publishing.", "VALIDATION_ERROR");
     }
     const article = await prisma.$transaction(async (tx) => {
       if (isArticleRestore(existing.status, status)) {
-        await lockKnowledgeQuota(tx, actor.businessAccountId);
         await assertAssetCapacityTx(tx, actor);
       }
       return tx.knowledgeArticle.update({
@@ -1056,7 +1055,7 @@ export const knowledgeService = {
   },
 
   async draftArticle(actor: KnowledgeActor, input: DraftKnowledgeArticleInput, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_AI_DRAFT");
     await Promise.all([assertAssetCapacity(actor), assertAiDraftCapacity(actor)]);
     await validateRelatedIds(actor.businessId, input);
     const draft = await generateArticleWithOpenRouter(actor, input);
@@ -1064,7 +1063,7 @@ export const knowledgeService = {
   },
 
   async assertCanDraftArticle(actor: KnowledgeActor, input: DraftKnowledgeArticleInput) {
-    managerOnly(actor);
+    await managerOnly(actor, undefined, "KNOWLEDGE_ARTICLE_AI_DRAFT");
     await Promise.all([assertAssetCapacity(actor), assertAiDraftCapacity(actor)]);
     await validateRelatedIds(actor.businessId, input);
   },
@@ -1118,7 +1117,7 @@ export const knowledgeService = {
   },
 
   async generateStarterArticles(actor: KnowledgeActor, input: GenerateStarterArticlesInput, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_STARTER_GENERATION");
     const topics = (input.categories?.length ? input.categories : ["Services and pricing", "Booking appointments", "Business hours", "Payment and cancellation"]).slice(0, input.count);
     await Promise.all([assertAssetCapacity(actor, topics.length), assertAiDraftCapacity(actor, topics.length)]);
     const drafts: Array<Awaited<ReturnType<typeof generateArticleWithOpenRouter>>> = [];
@@ -1132,7 +1131,6 @@ export const knowledgeService = {
       }));
     }
     const created = await prisma.$transaction(async (tx) => {
-      await lockKnowledgeQuota(tx, actor.businessAccountId);
       await assertAssetCapacityTx(tx, actor, drafts.length);
       await assertAiDraftCapacityTx(tx, actor, drafts.length);
       const rows: KnowledgeArticle[] = [];
@@ -1217,7 +1215,7 @@ export const knowledgeService = {
   },
 
   async uploadDocument(actor: KnowledgeActor, input: UploadKnowledgeDocumentMetadataInput, uploadedFile: Express.Multer.File, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "LEGACY_KNOWLEDGE_DOCUMENT_UPLOAD");
     let stored: Awaited<ReturnType<typeof storageService.uploadBuffer>> | null = null;
     try {
       await Promise.all([assertAssetCapacity(actor), assertPdfUploadCapacity(actor)]);
@@ -1233,7 +1231,6 @@ export const knowledgeService = {
       });
       const uploaded = stored;
       const document = await prisma.$transaction(async (tx) => {
-        await lockKnowledgeQuota(tx, actor.businessAccountId);
         await assertAssetCapacityTx(tx, actor);
         await assertPdfUploadCapacityTx(tx, actor);
         await assertStorageCapacityTx(tx, actor, uploaded.fileSize);
@@ -1249,8 +1246,12 @@ export const knowledgeService = {
             fileUrl: documentDownloadUrl("pending"),
             fileKey: uploaded.fileKey,
             fileName: uploaded.fileName,
+            originalFileName: input.fileName,
+            safeFileName: uploaded.fileName,
+            fileExtension: "pdf",
             mimeType: input.mimeType,
             fileSize: uploaded.fileSize,
+            checksum: crypto.createHash("sha256").update(sanitized.buffer).digest("hex"),
             uploadedByMembershipId: actor.membershipId,
           },
         });
@@ -1285,7 +1286,7 @@ export const knowledgeService = {
       return document;
     } catch (error) {
       if (stored?.fileKey) {
-        await storageService.deleteFile(stored.fileKey).catch((cleanupError) => {
+        await storageService.deleteFile(stored.fileKey, stored.storageProvider).catch((cleanupError) => {
           console.error("Failed to clean up uploaded knowledge document after error", { fileKey: stored?.fileKey, error: cleanupError });
         });
       }
@@ -1299,7 +1300,20 @@ export const knowledgeService = {
     const document = await prisma.knowledgeDocument.findFirst({ where: documentAccessWhere(actor, documentId) });
     if (!document) throw new AppError(404, "Knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
     if (!document.fileKey) throw new AppError(404, "Document file is unavailable.", "KNOWLEDGE_ASSET_FILE_NOT_FOUND");
-    const buffer = await storageService.readBuffer(document.fileKey);
+    const redirectUrl = await storageService.createSignedDownloadUrl(
+      document.fileKey,
+      document.fileName,
+      document.storageProvider,
+    );
+    if (redirectUrl) {
+      return {
+        redirectUrl,
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        fileSize: document.fileSize,
+      };
+    }
+    const buffer = await storageService.readBuffer(document.fileKey, document.storageProvider);
     return {
       buffer,
       fileName: document.fileName,
@@ -1313,10 +1327,24 @@ export const knowledgeService = {
     if (!article) throw new AppError(404, "Knowledge article not found.", "KNOWLEDGE_ARTICLE_NOT_FOUND");
     const file = await knowledgePdfService.getOrGenerateArticlePdf(actor.businessId, articleId, { userId: actor.userId, actorMembershipId: actor.membershipId });
     if (!file?.fileKey) throw new AppError(404, "Article PDF is unavailable.", "KNOWLEDGE_ASSET_FILE_NOT_FOUND");
-    const buffer = await storageService.readBuffer(file.fileKey);
+    const fileName = `${article.slug ?? article.id}.pdf`;
+    const redirectUrl = await storageService.createSignedDownloadUrl(
+      file.fileKey,
+      fileName,
+      file.storageProvider,
+    );
+    if (redirectUrl) {
+      return {
+        redirectUrl,
+        fileName,
+        mimeType: "application/pdf",
+        fileSize: file.fileSize,
+      };
+    }
+    const buffer = await storageService.readBuffer(file.fileKey, file.storageProvider);
     return {
       buffer,
-      fileName: `${article.slug ?? article.id}.pdf`,
+      fileName,
       mimeType: "application/pdf",
       fileSize: buffer.byteLength,
     };
@@ -1332,9 +1360,16 @@ export const knowledgeService = {
   },
 
   async updateDocument(actor: KnowledgeActor, documentId: string, input: UpdateKnowledgeDocumentInput, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
-    const existing = await prisma.knowledgeDocument.findFirst({ where: { id: documentId, businessId: actor.businessId } });
-    if (!existing) throw new AppError(404, "Knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
+    await managerOnly(actor, context, "KNOWLEDGE_DOCUMENT_UPDATE");
+    const existing = await prisma.knowledgeDocument.findFirst({
+      where: {
+        id: documentId,
+        businessId: actor.businessId,
+        deletedAt: null,
+        status: { not: KnowledgeDocumentStatus.DELETED },
+      },
+    });
+    if (!existing) return throwKnowledgeDocumentNotFound(actor, documentId, context, "KNOWLEDGE_DOCUMENT_UPDATE");
     if (input.relatedServiceIds) await validateRelatedIds(actor.businessId, { relatedServiceIds: input.relatedServiceIds });
     const document = await prisma.knowledgeDocument.update({
       where: { id: documentId },
@@ -1362,15 +1397,15 @@ export const knowledgeService = {
   },
 
   async updateDocumentStatus(actor: KnowledgeActor, documentId: string, status: KnowledgeDocumentStatus, context: Omit<AuditInput, "action">) {
-    managerOnly(actor);
+    await managerOnly(actor, context, "KNOWLEDGE_DOCUMENT_STATUS_UPDATE");
     const existing = await prisma.knowledgeDocument.findFirst({ where: { id: documentId, businessId: actor.businessId } });
-    if (!existing) throw new AppError(404, "Knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
+    if (!existing) return throwKnowledgeDocumentNotFound(actor, documentId, context, "KNOWLEDGE_DOCUMENT_STATUS_UPDATE");
     const document = await prisma.$transaction(async (tx) => {
       if (isDocumentRestore(existing.status, status)) {
-        await lockKnowledgeQuota(tx, actor.businessAccountId);
         await assertAssetCapacityTx(tx, actor);
         await assertPdfUploadCapacityTx(tx, actor);
-        await assertStorageCapacityTx(tx, actor, existing.fileSize);
+        // Archived objects already count as retained storage; restoring does not add bytes.
+        await assertStorageCapacityTx(tx, actor, 0);
       }
       return tx.knowledgeDocument.update({ where: { id: documentId }, data: { status } });
     });
@@ -1414,6 +1449,7 @@ export const knowledgeService = {
             businessId: actor.businessId,
             id: { in: documentIds },
             status: KnowledgeDocumentStatus.ACTIVE,
+            processingStatus: KnowledgeDocumentProcessingStatus.READY,
             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
           },
         }) : [],
@@ -1458,6 +1494,7 @@ export const knowledgeService = {
       where: {
         businessId: actor.businessId,
         status: KnowledgeDocumentStatus.ACTIVE,
+        processingStatus: KnowledgeDocumentProcessingStatus.READY,
         visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
         OR: [
           { title: { contains: query.query, mode: "insensitive" } },
@@ -1495,7 +1532,7 @@ export const knowledgeService = {
 
     const asset = input.assetType === KnowledgeAssetSendType.ARTICLE_PDF
       ? await prisma.knowledgeArticle.findFirst({ where: { id: input.articleId!, businessId: actor.businessId, status: KnowledgeArticleStatus.PUBLISHED, visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE } })
-      : await prisma.knowledgeDocument.findFirst({ where: { id: input.documentId!, businessId: actor.businessId, status: KnowledgeDocumentStatus.ACTIVE, visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE } });
+      : await prisma.knowledgeDocument.findFirst({ where: { id: input.documentId!, businessId: actor.businessId, status: KnowledgeDocumentStatus.ACTIVE, processingStatus: KnowledgeDocumentProcessingStatus.READY, visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE } });
     if (!asset) throw new AppError(404, "Knowledge asset is not sendable.", "KNOWLEDGE_ASSET_NOT_SENDABLE");
 
     await auditService.log({

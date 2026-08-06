@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentStatus } from "@prisma/client";
+import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentProcessingStatus, KnowledgeDocumentStatus } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 
@@ -165,7 +165,11 @@ export const knowledgeEmbeddingService = {
       include: { chunks: { orderBy: { createdAt: "asc" } } },
     });
     if (!document) return;
-    if (document.status !== KnowledgeDocumentStatus.ACTIVE || document.visibility !== KnowledgeAssetVisibility.CLIENT_SENDABLE) {
+    if (
+      document.status !== KnowledgeDocumentStatus.ACTIVE
+      || document.processingStatus !== KnowledgeDocumentProcessingStatus.READY
+      || document.visibility !== KnowledgeAssetVisibility.CLIENT_SENDABLE
+    ) {
       await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
       return;
     }

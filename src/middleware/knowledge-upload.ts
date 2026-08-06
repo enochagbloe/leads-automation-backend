@@ -1,11 +1,16 @@
 import os from "node:os";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import multer from "multer";
 import { RequestHandler } from "express";
 import { env } from "../config/env";
 import { AppError } from "../utils/errors";
-import { uploadKnowledgeDocumentMetadataSchema } from "../validation/knowledge.schemas";
+import {
+  replaceKnowledgeDocumentMetadataSchema,
+  uploadKnowledgeDocumentMetadataSchema,
+} from "../validation/knowledge.schemas";
+import { KNOWLEDGE_DOCUMENT_ALLOWED_MIME_TYPES } from "../services/knowledge-document/knowledge-document-file-policy";
 
 const tempDir = path.join(os.tmpdir(), "bizreplyai-knowledge-uploads");
 mkdirSync(tempDir, { recursive: true });
@@ -23,10 +28,10 @@ const upload = multer({
     files: 1,
   },
   fileFilter: (_req, file, callback) => {
-    if (file.mimetype !== "application/pdf") {
-      callback(Object.assign(new Error("Only PDF files are supported."), {
+    if (!KNOWLEDGE_DOCUMENT_ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      callback(Object.assign(new Error("This document format is not supported."), {
         statusCode: 422,
-        code: "INVALID_FILE_TYPE",
+        code: "KNOWLEDGE_DOCUMENT_UNSUPPORTED_FILE_TYPE",
       }));
       return;
     }
@@ -51,11 +56,11 @@ function normalizeOptional(value: unknown) {
 
 const uploadSingleKnowledgePdf = upload.single("file");
 
-export const uploadKnowledgePdf: RequestHandler = (req, res, next) => {
+export const uploadKnowledgeDocument: RequestHandler = (req, res, next) => {
   uploadSingleKnowledgePdf(req, res, (error) => {
     if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
       const contentLength = Number(req.headers["content-length"]);
-      return next(new AppError(413, "PDF is too large.", "KNOWLEDGE_UPLOAD_FILE_TOO_LARGE", {
+      return next(new AppError(413, "Document is too large.", "KNOWLEDGE_DOCUMENT_FILE_TOO_LARGE", {
         currentUsage: 0,
         limit: env.KNOWLEDGE_UPLOAD_MAX_BYTES,
         attemptedAmount: Number.isFinite(contentLength) && contentLength > 0
@@ -68,12 +73,14 @@ export const uploadKnowledgePdf: RequestHandler = (req, res, next) => {
   });
 };
 
+export const uploadKnowledgePdf = uploadKnowledgeDocument;
+
 export const validateKnowledgeUploadMetadata: RequestHandler = (req, _res, next) => {
   if (!req.file) {
-    return next(Object.assign(new Error("PDF file is required."), {
+    return next(Object.assign(new Error("Document file is required."), {
       statusCode: 422,
       code: "VALIDATION_ERROR",
-      details: { file: ["PDF file is required."] },
+      details: { file: ["Document file is required."] },
     }));
   }
   const result = uploadKnowledgeDocumentMetadataSchema.safeParse({
@@ -86,6 +93,31 @@ export const validateKnowledgeUploadMetadata: RequestHandler = (req, _res, next)
     mimeType: req.file.mimetype,
   });
   if (!result.success) {
+    void unlink(req.file.path).catch(() => undefined);
+    return next(Object.assign(new Error("Validation failed"), {
+      statusCode: 422,
+      code: "VALIDATION_ERROR",
+      details: result.error.flatten().fieldErrors,
+    }));
+  }
+  req.body = result.data;
+  next();
+};
+
+export const validateKnowledgeReplacementMetadata: RequestHandler = (req, _res, next) => {
+  if (!req.file) {
+    return next(Object.assign(new Error("Document file is required."), {
+      statusCode: 422,
+      code: "VALIDATION_ERROR",
+      details: { file: ["Document file is required."] },
+    }));
+  }
+  const result = replaceKnowledgeDocumentMetadataSchema.safeParse({
+    fileName: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
+  if (!result.success) {
+    void unlink(req.file.path).catch(() => undefined);
     return next(Object.assign(new Error("Validation failed"), {
       statusCode: 422,
       code: "VALIDATION_ERROR",
