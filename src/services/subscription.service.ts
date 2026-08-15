@@ -7,7 +7,7 @@ export const ACTIVE_SUBSCRIPTION_STATUSES = [SubscriptionStatus.TRIALING, Subscr
 
 export type FeatureKey = "allowAnalytics" | "allowRemoveBranding" | "allowPrioritySupport";
 export type EnforcedUsageKey = "businessesCount" | "staffCount" | "servicesCount" | "appointmentsUsed";
-export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "aiMemoryExtractionRequestsUsed" | "aiMemoryExtractionTokensUsed" | "aiBlockedUsed" | "aiHumanReviewsUsed" | "aiBookingRequestsCreated" | "knowledgeItemsCount";
+export type AccountUsageKey = EnforcedUsageKey | "conversationsUsed" | "aiRepliesUsed" | "aiRequestsUsed" | "aiTokensUsed" | "aiMemoryExtractionRequestsUsed" | "aiMemoryExtractionTokensUsed" | "aiKnowledgeAnalysisRequestsUsed" | "aiKnowledgeAnalysisTokensUsed" | "aiBlockedUsed" | "aiHumanReviewsUsed" | "aiBookingRequestsCreated" | "knowledgeItemsCount";
 export type BusinessUsageKey = "conversationsUsed" | "aiRepliesUsed" | "appointmentsUsed" | "leadsCreated";
 
 export const PLAN_LIMIT_KEYS = {
@@ -71,6 +71,8 @@ export function getAccountUsage(usage?: AccountUsageRecord) {
     aiTokensUsed: usage?.aiTokensUsed ?? 0,
     aiMemoryExtractionRequestsUsed: usage?.aiMemoryExtractionRequestsUsed ?? 0,
     aiMemoryExtractionTokensUsed: usage?.aiMemoryExtractionTokensUsed ?? 0,
+    aiKnowledgeAnalysisRequestsUsed: usage?.aiKnowledgeAnalysisRequestsUsed ?? 0,
+    aiKnowledgeAnalysisTokensUsed: usage?.aiKnowledgeAnalysisTokensUsed ?? 0,
     aiBlockedUsed: usage?.aiBlockedUsed ?? 0,
     aiHumanReviewsUsed: usage?.aiHumanReviewsUsed ?? 0,
     aiBookingRequestsCreated: usage?.aiBookingRequestsCreated ?? 0,

@@ -111,6 +111,16 @@ export const updateKnowledgeDocumentStatusSchema = z.object({
   status: z.nativeEnum(KnowledgeDocumentStatus),
 });
 
+export const approveKnowledgeDocumentReviewSchema = z.object({
+  versionId: trimmed.min(1).max(191),
+  note: trimmed.max(1_000).nullable().optional(),
+});
+
+export const rejectKnowledgeDocumentReviewSchema = z.object({
+  versionId: trimmed.min(1).max(191),
+  reason: trimmed.min(3).max(1_000),
+});
+
 export const knowledgeSearchQuerySchema = z.object({
   query: trimmed.min(1).max(120),
   conversationId: optionalTrimmed,
@@ -142,5 +152,7 @@ export type UploadKnowledgeDocumentInput = z.infer<typeof uploadKnowledgeDocumen
 export type UploadKnowledgeDocumentMetadataInput = z.infer<typeof uploadKnowledgeDocumentMetadataSchema>;
 export type ReplaceKnowledgeDocumentMetadataInput = z.infer<typeof replaceKnowledgeDocumentMetadataSchema>;
 export type UpdateKnowledgeDocumentInput = z.infer<typeof updateKnowledgeDocumentSchema>;
+export type ApproveKnowledgeDocumentReviewInput = z.infer<typeof approveKnowledgeDocumentReviewSchema>;
+export type RejectKnowledgeDocumentReviewInput = z.infer<typeof rejectKnowledgeDocumentReviewSchema>;
 export type KnowledgeSearchQuery = z.infer<typeof knowledgeSearchQuerySchema>;
 export type SendKnowledgeAssetInput = z.infer<typeof sendKnowledgeAssetSchema>;

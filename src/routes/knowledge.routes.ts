@@ -10,6 +10,7 @@ import {
   validateKnowledgeUploadMetadata,
 } from "../middleware/knowledge-upload";
 import {
+  approveKnowledgeDocumentReviewSchema,
   createKnowledgeArticleSchema,
   draftKnowledgeArticleSchema,
   generateStarterArticlesSchema,
@@ -17,6 +18,7 @@ import {
   knowledgeDocumentListQuerySchema,
   knowledgeDocumentVersionListQuerySchema,
   knowledgeSearchQuerySchema,
+  rejectKnowledgeDocumentReviewSchema,
   updateKnowledgeArticleSchema,
   updateKnowledgeArticleStatusSchema,
   updateKnowledgeDocumentSchema,
@@ -51,4 +53,6 @@ knowledgeRouter.patch("/documents/:documentId/status", mutationLimiter, validate
 knowledgeRouter.post("/documents/:documentId/archive", mutationLimiter, knowledgeController.archiveDocument);
 knowledgeRouter.post("/documents/:documentId/restore", mutationLimiter, knowledgeController.restoreDocument);
 knowledgeRouter.post("/documents/:documentId/retry-processing", mutationLimiter, knowledgeController.retryDocumentProcessing);
+knowledgeRouter.post("/documents/:documentId/review/approve", mutationLimiter, validate(approveKnowledgeDocumentReviewSchema), knowledgeController.approveDocumentReview);
+knowledgeRouter.post("/documents/:documentId/review/reject", mutationLimiter, validate(rejectKnowledgeDocumentReviewSchema), knowledgeController.rejectDocumentReview);
 knowledgeRouter.delete("/documents/:documentId", mutationLimiter, knowledgeController.deleteDocument);

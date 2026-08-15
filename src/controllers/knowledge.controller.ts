@@ -5,13 +5,16 @@ import { knowledgeDocumentIngestionService } from "../services/knowledge-documen
 import { knowledgeDocumentLifecycleService } from "../services/knowledge-document/knowledge-document-lifecycle.service";
 import { knowledgeDocumentQueryService } from "../services/knowledge-document/knowledge-document-query.service";
 import { knowledgeDocumentReplacementService } from "../services/knowledge-document/knowledge-document-replacement.service";
+import { knowledgeDocumentReviewService } from "../services/knowledge-document/knowledge-document-review.service";
 import { AppError } from "../utils/errors";
 import { requestMetadata } from "../utils/request";
 import {
+  ApproveKnowledgeDocumentReviewInput,
   KnowledgeArticleListQuery,
   KnowledgeDocumentListQuery,
   KnowledgeDocumentVersionListQuery,
   KnowledgeSearchQuery,
+  RejectKnowledgeDocumentReviewInput,
 } from "../validation/knowledge.schemas";
 
 function actor(req: Request) {
@@ -149,6 +152,18 @@ export const knowledgeController = {
   restoreDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.restore(actor(req), param(req, "documentId"), requestMetadata(req))),
   deleteDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.softDelete(actor(req), param(req, "documentId"), requestMetadata(req))),
   retryDocumentProcessing: async (req, res) => res.json(await knowledgeDocumentLifecycleService.retryProcessing(actor(req), param(req, "documentId"), requestMetadata(req))),
+  approveDocumentReview: async (req, res) => res.json(await knowledgeDocumentReviewService.approve(
+    actor(req),
+    param(req, "documentId"),
+    req.body as ApproveKnowledgeDocumentReviewInput,
+    requestMetadata(req),
+  )),
+  rejectDocumentReview: async (req, res) => res.json(await knowledgeDocumentReviewService.reject(
+    actor(req),
+    param(req, "documentId"),
+    req.body as RejectKnowledgeDocumentReviewInput,
+    requestMetadata(req),
+  )),
 
   search: async (req, res) => res.json(await knowledgeService.search(actor(req), res.locals.validatedQuery as KnowledgeSearchQuery)),
   sendToConversation: async (req, res) => res.json(await knowledgeService.sendToConversation(actor(req), param(req, "id"), req.body, requestMetadata(req))),

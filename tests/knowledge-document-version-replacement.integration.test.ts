@@ -11,6 +11,7 @@ import { prisma } from "../src/config/prisma";
 import {
   activateKnowledgeDocumentReplacement,
   allocateKnowledgeDocumentReplacement,
+  runKnowledgeDocumentVersionTransaction,
 } from "../src/services/knowledge-document/knowledge-document-version.service";
 
 test("concurrent replacements allocate once and switch one active version atomically", {
@@ -71,7 +72,7 @@ test("concurrent replacements allocate once and switch one active version atomic
   function allocate(label: string, delayAfterAllocation = 0) {
     const versionId = `replacement-${label}-${suffix}`;
     const storageObjectKey = `businesses/${businessId}/knowledge/${documentId}/versions/${versionId}/${label}.pdf`;
-    return prisma.$transaction(async (tx) => {
+    return runKnowledgeDocumentVersionTransaction(async (tx) => {
       const result = await allocateKnowledgeDocumentReplacement(tx, {
         businessId,
         documentId,
@@ -97,7 +98,7 @@ test("concurrent replacements allocate once and switch one active version atomic
         await new Promise((resolve) => setTimeout(resolve, delayAfterAllocation));
       }
       return result;
-    }, { timeout: 10_000 });
+    });
   }
 
   try {
@@ -113,7 +114,7 @@ test("concurrent replacements allocate once and switch one active version atomic
 
     const allocated = successful[0]!.value;
     assert.equal(allocated.version.versionNumber, 2);
-    const switched = await prisma.$transaction((tx) => activateKnowledgeDocumentReplacement(tx, {
+    const switched = await runKnowledgeDocumentVersionTransaction((tx) => activateKnowledgeDocumentReplacement(tx, {
       businessId,
       documentId,
       versionId: allocated.version.id,

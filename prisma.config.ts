@@ -2,7 +2,8 @@ import "dotenv/config";
 import { defineConfig } from "prisma/config";
 
 function prismaCliDirectUrl() {
-  const configured = process.env.DIRECT_URL ?? process.env.DATABASE_URL;
+  if (process.env.DIRECT_URL) return process.env.DIRECT_URL;
+  const configured = process.env.DATABASE_URL;
   if (!configured) return undefined;
 
   const url = new URL(configured);
