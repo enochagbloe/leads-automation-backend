@@ -31,6 +31,7 @@ import {
 import {
   activateKnowledgeDocumentReplacement,
   allocateKnowledgeDocumentReplacement,
+  runKnowledgeDocumentVersionTransaction,
 } from "./knowledge-document-version.service";
 import {
   assertCanManageKnowledgeDocuments,
@@ -125,7 +126,7 @@ export const knowledgeDocumentReplacementService = {
         versionId: nextVersionId,
         safeFileName: validated.safeFileName,
       });
-      const prepared = await prisma.$transaction(async (tx) => {
+      const prepared = await runKnowledgeDocumentVersionTransaction(async (tx) => {
         await lockKnowledgeHubQuota(tx, actor.businessAccountId);
         if (normalizedIdempotencyKey) {
           const operation = await knowledgeDocumentUploadOperationService.find(
@@ -177,7 +178,7 @@ export const knowledgeDocumentReplacementService = {
           previousActiveVersionId: allocated.previousActiveVersionId,
           operationId: nextOperationId,
         };
-      }, { timeout: 15_000 });
+      });
 
       if (prepared.replayOperation) {
         return resolveKnowledgeDocumentUploadReplay(prepared.replayOperation, validated.checksum);
@@ -201,7 +202,7 @@ export const knowledgeDocumentReplacementService = {
         objectKey,
       });
       storageCompleted = true;
-      const queued = await prisma.$transaction(async (tx) => {
+      const queued = await runKnowledgeDocumentVersionTransaction(async (tx) => {
         const document = await activateKnowledgeDocumentReplacement(tx, {
           businessId: actor.businessId,
           documentId,
@@ -218,7 +219,7 @@ export const knowledgeDocumentReplacementService = {
         };
         if (operationId) await knowledgeDocumentUploadOperationService.complete(tx, operationId, response);
         return { document, response };
-      }, { timeout: 15_000 });
+      });
 
       await Promise.allSettled([
         audit(actor, context, AuditAction.KNOWLEDGE_DOCUMENT_UPLOAD_COMPLETED, {

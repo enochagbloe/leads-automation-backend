@@ -690,6 +690,93 @@ enum KnowledgeDocumentUploadOperationStatus {
   FAILED
 }
 
+enum KnowledgeDocumentExtractionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  UNSUPPORTED
+  FAILED
+}
+
+enum KnowledgeDocumentAnalysisStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum KnowledgeDocumentDetectedType {
+  SERVICE_INFORMATION
+  PRICING_INFORMATION
+  PAYMENT_INSTRUCTIONS
+  APPOINTMENT_INFORMATION
+  BUSINESS_POLICY
+  TERMS_AND_CONDITIONS
+  RENTAL_INFORMATION
+  PRODUCT_INFORMATION
+  FAQ
+  INTERNAL_GUIDE
+  MIXED_BUSINESS_DOCUMENT
+  OTHER
+}
+
+enum KnowledgeDocumentAudience {
+  CUSTOMER
+  INTERNAL
+  MIXED
+  UNKNOWN
+}
+
+enum KnowledgeDocumentRecommendedClassification {
+  AI_REFERENCE_ONLY
+  CLIENT_SENDABLE
+  INTERNAL_ONLY
+  UNKNOWN
+}
+
+enum KnowledgeDocumentAnalysisConfidence {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum KnowledgeDocumentSourceKind {
+  DOCUMENT
+  PAGE
+  PARAGRAPH
+  SHEET
+  ROW
+  SLIDE
+}
+
+enum KnowledgeDocumentFactType {
+  SERVICE
+  PRODUCT
+  PRICE
+  FEE
+  DEPOSIT
+  DISCOUNT
+  PAYMENT_METHOD
+  PAYMENT_INSTRUCTION
+  BOOKING_RULE
+  APPOINTMENT_POLICY
+  CANCELLATION_POLICY
+  REFUND_RULE
+  BUSINESS_HOURS
+  LOCATION
+  CONTACT_INFORMATION
+  CUSTOMER_REQUIREMENT
+  REQUIRED_DOCUMENT
+  DELIVERY_INFORMATION
+  RENTAL_RULE
+  LATE_FEE
+  DAMAGE_POLICY
+  TERMS
+  FAQ
+  CUSTOMER_INSTRUCTION
+  OTHER
+}
+
 enum KnowledgeAssetSendType {
   ARTICLE_PDF
   UPLOADED_DOCUMENT
@@ -939,6 +1026,15 @@ enum AuditAction {
   KNOWLEDGE_DOCUMENT_UPDATED
   KNOWLEDGE_DOCUMENT_ARCHIVED
   KNOWLEDGE_ASSET_SENT_TO_CUSTOMER
+  KNOWLEDGE_DOCUMENT_TEXT_EXTRACTION_STARTED
+  KNOWLEDGE_DOCUMENT_TEXT_EXTRACTION_COMPLETED
+  KNOWLEDGE_DOCUMENT_TEXT_EXTRACTION_FAILED
+  KNOWLEDGE_DOCUMENT_ANALYSIS_STARTED
+  KNOWLEDGE_DOCUMENT_ANALYSIS_COMPLETED
+  KNOWLEDGE_DOCUMENT_ANALYSIS_FAILED
+  KNOWLEDGE_DOCUMENT_NEEDS_REVIEW
+  KNOWLEDGE_DOCUMENT_REVIEW_APPROVED
+  KNOWLEDGE_DOCUMENT_REVIEW_REJECTED
   FOLLOW_UP_RULE_CREATED
   FOLLOW_UP_RULE_UPDATED
   FOLLOW_UP_RULE_DELETED
@@ -1112,6 +1208,10 @@ model Business {
   knowledgeStorageMigrationJobs        KnowledgeStorageMigrationJob[]
   knowledgeDocumentProcessingJobs      KnowledgeDocumentProcessingJob[]
   knowledgeDocumentUploadOperations    KnowledgeDocumentUploadOperation[]
+  knowledgeDocumentExtractions         KnowledgeDocumentExtraction[]
+  knowledgeDocumentExtractedSections   KnowledgeDocumentExtractedSection[]
+  knowledgeDocumentAnalyses            KnowledgeDocumentAnalysis[]
+  knowledgeDocumentFacts               KnowledgeDocumentFact[]
   knowledgeAssetSendLogs               KnowledgeAssetSendLog[]
   messageAttachments                   ConversationMessageAttachment[]
   knowledgeDocumentChunks              KnowledgeDocumentChunk[]
@@ -1393,6 +1493,8 @@ model AccountUsageRecord {
   aiTokensUsed                   Int      @default(0)
   aiMemoryExtractionRequestsUsed Int      @default(0)
   aiMemoryExtractionTokensUsed   Int      @default(0)
+  aiKnowledgeAnalysisRequestsUsed Int     @default(0)
+  aiKnowledgeAnalysisTokensUsed   Int     @default(0)
   aiBlockedUsed                  Int      @default(0)
   aiHumanReviewsUsed             Int      @default(0)
   aiBookingRequestsCreated       Int      @default(0)
@@ -1947,6 +2049,10 @@ model KnowledgeDocument {
   activeVersion       KnowledgeDocumentVersion?             @relation("ActiveKnowledgeDocumentVersion", fields: [activeVersionId, id, businessId], references: [id, documentId, businessId], onDelete: NoAction)
   processingJobs      KnowledgeDocumentProcessingJob[]
   storageDeletionJobs KnowledgeDocumentStorageDeletionJob[]
+  extractions         KnowledgeDocumentExtraction[]
+  extractedSections   KnowledgeDocumentExtractedSection[]
+  analyses            KnowledgeDocumentAnalysis[]
+  facts               KnowledgeDocumentFact[]
 
   @@unique([id, businessId])
   @@index([businessId])
@@ -1961,7 +2067,7 @@ model KnowledgeDocument {
 }
 
 model KnowledgeDocumentVersion {
-  id                     String                            @id @default(cuid())
+  id                     String                             @id @default(cuid())
   documentId             String
   businessId             String
   versionNumber          Int
@@ -1978,20 +2084,24 @@ model KnowledgeDocumentVersion {
   malwareScanner         String?
   uploadedByUserId       String?
   uploadedByMembershipId String?
-  processingStatus       KnowledgeDocumentProcessingStatus @default(UPLOADING)
+  processingStatus       KnowledgeDocumentProcessingStatus  @default(UPLOADING)
   processingErrorCode    String?
   processingErrorMessage String?
-  isActive               Boolean                           @default(false)
+  isActive               Boolean                            @default(false)
   uploadIdempotencyKey   String?
   storageDeletedAt       DateTime?
-  createdAt              DateTime                          @default(now())
-  updatedAt              DateTime                          @updatedAt
+  createdAt              DateTime                           @default(now())
+  updatedAt              DateTime                           @updatedAt
 
   document           KnowledgeDocument                    @relation("KnowledgeDocumentVersions", fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
   business           Business                             @relation(fields: [businessId], references: [id], onDelete: Cascade)
   activeForDocuments KnowledgeDocument[]                  @relation("ActiveKnowledgeDocumentVersion")
   processingJob      KnowledgeDocumentProcessingJob?
   storageDeletionJob KnowledgeDocumentStorageDeletionJob?
+  extraction         KnowledgeDocumentExtraction?
+  analysis           KnowledgeDocumentAnalysis?
+  extractedSections  KnowledgeDocumentExtractedSection[]
+  facts              KnowledgeDocumentFact[]
 
   @@unique([documentId, versionNumber])
   @@unique([businessId, uploadIdempotencyKey])
@@ -2053,6 +2163,151 @@ model KnowledgeDocumentProcessingJob {
   @@unique([versionId, documentId, businessId])
   @@index([businessId, status, nextAttemptAt])
   @@index([businessId, documentId])
+}
+
+model KnowledgeDocumentExtraction {
+  id                  String                            @id @default(cuid())
+  businessId          String
+  documentId          String
+  versionId           String                            @unique
+  status              KnowledgeDocumentExtractionStatus @default(PENDING)
+  extractorName       String?
+  extractorVersion    String?
+  normalizedText      String?                           @db.Text
+  contentHash         String?
+  language            String?
+  characterCount      Int                               @default(0)
+  wordCount           Int                               @default(0)
+  pageCount           Int?
+  sheetCount          Int?
+  slideCount          Int?
+  warnings            String[]                          @default([])
+  errorCode           String?
+  errorMessage        String?
+  extractionStartedAt DateTime?
+  extractedAt         DateTime?
+  createdAt           DateTime                          @default(now())
+  updatedAt           DateTime                          @updatedAt
+
+  business Business                            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument                   @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version  KnowledgeDocumentVersion            @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  sections KnowledgeDocumentExtractedSection[]
+  analysis KnowledgeDocumentAnalysis?
+
+  @@unique([versionId, documentId, businessId])
+  @@unique([id, versionId, documentId, businessId])
+  @@index([businessId, status])
+  @@index([businessId, documentId])
+}
+
+model KnowledgeDocumentExtractedSection {
+  id             String                      @id @default(cuid())
+  businessId     String
+  documentId     String
+  versionId      String
+  extractionId   String
+  ordinal        Int
+  sourceKind     KnowledgeDocumentSourceKind
+  sourceLabel    String?
+  pageNumber     Int?
+  sheetName      String?
+  slideNumber    Int?
+  paragraphIndex Int?
+  rowNumber      Int?
+  text           String                      @db.Text
+  createdAt      DateTime                    @default(now())
+
+  business   Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document   KnowledgeDocument           @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version    KnowledgeDocumentVersion    @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  extraction KnowledgeDocumentExtraction @relation(fields: [extractionId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+
+  @@unique([extractionId, ordinal])
+  @@index([businessId, documentId, versionId])
+}
+
+model KnowledgeDocumentAnalysis {
+  id                        String                                      @id @default(cuid())
+  businessId                String
+  documentId                String
+  versionId                 String                                      @unique
+  extractionId              String                                      @unique
+  status                    KnowledgeDocumentAnalysisStatus             @default(PENDING)
+  suggestedTitle            String?
+  detectedDocumentType      KnowledgeDocumentDetectedType?
+  shortSummary              String?                                     @db.Text
+  detectedPurpose           String?                                     @db.Text
+  likelyAudience            KnowledgeDocumentAudience?
+  recommendedClassification KnowledgeDocumentRecommendedClassification?
+  classificationReason      String?                                     @db.Text
+  classificationConfidence  Float?
+  analysisConfidence        KnowledgeDocumentAnalysisConfidence?
+  requiresHumanReview       Boolean                                     @default(false)
+  topics                    String[]                                    @default([])
+  relatedServiceSuggestions Json?
+  warnings                  String[]                                    @default([])
+  analyzerName              String?
+  analyzerVersion           String?
+  provider                  String?
+  model                     String?
+  promptTokens              Int?
+  completionTokens          Int?
+  totalTokens               Int?
+  providerResultSnapshot    Json?
+  providerResultContentHash String?
+  providerUsageReservationKey String?
+  providerCheckpointedAt    DateTime?
+  errorCode                 String?
+  errorMessage              String?
+  analysisStartedAt         DateTime?
+  analyzedAt                DateTime?
+  createdAt                 DateTime                                    @default(now())
+  updatedAt                 DateTime                                    @updatedAt
+
+  business   Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document   KnowledgeDocument           @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version    KnowledgeDocumentVersion    @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  extraction KnowledgeDocumentExtraction @relation(fields: [extractionId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+  facts      KnowledgeDocumentFact[]
+
+  @@unique([id, versionId, documentId, businessId])
+  @@unique([versionId, documentId, businessId])
+  @@unique([extractionId, versionId, documentId, businessId])
+  @@index([businessId, status])
+  @@index([businessId, documentId])
+  @@index([providerCheckpointedAt])
+}
+
+model KnowledgeDocumentFact {
+  id             String                      @id @default(cuid())
+  businessId     String
+  documentId     String
+  versionId      String
+  analysisId     String
+  factType       KnowledgeDocumentFactType
+  label          String
+  valueText      String                      @db.Text
+  currency       String?
+  numericValue   Decimal?                    @db.Decimal(18, 4)
+  sourceKind     KnowledgeDocumentSourceKind
+  sourceLabel    String?
+  pageNumber     Int?
+  sheetName      String?
+  slideNumber    Int?
+  paragraphIndex Int?
+  rowNumber      Int?
+  sourceExcerpt  String?                     @db.Text
+  confidence     Float?
+  createdAt      DateTime                    @default(now())
+
+  business Business                  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument         @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version  KnowledgeDocumentVersion  @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  analysis KnowledgeDocumentAnalysis @relation(fields: [analysisId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+
+  @@index([businessId, documentId, versionId])
+  @@index([businessId, factType])
 }
 
 model KnowledgeDocumentUploadOperation {

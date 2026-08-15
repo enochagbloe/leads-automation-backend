@@ -38,13 +38,20 @@ function accessWhere(actor: KnowledgeDocumentActor, documentId?: string): Prisma
   };
 }
 
-function availableActions(canManage: boolean, status: KnowledgeDocumentStatus, processingStatus: string) {
+function availableActions(
+  canManage: boolean,
+  status: KnowledgeDocumentStatus,
+  processingStatus: string,
+  reviewApprovable = false,
+) {
   if (!canManage) return ["VIEW", "DOWNLOAD"];
   return [
     "VIEW",
     "DOWNLOAD",
     ...(status === KnowledgeDocumentStatus.ACTIVE ? ["ARCHIVE"] : ["RESTORE"]),
     "DELETE",
+    ...(processingStatus === "NEEDS_REVIEW" && reviewApprovable ? ["APPROVE_REVIEW"] : []),
+    ...(processingStatus === "NEEDS_REVIEW" ? ["REJECT_REVIEW"] : []),
     ...(processingStatus === "FAILED" ? ["RETRY_PROCESSING"] : []),
     "VIEW_VERSIONS",
   ];
@@ -53,6 +60,119 @@ function availableActions(canManage: boolean, status: KnowledgeDocumentStatus, p
 function storageKeyBelongsToBusiness(businessId: string, objectKey: string) {
   return objectKey.startsWith(`businesses/${businessId}/`) || objectKey.startsWith(`${businessId}/`);
 }
+
+const publicUploaderSelect = {
+  id: true,
+  role: true,
+  user: { select: { id: true, firstName: true, lastName: true } },
+} satisfies Prisma.BusinessMemberSelect;
+
+const publicVersionSummarySelect = {
+  id: true,
+  versionNumber: true,
+  originalFileName: true,
+  fileSize: true,
+  mimeType: true,
+  processingStatus: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+  extraction: { select: { status: true, extractedAt: true } },
+  analysis: { select: { status: true, requiresHumanReview: true, analyzedAt: true } },
+} satisfies Prisma.KnowledgeDocumentVersionSelect;
+
+const publicDocumentFields = {
+  id: true,
+  title: true,
+  description: true,
+  category: true,
+  tags: true,
+  relatedServiceIds: true,
+  fileName: true,
+  originalFileName: true,
+  mimeType: true,
+  fileSize: true,
+  status: true,
+  visibility: true,
+  processingStatus: true,
+  archivedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} satisfies Prisma.KnowledgeDocumentSelect;
+
+const publicActiveVersionListSelect = {
+  ...publicVersionSummarySelect,
+} satisfies Prisma.KnowledgeDocumentVersionSelect;
+
+const publicFactSelect = {
+  id: true,
+  factType: true,
+  label: true,
+  valueText: true,
+  currency: true,
+  numericValue: true,
+  sourceKind: true,
+  sourceLabel: true,
+  pageNumber: true,
+  sheetName: true,
+  slideNumber: true,
+  paragraphIndex: true,
+  rowNumber: true,
+  confidence: true,
+  sourceExcerpt: true,
+} satisfies Prisma.KnowledgeDocumentFactSelect;
+
+const publicActiveVersionDetailSelect = {
+  id: true,
+  versionNumber: true,
+  originalFileName: true,
+  fileSize: true,
+  mimeType: true,
+  processingStatus: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+  extraction: {
+    select: {
+      status: true,
+      language: true,
+      characterCount: true,
+      wordCount: true,
+      pageCount: true,
+      sheetCount: true,
+      slideCount: true,
+      warnings: true,
+      errorCode: true,
+      errorMessage: true,
+      extractedAt: true,
+    },
+  },
+  analysis: {
+    select: {
+      status: true,
+      suggestedTitle: true,
+      detectedDocumentType: true,
+      shortSummary: true,
+      detectedPurpose: true,
+      likelyAudience: true,
+      recommendedClassification: true,
+      classificationReason: true,
+      classificationConfidence: true,
+      analysisConfidence: true,
+      requiresHumanReview: true,
+      topics: true,
+      relatedServiceSuggestions: true,
+      warnings: true,
+      errorCode: true,
+      errorMessage: true,
+      analyzedAt: true,
+      facts: {
+        orderBy: [{ factType: "asc" }, { createdAt: "asc" }],
+        select: publicFactSelect,
+      },
+    },
+  },
+} satisfies Prisma.KnowledgeDocumentVersionSelect;
 
 async function documentNotFound(
   actor: KnowledgeDocumentActor,
@@ -90,9 +210,10 @@ export const knowledgeDocumentQueryService = {
         orderBy,
         skip: (query.page - 1) * query.limit,
         take: query.limit,
-        include: {
-          activeVersion: true,
-          uploadedBy: { select: { id: true, role: true, user: { select: { id: true, firstName: true, lastName: true } } } },
+        select: {
+          ...publicDocumentFields,
+          activeVersion: { select: publicActiveVersionListSelect },
+          uploadedBy: { select: publicUploaderSelect },
           _count: { select: { versions: true } },
         },
       }),
@@ -101,7 +222,14 @@ export const knowledgeDocumentQueryService = {
     return {
       data: data.map((document) => ({
         ...document,
-        availableActions: availableActions(canManage, document.status, document.processingStatus),
+        availableActions: availableActions(
+          canManage,
+          document.status,
+          document.processingStatus,
+          document.activeVersion?.extraction?.status === "COMPLETED"
+            && document.activeVersion.analysis?.status === "COMPLETED"
+            && document.activeVersion.analysis.requiresHumanReview,
+        ),
       })),
       pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) },
     };
@@ -112,34 +240,35 @@ export const knowledgeDocumentQueryService = {
       resolveKnowledgeDocumentAccess(actor),
       prisma.knowledgeDocument.findFirst({
         where: accessWhere(actor, documentId),
-        include: {
-          activeVersion: true,
-          uploadedBy: { select: { id: true, role: true, user: { select: { id: true, firstName: true, lastName: true } } } },
+        select: {
+          ...publicDocumentFields,
+          processingErrorCode: true,
+          processingErrorMessage: true,
+          activeVersion: { select: publicActiveVersionDetailSelect },
+          uploadedBy: { select: publicUploaderSelect },
           versions: {
             orderBy: { versionNumber: "desc" },
             take: 10,
-            select: {
-              id: true,
-              versionNumber: true,
-              originalFileName: true,
-              fileSize: true,
-              mimeType: true,
-              checksum: true,
-              processingStatus: true,
-              isActive: true,
-              createdAt: true,
-            },
+            select: publicVersionSummarySelect,
           },
         },
       }),
     ]);
     if (!document) return documentNotFound(actor, documentId);
+    const { processingErrorCode, processingErrorMessage, ...publicDocument } = document;
     return {
-      ...document,
-      processingError: document.processingErrorCode
-        ? { code: document.processingErrorCode, message: document.processingErrorMessage }
+      ...publicDocument,
+      processingError: processingErrorCode
+        ? { code: processingErrorCode, message: processingErrorMessage }
         : null,
-      availableActions: availableActions(canManageKnowledgeDocuments(access), document.status, document.processingStatus),
+      availableActions: availableActions(
+        canManageKnowledgeDocuments(access),
+        document.status,
+        document.processingStatus,
+        document.activeVersion?.extraction?.status === "COMPLETED"
+          && document.activeVersion.analysis?.status === "COMPLETED"
+          && document.activeVersion.analysis.requiresHumanReview,
+      ),
     };
   },
 
@@ -153,6 +282,7 @@ export const knowledgeDocumentQueryService = {
         orderBy: { versionNumber: "desc" },
         skip: (query.page - 1) * query.limit,
         take: query.limit,
+        select: publicVersionSummarySelect,
       }),
       prisma.knowledgeDocumentVersion.count({ where }),
     ]);
@@ -229,4 +359,10 @@ export const knowledgeDocumentQueryService = {
     const buffer = await storageService.readBuffer(version.storageObjectKey, version.storageProvider);
     return { buffer, fileName: version.safeFileName, mimeType: version.mimeType, fileSize: version.fileSize };
   },
+};
+
+export const knowledgeDocumentQueryPolicy = {
+  publicDocumentFields,
+  publicVersionSummarySelect,
+  publicActiveVersionDetailSelect,
 };

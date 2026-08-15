@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
 import {
+  KnowledgeDocumentAnalysisStatus,
+  KnowledgeDocumentDetectedType,
+  KnowledgeDocumentExtractionStatus,
+  KnowledgeDocumentFactType,
   KnowledgeDocumentProcessingJobStatus,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeDocumentSourceKind,
   KnowledgeStorageProvider,
   Prisma,
 } from "@prisma/client";
@@ -94,6 +99,69 @@ test("database rejects cross-business document, version, job, and active-version
           documentId: documentAId,
           versionId: versionAId,
           status: KnowledgeDocumentProcessingJobStatus.QUEUED,
+        },
+      }),
+      isForeignKeyViolation,
+    );
+
+    await assert.rejects(
+      prisma.knowledgeDocumentExtraction.create({
+        data: {
+          businessId: businessB.id,
+          documentId: documentAId,
+          versionId: versionAId,
+          status: KnowledgeDocumentExtractionStatus.COMPLETED,
+        },
+      }),
+      isForeignKeyViolation,
+    );
+
+    const extraction = await prisma.knowledgeDocumentExtraction.create({
+      data: {
+        businessId: businessA.id,
+        documentId: documentAId,
+        versionId: versionAId,
+        status: KnowledgeDocumentExtractionStatus.COMPLETED,
+        normalizedText: "Price GHS 100",
+        contentHash: crypto.createHash("sha256").update("Price GHS 100").digest("hex"),
+      },
+    });
+    await assert.rejects(
+      prisma.knowledgeDocumentExtractedSection.create({
+        data: {
+          businessId: businessB.id,
+          documentId: documentAId,
+          versionId: versionAId,
+          extractionId: extraction.id,
+          ordinal: 0,
+          sourceKind: KnowledgeDocumentSourceKind.PAGE,
+          text: "Price GHS 100",
+        },
+      }),
+      isForeignKeyViolation,
+    );
+
+    const analysis = await prisma.knowledgeDocumentAnalysis.create({
+      data: {
+        businessId: businessA.id,
+        documentId: documentAId,
+        versionId: versionAId,
+        extractionId: extraction.id,
+        status: KnowledgeDocumentAnalysisStatus.COMPLETED,
+        detectedDocumentType: KnowledgeDocumentDetectedType.PRICING_INFORMATION,
+      },
+    });
+    await assert.rejects(
+      prisma.knowledgeDocumentFact.create({
+        data: {
+          businessId: businessB.id,
+          documentId: documentAId,
+          versionId: versionAId,
+          analysisId: analysis.id,
+          factType: KnowledgeDocumentFactType.PRICE,
+          label: "Price",
+          valueText: "GHS 100",
+          sourceKind: KnowledgeDocumentSourceKind.PAGE,
         },
       }),
       isForeignKeyViolation,

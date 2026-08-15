@@ -12,6 +12,7 @@ import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
 import { invalidateAiBusinessContext } from "../ai-context-builder.service";
+import { aiUsageService } from "../ai-usage.service";
 import { AuditInput, auditService } from "../audit.service";
 import { knowledgeEmbeddingService } from "../knowledge-embedding.service";
 import { realtimeService } from "../realtime.service";
@@ -243,6 +244,20 @@ export const knowledgeDocumentLifecycleService = {
   async retryProcessing(actor: KnowledgeDocumentActor, documentId: string, context: Omit<AuditInput, "action">) {
     await assertCanManageKnowledgeDocuments(actor, context, "KNOWLEDGE_DOCUMENT_RETRY_PROCESSING");
     await assertDocumentScope(actor, documentId, context, "KNOWLEDGE_DOCUMENT_RETRY_PROCESSING");
+    const retryTarget = await prisma.knowledgeDocument.findFirst({
+      where: {
+        id: documentId,
+        businessId: actor.businessId,
+        deletedAt: null,
+        status: { not: KnowledgeDocumentStatus.DELETED },
+        processingStatus: KnowledgeDocumentProcessingStatus.FAILED,
+      },
+      select: { activeVersion: { select: { processingJob: { select: { id: true } } } } },
+    });
+    const processingJobId = retryTarget?.activeVersion?.processingJob?.id;
+    if (processingJobId) {
+      await aiUsageService.reconcileKnowledgeDocumentAnalysisForProcessingJob(processingJobId);
+    }
     const result = await prisma.$transaction(async (tx) => {
       const document = await tx.knowledgeDocument.findFirst({
         where: {

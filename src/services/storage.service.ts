@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { copyFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -190,6 +192,43 @@ export const storageService = {
       return streamToBuffer(response.Body);
     }
     return readFile(resolveFileKey(fileKey));
+  },
+
+  async downloadToFile(
+    fileKey: string,
+    destinationPath: string,
+    provider?: KnowledgeStorageProvider,
+    maximumBytes = env.KNOWLEDGE_UPLOAD_MAX_BYTES,
+  ) {
+    const effectiveProvider = provider ?? configuredKnowledgeStorageProvider();
+    let source: Readable;
+    if (effectiveProvider === KnowledgeStorageProvider.S3_COMPATIBLE) {
+      const response = await s3().send(new GetObjectCommand({ Bucket: s3Bucket(), Key: fileKey }));
+      const body = response.Body as AsyncIterable<Uint8Array> | undefined;
+      if (!body?.[Symbol.asyncIterator]) {
+        throw new AppError(503, "Stored file is unavailable.", "STORAGE_UNAVAILABLE");
+      }
+      source = Readable.from(body);
+    } else {
+      source = createReadStream(resolveFileKey(fileKey));
+    }
+
+    const hash = crypto.createHash("sha256");
+    let fileSize = 0;
+    const meter = new Transform({
+      transform(chunk: Buffer | Uint8Array | string, _encoding, callback) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        fileSize += buffer.byteLength;
+        if (fileSize > maximumBytes) {
+          callback(new AppError(413, "The stored file exceeds the extraction limit.", "KNOWLEDGE_DOCUMENT_FILE_TOO_LARGE"));
+          return;
+        }
+        hash.update(buffer);
+        callback(null, buffer);
+      },
+    });
+    await pipeline(source, meter, createWriteStream(destinationPath, { flags: "wx", mode: 0o600 }));
+    return { fileSize, checksum: hash.digest("hex") };
   },
 
   async statFile(fileKey: string, provider?: KnowledgeStorageProvider) {

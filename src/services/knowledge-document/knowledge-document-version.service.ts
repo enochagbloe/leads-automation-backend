@@ -6,7 +6,43 @@ import {
   KnowledgeStorageProvider,
   Prisma,
 } from "@prisma/client";
+import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
+
+export const KNOWLEDGE_DOCUMENT_VERSION_TRANSACTION_OPTIONS = {
+  maxWait: 5_000,
+  timeout: 15_000,
+} as const;
+
+const VERSION_LOCK_MAX_ATTEMPTS = 6;
+const VERSION_LOCK_RETRY_BASE_DELAY_MS = 25;
+
+function isVersionLockBusy(error: unknown) {
+  return error instanceof AppError && error.code === "KNOWLEDGE_DOCUMENT_VERSION_LOCK_BUSY";
+}
+
+function versionLockRetryDelay(attempt: number) {
+  return Math.min(VERSION_LOCK_RETRY_BASE_DELAY_MS * 2 ** attempt, 250);
+}
+
+export async function runKnowledgeDocumentVersionTransaction<T>(
+  operation: (tx: Prisma.TransactionClient) => Promise<T>,
+) {
+  for (let attempt = 0; attempt < VERSION_LOCK_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await prisma.$transaction(operation, KNOWLEDGE_DOCUMENT_VERSION_TRANSACTION_OPTIONS);
+    } catch (error) {
+      if (!isVersionLockBusy(error) || attempt === VERSION_LOCK_MAX_ATTEMPTS - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, versionLockRetryDelay(attempt)));
+    }
+  }
+  throw new AppError(
+    409,
+    "Another document version operation is in progress.",
+    "KNOWLEDGE_DOCUMENT_VERSION_LOCK_BUSY",
+    { retryable: true },
+  );
+}
 
 type ReplacementFile = {
   originalFileName: string;
@@ -26,7 +62,20 @@ export async function lockKnowledgeDocumentVersion(
   tx: Prisma.TransactionClient,
   documentId: string,
 ) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('knowledge_document_version'), hashtext(${documentId}))`;
+  const [result] = await tx.$queryRaw<Array<{ locked: boolean }>>`
+    SELECT pg_try_advisory_xact_lock(
+      hashtext('knowledge_document_version'),
+      hashtext(${documentId})
+    ) AS locked
+  `;
+  if (!result?.locked) {
+    throw new AppError(
+      409,
+      "Another document version operation is in progress.",
+      "KNOWLEDGE_DOCUMENT_VERSION_LOCK_BUSY",
+      { retryable: true },
+    );
+  }
 }
 
 export async function allocateKnowledgeDocumentReplacement(

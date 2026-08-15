@@ -2,17 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canRetryKnowledgeDocumentJob,
+  knowledgeDocumentBusinessIsProcessable,
   knowledgeDocumentCompletionAllowed,
+  knowledgeDocumentCompletionUpdatesSucceeded,
   knowledgeDocumentJobCanBeClaimed,
   knowledgeDocumentJobIsStale,
   knowledgeDocumentJobOwnershipMatches,
+  knowledgeDocumentProcessingFailureIsRetryable,
+  knowledgeDocumentProcessingJobIdFromBatchId,
   knowledgeDocumentRetryAt,
+  processKnowledgeDocumentBusinessFairBatch,
 } from "../src/services/knowledge-document/knowledge-document-worker-policy";
 import { decideStaleUploadReconciliation } from "../src/services/knowledge-document/knowledge-document-upload-reconciliation-policy";
 import {
   knowledgeDocumentStorageDeletionCanBeClaimed,
   knowledgeDocumentStorageDeletionRetryAt,
 } from "../src/services/knowledge-document/knowledge-document-storage-cleanup-policy";
+import {
+  KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION,
+  knowledgeDocumentExtractionIsReusable,
+} from "../src/services/knowledge-document/knowledge-document-extraction-policy";
+
+test("completed extraction reuse requires the current extraction security policy", () => {
+  const current = {
+    status: "COMPLETED",
+    extractorVersion: KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION,
+    normalizedText: "Approved business content",
+    contentHash: "content-hash",
+  };
+  assert.equal(knowledgeDocumentExtractionIsReusable(current), true);
+  assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, extractorVersion: "knowledge-text-v1" }), false);
+  assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, extractorVersion: null }), false);
+  assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, normalizedText: null }), false);
+  assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, status: "PROCESSING" }), false);
+});
 
 test("processing retries use bounded exponential backoff", () => {
   const now = new Date("2026-07-31T12:00:00.000Z");
@@ -21,6 +44,27 @@ test("processing retries use bounded exponential backoff", () => {
   assert.equal(knowledgeDocumentRetryAt(20, now).toISOString(), "2026-07-31T13:00:00.000Z");
   assert.equal(canRetryKnowledgeDocumentJob(4, 5), true);
   assert.equal(canRetryKnowledgeDocumentJob(5, 5), false);
+});
+
+test("knowledge processing is restricted to active non-deleted businesses", () => {
+  assert.equal(knowledgeDocumentBusinessIsProcessable({ status: "ACTIVE", deletedAt: null }), true);
+  assert.equal(knowledgeDocumentBusinessIsProcessable({ status: "SUSPENDED", deletedAt: null }), false);
+  assert.equal(knowledgeDocumentBusinessIsProcessable({ status: "PENDING_SETUP", deletedAt: null }), false);
+  assert.equal(knowledgeDocumentBusinessIsProcessable({ status: "ACTIVE", deletedAt: new Date() }), false);
+});
+
+test("replacement, ownership, and unresolved AI reconciliation states remain parked", () => {
+  assert.equal(knowledgeDocumentProcessingFailureIsRetryable("KNOWLEDGE_DOCUMENT_PROCESSING_STATE_CHANGED"), false);
+  assert.equal(knowledgeDocumentProcessingFailureIsRetryable("KNOWLEDGE_DOCUMENT_PROCESSING_SCOPE_MISMATCH"), false);
+  assert.equal(knowledgeDocumentProcessingFailureIsRetryable("KNOWLEDGE_DOCUMENT_AI_RESULT_RECONCILIATION_REQUIRED"), false);
+  assert.equal(knowledgeDocumentProcessingFailureIsRetryable("AI_PROVIDER_ERROR"), true);
+});
+
+test("AI usage processing batch IDs resolve only valid job attempts", () => {
+  assert.equal(knowledgeDocumentProcessingJobIdFromBatchId("job-123:2"), "job-123");
+  assert.equal(knowledgeDocumentProcessingJobIdFromBatchId("job-123:0"), null);
+  assert.equal(knowledgeDocumentProcessingJobIdFromBatchId("job-123:not-a-number"), null);
+  assert.equal(knowledgeDocumentProcessingJobIdFromBatchId("missing-attempt"), null);
 });
 
 test("storage deletion retries are due-aware and bounded", () => {
@@ -66,6 +110,29 @@ test("deletion or ownership changes prevent processing completion", () => {
   assert.equal(knowledgeDocumentCompletionAllowed({ ...base, jobStatus: "FAILED", documentDeleted: false, ownershipMatches: true }), false);
 });
 
+test("unsupported extraction completes only when job, document, and version all transition", () => {
+  assert.equal(knowledgeDocumentCompletionUpdatesSucceeded({
+    jobCount: 1,
+    documentCount: 1,
+    versionCount: 1,
+  }), true);
+  assert.equal(knowledgeDocumentCompletionUpdatesSucceeded({
+    jobCount: 1,
+    documentCount: 0,
+    versionCount: 1,
+  }), false);
+  assert.equal(knowledgeDocumentCompletionUpdatesSucceeded({
+    jobCount: 1,
+    documentCount: 1,
+    versionCount: 0,
+  }), false);
+  assert.equal(knowledgeDocumentCompletionUpdatesSucceeded({
+    jobCount: 0,
+    documentCount: 1,
+    versionCount: 1,
+  }), false);
+});
+
 test("a stale processing attempt cannot complete a newer retry claim", () => {
   assert.equal(knowledgeDocumentCompletionAllowed({
     jobStatus: "PROCESSING",
@@ -100,6 +167,45 @@ test("processing rejects mismatched business, document, and active-version owner
   assert.equal(knowledgeDocumentJobOwnershipMatches({ ...valid, versionDocumentId: "document-2" }), false);
   assert.equal(knowledgeDocumentJobOwnershipMatches({ ...valid, activeVersionId: "version-2" }), false);
   assert.equal(knowledgeDocumentJobOwnershipMatches({ ...valid, versionIsActive: false }), false);
+});
+
+test("processing gives each eligible business a turn before returning to a backlog", async () => {
+  const queue = [
+    ...Array.from({ length: 6 }, (_, index) => ({ id: `a-${index}`, businessId: "business-a" })),
+    { id: "b-1", businessId: "business-b" },
+    { id: "c-1", businessId: "business-c" },
+  ];
+  const processed: string[] = [];
+  await processKnowledgeDocumentBusinessFairBatch({
+    limit: 5,
+    claim: async (excluded) => {
+      const index = queue.findIndex((job) => !excluded.has(job.businessId));
+      return index < 0 ? null : queue.splice(index, 1)[0]!;
+    },
+    process: async (job) => { processed.push(job.businessId); },
+  });
+  assert.deepEqual(processed, ["business-a", "business-b", "business-c", "business-a", "business-a"]);
+});
+
+test("fair processing still fills the batch when only two businesses have work", async () => {
+  const queue = [
+    { id: "a-1", businessId: "business-a" },
+    { id: "a-2", businessId: "business-a" },
+    { id: "a-3", businessId: "business-a" },
+    { id: "b-1", businessId: "business-b" },
+    { id: "b-2", businessId: "business-b" },
+  ];
+  const processed: string[] = [];
+  const count = await processKnowledgeDocumentBusinessFairBatch({
+    limit: 5,
+    claim: async (excluded) => {
+      const index = queue.findIndex((job) => !excluded.has(job.businessId));
+      return index < 0 ? null : queue.splice(index, 1)[0]!;
+    },
+    process: async (job) => { processed.push(job.id); },
+  });
+  assert.equal(count, 5);
+  assert.deepEqual(processed, ["a-1", "b-1", "a-2", "b-2", "a-3"]);
 });
 
 const staleUpload = {
