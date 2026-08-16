@@ -173,6 +173,7 @@ export const knowledgeEmbeddingService = {
       await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
       return;
     }
+    await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
     for (const chunk of document.chunks.slice(0, 80)) {
       await upsertEmbedding({
         businessId: document.businessId,

@@ -53,7 +53,7 @@ function json(value: unknown): Prisma.InputJsonValue {
 }
 
 function requireTeamManager(actor: MemberActor) {
-  if (actor.role !== BusinessRole.BUSINESS_OWNER) {
+  if (actor.role !== BusinessRole.BUSINESS_OWNER && actor.role !== BusinessRole.MANAGER) {
     throw new AppError(403, "You do not have permission to manage staff access.", "FORBIDDEN");
   }
 }
@@ -97,8 +97,14 @@ async function loadTarget(tx: Prisma.TransactionClient, businessId: string, targ
 }
 
 async function currentPlanLimit(tx: Prisma.TransactionClient, businessAccountId: string) {
+  const now = new Date();
   const subscription = await tx.subscription.findFirst({
-    where: { businessAccountId, status: { in: ACTIVE_SUBSCRIPTION_STATUSES } },
+    where: {
+      businessAccountId,
+      status: { in: ACTIVE_SUBSCRIPTION_STATUSES },
+      currentPeriodStart: { lte: now },
+      currentPeriodEnd: { gt: now },
+    },
     orderBy: { createdAt: "desc" },
     include: { plan: true },
   });
@@ -106,29 +112,54 @@ async function currentPlanLimit(tx: Prisma.TransactionClient, businessAccountId:
   return subscription.plan.maxStaff;
 }
 
-async function activeMemberCount(tx: Prisma.TransactionClient, businessId: string) {
-  return tx.businessMember.count({ where: { businessId, status: MembershipStatus.ACTIVE } });
+async function lockStaffCapacity(tx: Prisma.TransactionClient, businessAccountId: string) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('business_staff_quota'), hashtext(${businessAccountId}))`;
 }
 
-async function assertCanRestore(tx: Prisma.TransactionClient, businessId: string, businessAccountId: string) {
+async function activeAccountMemberCount(tx: Prisma.TransactionClient, businessAccountId: string) {
+  return tx.businessMember.count({
+    where: { status: MembershipStatus.ACTIVE, business: { businessAccountId, deletedAt: null } },
+  });
+}
+
+async function assertCanRestore(tx: Prisma.TransactionClient, _businessId: string, businessAccountId: string) {
+  await lockStaffCapacity(tx, businessAccountId);
   const limit = await currentPlanLimit(tx, businessAccountId);
   if (limit === null) return;
-  const activeCount = await activeMemberCount(tx, businessId);
+  const activeCount = await activeAccountMemberCount(tx, businessAccountId);
   if (activeCount >= limit) staffLimitError(limit, activeCount);
 }
 
 async function adjustStaffUsage(tx: Prisma.TransactionClient, businessAccountId: string, delta: number) {
   if (delta === 0) return;
+  await lockStaffCapacity(tx, businessAccountId);
+  const now = new Date();
   const subscription = await tx.subscription.findFirst({
-    where: { businessAccountId, status: { in: ACTIVE_SUBSCRIPTION_STATUSES } },
+    where: {
+      businessAccountId,
+      status: { in: ACTIVE_SUBSCRIPTION_STATUSES },
+      currentPeriodStart: { lte: now },
+      currentPeriodEnd: { gt: now },
+    },
     orderBy: { createdAt: "desc" },
-    include: { usageRecords: { orderBy: { periodStart: "desc" }, take: 1 } },
+    include: {
+      usageRecords: {
+        where: { businessAccountId, periodStart: { lte: now }, periodEnd: { gt: now } },
+        orderBy: { periodStart: "desc" },
+      },
+    },
   });
-  const usage = subscription?.usageRecords[0];
-  if (!usage) return;
+  if (!subscription) throw new AppError(403, "No active subscription", "SUBSCRIPTION_REQUIRED");
+  const matchingUsage = subscription.usageRecords.filter((usage) => (
+    usage.subscriptionId === subscription.id
+    && usage.periodStart.getTime() === subscription.currentPeriodStart.getTime()
+    && usage.periodEnd.getTime() === subscription.currentPeriodEnd.getTime()
+  ));
+  if (matchingUsage.length !== 1) throw new AppError(500, "The current account usage period is unavailable or ambiguous.", "USAGE_RECORD_UNAVAILABLE");
+  const staffCount = await activeAccountMemberCount(tx, businessAccountId);
   await tx.accountUsageRecord.update({
-    where: { id: usage.id },
-    data: { staffCount: delta > 0 ? { increment: delta } : Math.max(0, usage.staffCount + delta) },
+    where: { id: matchingUsage[0]!.id },
+    data: { staffCount },
   });
 }
 
@@ -141,6 +172,9 @@ function assertTargetCanChange(actor: MemberActor, target: { id: string; role: B
   }
   if (target.role === BusinessRole.BUSINESS_OWNER && action === "remove") {
     throw new AppError(403, "Business owners cannot be removed.", "CANNOT_REMOVE_BUSINESS_OWNER");
+  }
+  if (actor.role === BusinessRole.MANAGER && target.role !== BusinessRole.STAFF) {
+    throw new AppError(403, "Managers can only manage staff members.", "FORBIDDEN");
   }
 }
 
@@ -644,6 +678,9 @@ export const businessMemberAccessService = {
     requireTeamManager(actor);
     const result = await prisma.$transaction(async (tx) => {
       const target = await loadTarget(tx, actor.businessId, targetMembershipId);
+      if (actor.role === BusinessRole.MANAGER && target.role !== BusinessRole.STAFF) {
+        throw new AppError(403, "Managers can only update staff profiles.", "FORBIDDEN");
+      }
       if (target.status === MembershipStatus.REMOVED) {
         throw new AppError(409, "Business member has already been removed.", "BUSINESS_MEMBER_ALREADY_REMOVED");
       }

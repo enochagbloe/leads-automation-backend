@@ -16,6 +16,7 @@ import { AppError } from "../../utils/errors";
 import { invalidateAiBusinessContext } from "../ai-context-builder.service";
 import { aiUsageService } from "../ai-usage.service";
 import { auditService } from "../audit.service";
+import { knowledgeEmbeddingService } from "../knowledge-embedding.service";
 import { realtimeService } from "../realtime.service";
 import { storageService } from "../storage.service";
 import {
@@ -26,7 +27,9 @@ import {
 import {
   KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION,
   knowledgeDocumentExtractionIsReusable,
+  knowledgeDocumentExtractionRequiresRefresh,
 } from "./knowledge-document-extraction-policy";
+import { buildKnowledgeDocumentChunks } from "./knowledge-document-chunking";
 import { KnowledgeTextExtractionResult } from "./knowledge-document-text-extraction.service";
 import { knowledgeDocumentStorageCleanupService } from "./knowledge-document-storage-cleanup.service";
 import { knowledgeStorageMigrationService } from "../knowledge-storage-migration.service";
@@ -334,36 +337,42 @@ function extractionFromRecord(record: Awaited<ReturnType<typeof loadCompletedExt
   };
 }
 
-async function queueOutdatedCompletedExtractions() {
-  const candidates = await prisma.knowledgeDocumentExtraction.findMany({
+async function queueDocumentsRequiringCurrentExtraction() {
+  const candidates = await prisma.knowledgeDocumentVersion.findMany({
     where: {
-      status: KnowledgeDocumentExtractionStatus.COMPLETED,
+      isActive: true,
+      processingStatus: {
+        in: [KnowledgeDocumentProcessingStatus.READY, KnowledgeDocumentProcessingStatus.NEEDS_REVIEW],
+      },
+      processingJob: { status: KnowledgeDocumentProcessingJobStatus.COMPLETED },
       OR: [
-        { extractorVersion: null },
-        { extractorVersion: { not: KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION } },
+        { extraction: { is: null } },
+        {
+          extraction: {
+            is: {
+              status: KnowledgeDocumentExtractionStatus.COMPLETED,
+              OR: [
+                { extractorVersion: null },
+                { extractorVersion: { not: KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION } },
+              ],
+            },
+          },
+        },
       ],
       business: { status: BusinessStatus.ACTIVE, deletedAt: null },
       document: {
         status: KnowledgeDocumentStatus.ACTIVE,
         deletedAt: null,
+        activeVersionId: { not: null },
         processingStatus: {
           in: [KnowledgeDocumentProcessingStatus.READY, KnowledgeDocumentProcessingStatus.NEEDS_REVIEW],
         },
-      },
-      version: {
-        isActive: true,
-        processingStatus: {
-          in: [KnowledgeDocumentProcessingStatus.READY, KnowledgeDocumentProcessingStatus.NEEDS_REVIEW],
-        },
-        processingJob: { status: KnowledgeDocumentProcessingJobStatus.COMPLETED },
       },
     },
     select: {
       id: true,
       businessId: true,
       documentId: true,
-      versionId: true,
-      extractorVersion: true,
     },
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
     take: env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
@@ -374,7 +383,7 @@ async function queueOutdatedCompletedExtractions() {
     const changed = await prisma.$transaction(async (tx) => {
       const job = await tx.knowledgeDocumentProcessingJob.updateMany({
         where: {
-          versionId: candidate.versionId,
+          versionId: candidate.id,
           documentId: candidate.documentId,
           businessId: candidate.businessId,
           status: KnowledgeDocumentProcessingJobStatus.COMPLETED,
@@ -393,7 +402,7 @@ async function queueOutdatedCompletedExtractions() {
         where: {
           id: candidate.documentId,
           businessId: candidate.businessId,
-          activeVersionId: candidate.versionId,
+          activeVersionId: candidate.id,
           status: KnowledgeDocumentStatus.ACTIVE,
           deletedAt: null,
           processingStatus: {
@@ -408,7 +417,7 @@ async function queueOutdatedCompletedExtractions() {
       });
       const version = await tx.knowledgeDocumentVersion.updateMany({
         where: {
-          id: candidate.versionId,
+          id: candidate.id,
           documentId: candidate.documentId,
           businessId: candidate.businessId,
           isActive: true,
@@ -422,38 +431,58 @@ async function queueOutdatedCompletedExtractions() {
           processingErrorMessage: null,
         },
       });
-      const extraction = await tx.knowledgeDocumentExtraction.updateMany({
-        where: {
-          id: candidate.id,
-          versionId: candidate.versionId,
-          documentId: candidate.documentId,
-          businessId: candidate.businessId,
-          status: KnowledgeDocumentExtractionStatus.COMPLETED,
-          OR: [
-            { extractorVersion: null },
-            { extractorVersion: { not: KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION } },
-          ],
-        },
-        data: {
-          status: KnowledgeDocumentExtractionStatus.PENDING,
-          extractorName: null,
-          extractorVersion: null,
-          normalizedText: null,
-          contentHash: null,
-          language: null,
-          characterCount: 0,
-          wordCount: 0,
-          pageCount: null,
-          sheetCount: null,
-          slideCount: null,
-          warnings: [],
-          errorCode: null,
-          errorMessage: null,
-          extractionStartedAt: null,
-          extractedAt: null,
-        },
+      const existingExtraction = await tx.knowledgeDocumentExtraction.findUnique({
+        where: { versionId: candidate.id },
+        select: { id: true, status: true, extractorVersion: true },
       });
-      if (job.count !== 1 || document.count !== 1 || version.count !== 1 || extraction.count !== 1) {
+      if (!knowledgeDocumentExtractionRequiresRefresh(existingExtraction)) {
+        throw new AppError(
+          409,
+          "Knowledge document extraction changed during policy invalidation.",
+          "KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_STATE_CHANGED",
+        );
+      }
+      if (existingExtraction) {
+        const extraction = await tx.knowledgeDocumentExtraction.updateMany({
+          where: {
+            id: existingExtraction.id,
+            versionId: candidate.id,
+            documentId: candidate.documentId,
+            businessId: candidate.businessId,
+            status: KnowledgeDocumentExtractionStatus.COMPLETED,
+            OR: [
+              { extractorVersion: null },
+              { extractorVersion: { not: KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION } },
+            ],
+          },
+          data: {
+            status: KnowledgeDocumentExtractionStatus.PENDING,
+            extractorName: null,
+            extractorVersion: null,
+            normalizedText: null,
+            contentHash: null,
+            language: null,
+            characterCount: 0,
+            wordCount: 0,
+            pageCount: null,
+            sheetCount: null,
+            slideCount: null,
+            warnings: [],
+            errorCode: null,
+            errorMessage: null,
+            extractionStartedAt: null,
+            extractedAt: null,
+          },
+        });
+        if (extraction.count !== 1) {
+          throw new AppError(
+            409,
+            "Knowledge document extraction changed during policy invalidation.",
+            "KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_STATE_CHANGED",
+          );
+        }
+      }
+      if (job.count !== 1 || document.count !== 1 || version.count !== 1) {
         throw new AppError(
           409,
           "Knowledge document extraction changed during policy invalidation.",
@@ -462,25 +491,33 @@ async function queueOutdatedCompletedExtractions() {
       }
       await tx.knowledgeDocumentAnalysis.deleteMany({
         where: {
-          versionId: candidate.versionId,
+          versionId: candidate.id,
           documentId: candidate.documentId,
           businessId: candidate.businessId,
         },
       });
       await tx.knowledgeDocumentExtractedSection.deleteMany({
         where: {
-          extractionId: candidate.id,
-          versionId: candidate.versionId,
+          versionId: candidate.id,
           documentId: candidate.documentId,
           businessId: candidate.businessId,
         },
+      });
+      await tx.knowledgeDocumentChunk.deleteMany({
+        where: { businessId: candidate.businessId, documentId: candidate.documentId },
       });
       return true;
     }).catch((error) => {
       if (error instanceof AppError && error.code === "KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_STATE_CHANGED") return false;
       throw error;
     });
-    if (changed) queued += 1;
+    if (changed) {
+      queued += 1;
+      await Promise.allSettled([
+        invalidateAiBusinessContext(candidate.businessId),
+        knowledgeEmbeddingService.syncDocument(candidate.documentId),
+      ]);
+    }
   }
   if (queued) {
     console.info("Knowledge document extractions queued for policy refresh", {
@@ -893,6 +930,10 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
     const finalStatus = analysis.requiresHumanReview
       ? KnowledgeDocumentProcessingStatus.NEEDS_REVIEW
       : KnowledgeDocumentProcessingStatus.READY;
+    const documentChunks = buildKnowledgeDocumentChunks({
+      normalizedText: extraction.normalizedText,
+      sections: extraction.sections,
+    });
 
     const completed = await prisma.$transaction(async (tx) => {
       const claimed = await tx.knowledgeDocumentProcessingJob.updateMany({
@@ -948,6 +989,13 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
       await tx.knowledgeDocumentChunk.deleteMany({
         where: { businessId: current.businessId, documentId: current.documentId },
       });
+      await tx.knowledgeDocumentChunk.createMany({
+        data: documentChunks.map((chunk) => ({
+          ...chunk,
+          businessId: current.businessId,
+          documentId: current.documentId,
+        })),
+      });
       const savedAnalysis = await tx.knowledgeDocumentAnalysis.update({
         where: { versionId: current.versionId },
         data: {
@@ -993,12 +1041,26 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
     });
     if (!completed) return;
 
-    await invalidateAiBusinessContext(current.businessId).catch(() => undefined);
+    const runtimeRefresh = await Promise.allSettled([
+      invalidateAiBusinessContext(current.businessId),
+      knowledgeEmbeddingService.syncDocument(current.documentId),
+    ]);
+    for (const result of runtimeRefresh) {
+      if (result.status === "rejected") {
+        console.error("Knowledge runtime refresh failed after document processing", {
+          businessId: current.businessId,
+          documentId: current.documentId,
+          versionId: current.versionId,
+          error: result.reason,
+        });
+      }
+    }
     await recordAudit(AuditAction.KNOWLEDGE_DOCUMENT_ANALYSIS_COMPLETED, processingInput, {
       processingStatus: finalStatus,
       requiresHumanReview: analysis.requiresHumanReview,
       warningCodes: analysis.warnings,
       factCount: analysis.facts.length,
+      chunkCount: documentChunks.length,
       analyzerVersion: analysis.analyzerVersion,
     });
     publishProcessingEvent("business.knowledge.document.analysis_completed", processingInput, {
@@ -1086,7 +1148,7 @@ export const knowledgeDocumentWorkerService = {
       await knowledgeDocumentStorageCleanupService.processDueJobs();
       await knowledgeStorageMigrationService.tick();
       await recoverStaleJobs();
-      await queueOutdatedCompletedExtractions();
+      await queueDocumentsRequiringCurrentExtraction();
       const usageReconciliation = await aiUsageService.reconcileStaleKnowledgeDocumentAnalysisReservations(
         new Date(Date.now() - env.KNOWLEDGE_DOCUMENT_WORKER_STALE_SECONDS * 1_000),
       );

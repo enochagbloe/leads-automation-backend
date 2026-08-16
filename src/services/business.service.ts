@@ -1,19 +1,13 @@
-import { AuditAction, BusinessRole, BusinessStatus, InvitationStatus, MembershipStatus, UserAccountType, UserStatus } from "@prisma/client";
-import bcrypt from "bcryptjs";
+import { AuditAction, BusinessRole, BusinessStatus, MembershipStatus, UserAccountType, UserStatus } from "@prisma/client";
 import { prisma } from "../config/prisma";
-import { createOpaqueToken, hashToken } from "../utils/crypto";
 import { AppError } from "../utils/errors";
 import { makeBusinessSlug } from "../utils/slug";
 import { AuditInput, auditService } from "./audit.service";
-import { emailService } from "./email.service";
-import { canAddStaff, canCreateBusiness, updateStaffUsage } from "../middleware/subscription-guard";
+import { canCreateBusiness } from "../middleware/subscription-guard";
 import { getAccountUsage, getPlanFeatures, getPlanLimits, subscriptionService } from "./subscription.service";
 import { accountPolicyService } from "./account-policy.service";
 import { permissionFlags } from "./permission.service";
-import { cacheService } from "./cache.service";
 import { followUpService } from "./follow-up.service";
-
-const INVITATION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const businessService = {
   async create(
@@ -184,159 +178,5 @@ export const businessService = {
         }),
       })),
     };
-  },
-
-  async inviteMember(
-    businessId: string,
-    invitedById: string,
-    input: { email: string; role: "MANAGER" | "STAFF" },
-    context: Omit<AuditInput, "action">,
-  ) {
-    const role = input.role === "MANAGER" ? BusinessRole.MANAGER : BusinessRole.STAFF;
-    const business = await prisma.business.findUnique({ where: { id: businessId } });
-    if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
-
-    const inviteTarget = await accountPolicyService.validateStaffInviteTargetEmail({
-      businessId,
-      targetEmail: input.email,
-      actorUserId: invitedById,
-      context,
-    });
-    const existingUser = inviteTarget.user;
-    if (existingUser) {
-      const membership = await prisma.businessMember.findUnique({
-        where: { businessId_userId: { businessId, userId: existingUser.id } },
-      });
-      if (membership && membership.status !== MembershipStatus.REMOVED) {
-        throw new AppError(409, "This user is already a member of this business.", "USER_ALREADY_BUSINESS_MEMBER");
-      }
-    }
-
-    await canAddStaff(business.businessAccountId, businessId);
-    const { token, tokenHash } = createOpaqueToken();
-    await prisma.businessInvitation.updateMany({
-      where: { businessId, email: inviteTarget.email, status: InvitationStatus.PENDING },
-      data: { status: InvitationStatus.REVOKED },
-    });
-    const invitation = await prisma.businessInvitation.create({
-      data: {
-        businessId,
-        email: inviteTarget.email,
-        role,
-        tokenHash,
-        invitedById,
-        expiresAt: new Date(Date.now() + INVITATION_EXPIRY_MS),
-      },
-    });
-    const sent = await emailService.sendBusinessInvitation(inviteTarget.email, business.name, role, token);
-    await auditService.log({
-      ...context,
-      action: AuditAction.STAFF_INVITED,
-      businessId,
-      userId: invitedById,
-      metadata: { invitationId: invitation.id, email: inviteTarget.email, role, sent },
-    });
-    return {
-      invitation: { id: invitation.id, email: invitation.email, role: invitation.role, status: invitation.status, expiresAt: invitation.expiresAt },
-      emailSent: sent,
-    };
-  },
-
-  async acceptInvitation(
-    input: { token: string; firstName?: string; lastName?: string; password?: string },
-    context: Omit<AuditInput, "action">,
-  ) {
-    const invitation = await prisma.businessInvitation.findUnique({ where: { tokenHash: hashToken(input.token) } });
-    if (!invitation || invitation.status !== InvitationStatus.PENDING || invitation.expiresAt <= new Date()) {
-      throw new AppError(400, "Invalid or expired business invitation", "INVALID_INVITATION");
-    }
-
-    const invitedBusiness = await prisma.business.findUnique({ where: { id: invitation.businessId } });
-    if (!invitedBusiness) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
-    await accountPolicyService.validateStaffInviteTargetEmail({
-      businessId: invitation.businessId,
-      targetEmail: invitation.email,
-      actorUserId: invitation.invitedById,
-      context,
-    });
-    await canAddStaff(invitedBusiness.businessAccountId, invitation.businessId);
-    let user = await prisma.user.findUnique({ where: { email: invitation.email } });
-    if (!user) {
-      if (!input.firstName || !input.lastName || !input.password) {
-        throw new AppError(422, "First name, last name, and password are required for a new account", "INVITEE_ACCOUNT_DETAILS_REQUIRED");
-      }
-      user = await prisma.user.create({
-        data: {
-          firstName: input.firstName,
-          lastName: input.lastName,
-          email: invitation.email,
-          passwordHash: await bcrypt.hash(input.password, 12),
-          emailVerified: true,
-          status: UserStatus.ACTIVE,
-          accountType: UserAccountType.STAFF_ONLY,
-          canCreateBusiness: false,
-        },
-      });
-      await auditService.log({
-        ...context,
-        action: AuditAction.USER_ACCOUNT_TYPE_SET,
-        userId: user.id,
-        businessId: invitation.businessId,
-        metadata: {
-          targetUserId: user.id,
-          targetEmail: invitation.email,
-          accountType: UserAccountType.STAFF_ONLY,
-          canCreateBusiness: false,
-          reason: "Invite-created staff account",
-        },
-      });
-    } else {
-      if (user.status !== UserStatus.ACTIVE || user.deletedAt) {
-        throw new AppError(403, "This user account is disabled", "ACCOUNT_DISABLED");
-      }
-      if (!user.emailVerified) {
-        user = await prisma.user.update({ where: { id: user.id }, data: { emailVerified: true } });
-      }
-    }
-
-    const now = new Date();
-    const membership = await prisma.$transaction(async (tx) => {
-      const member = await tx.businessMember.upsert({
-        where: { businessId_userId: { businessId: invitation.businessId, userId: user!.id } },
-        create: {
-          businessId: invitation.businessId,
-          userId: user!.id,
-          role: invitation.role,
-          status: MembershipStatus.ACTIVE,
-          joinedAt: now,
-          invitedById: invitation.invitedById,
-        },
-        update: {
-          role: invitation.role,
-          status: MembershipStatus.ACTIVE,
-          joinedAt: now,
-          invitedById: invitation.invitedById,
-        },
-      });
-      await tx.businessInvitation.update({
-        where: { id: invitation.id },
-        data: { status: InvitationStatus.ACCEPTED, acceptedAt: now, acceptedByUserId: user!.id },
-      });
-      return member;
-    });
-    await updateStaffUsage(invitedBusiness.businessAccountId, 1, invitation.businessId);
-    await Promise.all([
-      cacheService.delByPattern(`business:${invitation.businessId}:members:*`),
-      cacheService.delByPattern(`business:${invitation.businessId}:team:*`),
-      cacheService.delByPattern(`user:${user.id}:business-memberships*`),
-    ]);
-    await auditService.log({
-      ...context,
-      action: AuditAction.STAFF_INVITATION_ACCEPTED,
-      businessId: invitation.businessId,
-      userId: user.id,
-      metadata: { invitationId: invitation.id, membershipId: membership.id, role: membership.role },
-    });
-    return { message: "Business invitation accepted", membership };
   },
 };
