@@ -22,6 +22,7 @@
     "test:knowledge-ingestion": "tsx --test tests/knowledge-document-ingestion-policy.test.ts",
     "test:knowledge-worker": "tsx --test tests/knowledge-document-worker-policy.test.ts",
     "test:knowledge-analysis": "tsx --test tests/knowledge-document-analysis-policy.test.ts",
+    "test:knowledge-embeddings": "tsx --test tests/knowledge-embedding-sync.test.ts",
     "test:knowledge-review": "tsx --test tests/knowledge-document-review-policy.test.ts",
     "test:knowledge-tenant-constraints": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-document-tenant-constraints.integration.test.ts",
     "test:knowledge-upload-idempotency": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-document-upload-idempotency.integration.test.ts",

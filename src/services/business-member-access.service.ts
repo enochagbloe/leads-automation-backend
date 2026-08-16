@@ -14,6 +14,11 @@ import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 import { AuditInput, auditService } from "./audit.service";
 import { cacheService } from "./cache.service";
+import {
+  countDistinctActiveBusinessAccountUsers,
+  isUserActiveInBusinessAccount,
+  lockBusinessStaffQuota,
+} from "./business-team-usage.service";
 import { createSystemMessage } from "./message.service";
 import { permissionFlags } from "./permission.service";
 import { realtimeService } from "./realtime.service";
@@ -47,6 +52,8 @@ const unresolvedNotificationStatuses = [
   BusinessNotificationStatus.UNREAD,
   BusinessNotificationStatus.READ,
 ];
+
+const MEMBER_TRANSACTION_OPTIONS = { maxWait: 10_000, timeout: 60_000 } as const;
 
 function json(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -112,27 +119,18 @@ async function currentPlanLimit(tx: Prisma.TransactionClient, businessAccountId:
   return subscription.plan.maxStaff;
 }
 
-async function lockStaffCapacity(tx: Prisma.TransactionClient, businessAccountId: string) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('business_staff_quota'), hashtext(${businessAccountId}))`;
-}
-
-async function activeAccountMemberCount(tx: Prisma.TransactionClient, businessAccountId: string) {
-  return tx.businessMember.count({
-    where: { status: MembershipStatus.ACTIVE, business: { businessAccountId, deletedAt: null } },
-  });
-}
-
-async function assertCanRestore(tx: Prisma.TransactionClient, _businessId: string, businessAccountId: string) {
-  await lockStaffCapacity(tx, businessAccountId);
+async function assertCanRestore(tx: Prisma.TransactionClient, businessAccountId: string, userId: string) {
+  await lockBusinessStaffQuota(tx, businessAccountId);
   const limit = await currentPlanLimit(tx, businessAccountId);
   if (limit === null) return;
-  const activeCount = await activeAccountMemberCount(tx, businessAccountId);
+  if (await isUserActiveInBusinessAccount(tx, businessAccountId, userId)) return;
+  const activeCount = await countDistinctActiveBusinessAccountUsers(tx, businessAccountId);
   if (activeCount >= limit) staffLimitError(limit, activeCount);
 }
 
 async function adjustStaffUsage(tx: Prisma.TransactionClient, businessAccountId: string, delta: number) {
   if (delta === 0) return;
-  await lockStaffCapacity(tx, businessAccountId);
+  await lockBusinessStaffQuota(tx, businessAccountId);
   const now = new Date();
   const subscription = await tx.subscription.findFirst({
     where: {
@@ -156,7 +154,7 @@ async function adjustStaffUsage(tx: Prisma.TransactionClient, businessAccountId:
     && usage.periodEnd.getTime() === subscription.currentPeriodEnd.getTime()
   ));
   if (matchingUsage.length !== 1) throw new AppError(500, "The current account usage period is unavailable or ambiguous.", "USAGE_RECORD_UNAVAILABLE");
-  const staffCount = await activeAccountMemberCount(tx, businessAccountId);
+  const staffCount = await countDistinctActiveBusinessAccountUsers(tx, businessAccountId);
   await tx.accountUsageRecord.update({
     where: { id: matchingUsage[0]!.id },
     data: { staffCount },
@@ -451,7 +449,7 @@ export const businessMemberAccessService = {
       });
       if (previousStatus === MembershipStatus.ACTIVE) await adjustStaffUsage(tx, target.business.businessAccountId, -1);
       return { target, updated, previousStatus, cleanup };
-    });
+    }, MEMBER_TRANSACTION_OPTIONS);
     await Promise.all([
       auditMemberChange(actor, AuditAction.BUSINESS_MEMBER_DISABLED, result.target, result.previousStatus, result.updated.status, context, { reason: input.reason ?? null, ...result.cleanup }),
       auditMemberChange(actor, AuditAction.ASSIGNED_RECORDS_UNASSIGNED_DUE_TO_MEMBER_STATUS, result.target, result.previousStatus, result.updated.status, context, { reason: "member_disabled", ...result.cleanup }),
@@ -486,7 +484,7 @@ export const businessMemberAccessService = {
       });
       if (previousStatus === MembershipStatus.ACTIVE) await adjustStaffUsage(tx, target.business.businessAccountId, -1);
       return { target, updated, previousStatus, cleanup };
-    });
+    }, MEMBER_TRANSACTION_OPTIONS);
     await Promise.all([
       auditMemberChange(actor, AuditAction.BUSINESS_MEMBER_REMOVED, result.target, result.previousStatus, result.updated.status, context, { reason: input.reason ?? null, ...result.cleanup }),
       auditMemberChange(actor, AuditAction.ASSIGNED_RECORDS_UNASSIGNED_DUE_TO_MEMBER_STATUS, result.target, result.previousStatus, result.updated.status, context, { reason: "member_removed", ...result.cleanup }),
@@ -503,7 +501,7 @@ export const businessMemberAccessService = {
       assertTargetCanChange(actor, target, "restore");
       if (target.status === MembershipStatus.ACTIVE) throw new AppError(409, "Business member is already active.", "BUSINESS_MEMBER_ALREADY_ACTIVE");
       if (target.status === MembershipStatus.REMOVED) throw new AppError(409, "Business member has already been removed.", "BUSINESS_MEMBER_ALREADY_REMOVED");
-      await assertCanRestore(tx, actor.businessId, target.business.businessAccountId);
+      await assertCanRestore(tx, target.business.businessAccountId, target.userId);
       const previousStatus = target.status;
       const updated = await tx.businessMember.update({
         where: { id: target.id },
@@ -521,7 +519,7 @@ export const businessMemberAccessService = {
       });
       await adjustStaffUsage(tx, target.business.businessAccountId, 1);
       return { target, updated, previousStatus };
-    });
+    }, MEMBER_TRANSACTION_OPTIONS);
     const action = result.previousStatus === MembershipStatus.SUSPENDED_BY_PLAN
       ? AuditAction.BUSINESS_MEMBER_RESTORED_AFTER_PLAN_CHANGE
       : AuditAction.BUSINESS_MEMBER_RESTORED;
@@ -575,7 +573,7 @@ export const businessMemberAccessService = {
         summaries.push(cleanup);
       }
       return { suspended, summaries };
-    });
+    }, MEMBER_TRANSACTION_OPTIONS);
     await Promise.all(result.suspended.flatMap((item) => [
       auditMemberChange(actor, AuditAction.BUSINESS_MEMBER_SUSPENDED_BY_PLAN, item.member, MembershipStatus.ACTIVE, item.updated.status, context, { reason: "SUBSCRIPTION_DOWNGRADE", ...item.cleanup }),
       auditMemberChange(actor, AuditAction.ASSIGNED_RECORDS_UNASSIGNED_DUE_TO_MEMBER_STATUS, item.member, MembershipStatus.ACTIVE, item.updated.status, context, { reason: "subscription_downgrade", ...item.cleanup }),
@@ -701,7 +699,7 @@ export const businessMemberAccessService = {
         include: { user: { select: { id: true, firstName: true, lastName: true, email: true } } },
       });
       return { target, updated, changedFields };
-    });
+    }, MEMBER_TRANSACTION_OPTIONS);
     if (result.changedFields.length > 0) {
       await Promise.all([
         auditMemberChange(actor, AuditAction.STAFF_OPERATIONAL_PROFILE_UPDATED, result.target, result.target.status, result.target.status, context, {
