@@ -80,6 +80,15 @@ test("business invitations activate one assignable membership and remain tenant-
         joinedAt: now,
       },
     });
+    await prisma.businessMember.create({
+      data: {
+        businessId: otherBusiness.id,
+        userId: owner.id,
+        role: BusinessRole.BUSINESS_OWNER,
+        status: MembershipStatus.ACTIVE,
+        joinedAt: now,
+      },
+    });
     const subscription = await prisma.subscription.create({
       data: {
         businessAccountId: account.id,
@@ -147,6 +156,15 @@ test("business invitations activate one assignable membership and remain tenant-
         emailVerified: true,
         accountType: UserAccountType.STAFF_ONLY,
         canCreateBusiness: false,
+      },
+    });
+    await prisma.businessMember.create({
+      data: {
+        businessId: otherBusiness.id,
+        userId: existingUser.id,
+        role: BusinessRole.STAFF,
+        status: MembershipStatus.ACTIVE,
+        joinedAt: now,
       },
     });
     const existingUserToken = crypto.randomBytes(32).toString("hex");
@@ -221,6 +239,17 @@ test("business invitations activate one assignable membership and remain tenant-
       role: BusinessRole.MANAGER,
     });
     assert.equal(managerInvitations.invitations.length, invitationList.invitations.length);
+
+    await businessMemberAccessService.disableMember(actor, managerMembership.id, { reason: "distinct-user quota test" }, {});
+    let lifecycleUsage = await prisma.accountUsageRecord.findUniqueOrThrow({
+      where: { subscriptionId_periodStart: { subscriptionId: subscription.id, periodStart: now } },
+    });
+    assert.equal(lifecycleUsage.staffCount, 3);
+    await businessMemberAccessService.restoreDisabledMember(actor, managerMembership.id, {});
+    lifecycleUsage = await prisma.accountUsageRecord.findUniqueOrThrow({
+      where: { subscriptionId_periodStart: { subscriptionId: subscription.id, periodStart: now } },
+    });
+    assert.equal(lifecycleUsage.staffCount, 3);
 
     const staffTeam = await businessMemberAccessService.listMembers({
       userId: createdUser.id,

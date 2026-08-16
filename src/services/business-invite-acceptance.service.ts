@@ -19,6 +19,11 @@ import { AppError } from "../utils/errors";
 import { accountPolicyService } from "./account-policy.service";
 import { AuditInput, auditService } from "./audit.service";
 import { invalidateBusinessTeamCaches, lockBusinessInvitations } from "./business-invitation-management.service";
+import {
+  countDistinctActiveBusinessAccountUsers,
+  isUserActiveInBusinessAccount,
+  lockBusinessStaffQuota,
+} from "./business-team-usage.service";
 import { notificationService } from "./notification.service";
 import { realtimeService } from "./realtime.service";
 import { ACTIVE_SUBSCRIPTION_STATUSES } from "./subscription.service";
@@ -107,8 +112,8 @@ async function notifyJoined(input: { businessId: string; businessAccountId: stri
   });
 }
 
-async function reserveStaffCapacity(tx: Prisma.TransactionClient, input: { businessAccountId: string; requiresAdditionalSeat: boolean }) {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('business_staff_quota'), hashtext(${input.businessAccountId}))`;
+async function reserveStaffCapacity(tx: Prisma.TransactionClient, input: { businessAccountId: string; userId: string }) {
+  await lockBusinessStaffQuota(tx, input.businessAccountId);
   const now = new Date();
   const subscription = await tx.subscription.findFirst({
     where: {
@@ -135,16 +140,18 @@ async function reserveStaffCapacity(tx: Prisma.TransactionClient, input: { busin
   if (matchingUsage.length !== 1) {
     throw new AppError(500, "The current account usage period is unavailable or ambiguous.", "USAGE_RECORD_UNAVAILABLE");
   }
-  const activeMemberCount = await tx.businessMember.count({
-    where: { status: MembershipStatus.ACTIVE, business: { businessAccountId: input.businessAccountId, deletedAt: null } },
-  });
-  if (input.requiresAdditionalSeat && subscription.plan.maxStaff !== null && activeMemberCount >= subscription.plan.maxStaff) {
+  const [activeUserCount, userAlreadyCounted] = await Promise.all([
+    countDistinctActiveBusinessAccountUsers(tx, input.businessAccountId),
+    isUserActiveInBusinessAccount(tx, input.businessAccountId, input.userId),
+  ]);
+  const requiresAdditionalSeat = !userAlreadyCounted;
+  if (requiresAdditionalSeat && subscription.plan.maxStaff !== null && activeUserCount >= subscription.plan.maxStaff) {
     throw new AppError(403, "Your current plan does not allow more active staff members.", "STAFF_LIMIT_EXCEEDED", {
-      current: activeMemberCount,
+      current: activeUserCount,
       limit: subscription.plan.maxStaff,
     });
   }
-  const nextCount = activeMemberCount + (input.requiresAdditionalSeat ? 1 : 0);
+  const nextCount = activeUserCount + (requiresAdditionalSeat ? 1 : 0);
   await tx.accountUsageRecord.update({ where: { id: matchingUsage[0]!.id }, data: { staffCount: nextCount } });
   return { previousCount: matchingUsage[0]!.staffCount, currentCount: nextCount };
 }
@@ -238,10 +245,9 @@ async function acceptInTransaction(input: {
     if (existingMembership?.status === MembershipStatus.DISABLED) {
       throw new AppError(403, "This account is not allowed to accept this staff invite.", "ACCOUNT_NOT_ALLOWED_FOR_STAFF_INVITE");
     }
-    const requiresAdditionalSeat = existingMembership?.status !== MembershipStatus.ACTIVE;
     const usage = await reserveStaffCapacity(tx, {
       businessAccountId: invitation.business.businessAccountId,
-      requiresAdditionalSeat,
+      userId: user.id,
     });
     const now = new Date();
     const membership = await tx.businessMember.upsert({

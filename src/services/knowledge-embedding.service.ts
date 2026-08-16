@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
-import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentProcessingStatus, KnowledgeDocumentStatus } from "@prisma/client";
+import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentProcessingStatus, KnowledgeDocumentStatus, Prisma } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
+import { AppError } from "../utils/errors";
 
 type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK";
 
@@ -18,6 +19,33 @@ type OpenRouterEmbeddingResponse = {
 };
 
 const MAX_EMBEDDING_TEXT_CHARS = 6000;
+const MAX_DOCUMENT_EMBEDDING_CHUNKS = 80;
+
+type EmbeddingInput = {
+  businessId: string;
+  sourceType: EmbeddingSourceType;
+  sourceId: string;
+  chunkId?: string | null;
+  title: string;
+  content: string;
+};
+
+type PreparedEmbedding = EmbeddingInput & { embedding: number[] };
+
+export async function prepareAndReplaceEmbeddingBatch<TInput, TPrepared>(input: {
+  items: readonly TInput[];
+  prepare: (item: TInput) => Promise<TPrepared | null>;
+  replace: (prepared: readonly TPrepared[]) => Promise<void>;
+  failure: () => Error;
+}) {
+  const prepared: TPrepared[] = [];
+  for (const item of input.items) {
+    const result = await input.prepare(item);
+    if (!result) throw input.failure();
+    prepared.push(result);
+  }
+  await input.replace(prepared);
+}
 
 function enabled() {
   return Boolean(env.OPENROUTER_API_KEY && env.OPENROUTER_EMBEDDING_MODEL);
@@ -95,17 +123,13 @@ async function createEmbedding(text: string) {
   return raw.data[0].embedding.slice(0, env.OPENROUTER_EMBEDDING_DIMENSIONS);
 }
 
-async function upsertEmbedding(input: {
-  businessId: string;
-  sourceType: EmbeddingSourceType;
-  sourceId: string;
-  chunkId?: string | null;
-  title: string;
-  content: string;
-}) {
+async function prepareEmbedding(input: EmbeddingInput): Promise<PreparedEmbedding | null> {
   const embedding = await createEmbedding(input.content);
-  if (!embedding) return false;
-  await prisma.$executeRawUnsafe(
+  return embedding ? { ...input, embedding } : null;
+}
+
+async function writeEmbedding(tx: Prisma.TransactionClient | typeof prisma, input: PreparedEmbedding) {
+  await tx.$executeRawUnsafe(
     `INSERT INTO "KnowledgeSearchEmbedding"
       ("id", "businessId", "sourceType", "sourceId", "chunkId", "title", "content", "embedding", "embeddingModel", "updatedAt")
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, CURRENT_TIMESTAMP)
@@ -123,9 +147,15 @@ async function upsertEmbedding(input: {
     input.chunkId ?? null,
     input.title,
     input.content,
-    vectorLiteral(embedding),
+    vectorLiteral(input.embedding),
     env.OPENROUTER_EMBEDDING_MODEL!,
   );
+}
+
+async function upsertEmbedding(input: EmbeddingInput) {
+  const prepared = await prepareEmbedding(input);
+  if (!prepared) return false;
+  await writeEmbedding(prisma, prepared);
   return true;
 }
 
@@ -173,17 +203,69 @@ export const knowledgeEmbeddingService = {
       await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
       return;
     }
-    await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
-    for (const chunk of document.chunks.slice(0, 80)) {
-      await upsertEmbedding({
+    const inputs = document.chunks.slice(0, MAX_DOCUMENT_EMBEDDING_CHUNKS).map((chunk): EmbeddingInput => ({
         businessId: document.businessId,
         sourceType: "DOCUMENT_CHUNK",
         sourceId: document.id,
         chunkId: chunk.id,
         title: document.title,
         content: documentChunkText({ chunkText: chunk.chunkText, document }),
-      });
+    }));
+    if (!inputs.length) {
+      throw new AppError(
+        409,
+        "The document has no chunks available for embedding.",
+        "KNOWLEDGE_DOCUMENT_EMBEDDING_SOURCE_EMPTY",
+      );
     }
+
+    await prepareAndReplaceEmbeddingBatch({
+      items: inputs,
+      prepare: prepareEmbedding,
+      failure: () => new AppError(
+        503,
+        "Document embeddings could not be generated.",
+        "KNOWLEDGE_DOCUMENT_EMBEDDING_GENERATION_FAILED",
+      ),
+      replace: async (prepared) => {
+        await prisma.$transaction(async (tx) => {
+          const current = await tx.knowledgeDocument.findFirst({
+            where: {
+              id: document.id,
+              businessId: document.businessId,
+              updatedAt: document.updatedAt,
+              status: KnowledgeDocumentStatus.ACTIVE,
+              processingStatus: KnowledgeDocumentProcessingStatus.READY,
+              visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+            },
+            select: {
+              chunks: {
+                orderBy: { createdAt: "asc" },
+                take: MAX_DOCUMENT_EMBEDDING_CHUNKS,
+                select: { id: true },
+              },
+            },
+          });
+          const sourceUnchanged = current
+            && current.chunks.length === inputs.length
+            && current.chunks.every((chunk, index) => chunk.id === inputs[index]?.chunkId);
+          if (!sourceUnchanged) {
+            throw new AppError(
+              409,
+              "The document changed while embeddings were being generated.",
+              "KNOWLEDGE_DOCUMENT_EMBEDDING_SOURCE_CHANGED",
+            );
+          }
+          await tx.$executeRaw`
+            DELETE FROM "KnowledgeSearchEmbedding"
+            WHERE "businessId" = ${document.businessId}
+              AND "sourceType" = ${"DOCUMENT_CHUNK"}
+              AND "sourceId" = ${document.id}
+          `;
+          for (const embedding of prepared) await writeEmbedding(tx, embedding);
+        }, { maxWait: 10_000, timeout: 30_000 });
+      },
+    });
   },
 
   async search(businessId: string, query: string, limit: number): Promise<VectorSearchResult[]> {
