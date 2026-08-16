@@ -21,7 +21,41 @@ import {
 import {
   KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION,
   knowledgeDocumentExtractionIsReusable,
+  knowledgeDocumentExtractionRequiresRefresh,
 } from "../src/services/knowledge-document/knowledge-document-extraction-policy";
+import {
+  buildKnowledgeDocumentChunks,
+  KNOWLEDGE_DOCUMENT_CHUNK_LIMIT,
+  KNOWLEDGE_DOCUMENT_CHUNK_MAX_CHARACTERS,
+} from "../src/services/knowledge-document/knowledge-document-chunking";
+
+test("analyzed document sections rebuild bounded runtime chunks with source pages", () => {
+  const chunks = buildKnowledgeDocumentChunks({
+    normalizedText: "fallback",
+    sections: [
+      { text: "First policy paragraph.", sourceLabel: "Page 1", pageNumber: 1 },
+      { text: "Second policy paragraph.", sourceLabel: "Page 1", pageNumber: 1 },
+      { text: "A".repeat(3_000), sourceLabel: "Page 2", pageNumber: 2 },
+    ],
+  });
+  assert.equal(chunks[0]?.pageNumber, 1);
+  assert.match(chunks[0]?.chunkText ?? "", /Page 1/);
+  assert.ok(chunks.some((chunk) => chunk.pageNumber === 2));
+  assert.ok(chunks.every((chunk) => chunk.chunkText.length <= KNOWLEDGE_DOCUMENT_CHUNK_MAX_CHARACTERS));
+  assert.ok(chunks.every((chunk) => chunk.tokenCount > 0));
+  assert.ok(chunks.length <= KNOWLEDGE_DOCUMENT_CHUNK_LIMIT);
+});
+
+test("chunk rebuilding falls back to normalized extraction text", () => {
+  assert.deepEqual(buildKnowledgeDocumentChunks({
+    normalizedText: "Fallback extracted content",
+    sections: [],
+  }), [{
+    chunkText: "Fallback extracted content",
+    pageNumber: null,
+    tokenCount: 7,
+  }]);
+});
 
 test("completed extraction reuse requires the current extraction security policy", () => {
   const current = {
@@ -35,6 +69,16 @@ test("completed extraction reuse requires the current extraction security policy
   assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, extractorVersion: null }), false);
   assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, normalizedText: null }), false);
   assert.equal(knowledgeDocumentExtractionIsReusable({ ...current, status: "PROCESSING" }), false);
+  assert.equal(knowledgeDocumentExtractionRequiresRefresh(null), true);
+  assert.equal(knowledgeDocumentExtractionRequiresRefresh(current), false);
+  assert.equal(knowledgeDocumentExtractionRequiresRefresh({
+    status: "COMPLETED",
+    extractorVersion: "knowledge-text-v1",
+  }), true);
+  assert.equal(knowledgeDocumentExtractionRequiresRefresh({
+    status: "PROCESSING",
+    extractorVersion: "knowledge-text-v1",
+  }), false);
 });
 
 test("processing retries use bounded exponential backoff", () => {

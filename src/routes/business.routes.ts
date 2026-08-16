@@ -17,7 +17,7 @@ businessRouter.post(
   "/invitations",
   authenticate,
   requireBusiness,
-  requireRole(BusinessRole.BUSINESS_OWNER),
+  requireRole(BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER),
   emailLimiter,
   validate(inviteMemberSchema),
   businessController.inviteMember,

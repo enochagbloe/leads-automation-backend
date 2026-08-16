@@ -11,3 +11,13 @@ export function knowledgeDocumentExtractionIsReusable(input: {
     && Boolean(input.normalizedText)
     && Boolean(input.contentHash);
 }
+
+export function knowledgeDocumentExtractionRequiresRefresh(input: {
+  status: string;
+  extractorVersion: string | null;
+} | null) {
+  return input === null || (
+    input.status === "COMPLETED"
+    && input.extractorVersion !== KNOWLEDGE_DOCUMENT_EXTRACTION_POLICY_VERSION
+  );
+}
