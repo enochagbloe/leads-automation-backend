@@ -26,6 +26,8 @@ pnpm dev
 
 Set `RESEND_API_KEY` and `EMAIL_FROM` to a verified Resend sender/domain to deliver transactional emails. In development, email delivery is skipped and logged when `RESEND_API_KEY` is empty. Production startup rejects a missing Resend API key.
 
+The public marketing waitlist uses `POST /api/waitlist`, `POST /api/waitlist/confirm`, and `POST /api/waitlist/resend`. Set `WAITLIST_CONFIRMATION_URL` to the marketing confirmation page and configure `EMAIL_FROM` with a verified sender such as `BizReply <hello@bizreplyhq.com>`.
+
 The centralized `EmailService` provides verification, password-reset, and welcome-email templates with HTML and plain-text versions. The welcome email is a Sprint 1 placeholder and is not automatically sent yet. Provider failures are logged internally and never returned directly by API endpoints.
 
 The application adds conservative Prisma pool defaults to `DATABASE_URL` at runtime: `DB_CONNECTION_LIMIT=3`, `DB_POOL_TIMEOUT_SECONDS=30`, and `DB_CONNECT_TIMEOUT_SECONDS=15`. These reduce connection pressure on pooled Neon databases and can be overridden per environment.

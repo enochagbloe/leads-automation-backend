@@ -14,6 +14,9 @@ export const loginLimiter = buildLimiter(10);
 export const emailLimiter = buildLimiter(5, 60 * 60 * 1000);
 export const passwordResetLimiter = buildLimiter(5, 60 * 60 * 1000);
 export const mutationLimiter = buildLimiter(120);
+export const waitlistSignupLimiter = buildLimiter(10, 60 * 60 * 1000);
+export const waitlistConfirmationLimiter = buildLimiter(30, 15 * 60 * 1000);
+export const waitlistResendLimiter = buildLimiter(5, 60 * 60 * 1000);
 
 export const aiPromptAutosaveLimiter = rateLimit({
   windowMs: 60 * 1000,

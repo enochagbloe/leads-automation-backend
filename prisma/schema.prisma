@@ -43,6 +43,12 @@ enum InvitationStatus {
   EXPIRED
 }
 
+enum WaitlistStatus {
+  PENDING
+  CONFIRMED
+  UNSUBSCRIBED
+}
+
 enum LeadSource {
   MANUAL
   WHATSAPP
@@ -1438,6 +1444,28 @@ model BusinessInvitation {
   @@index([businessId, status])
   @@index([email, status])
   @@index([acceptedByUserId])
+}
+
+model WaitlistEntry {
+  id                      String         @id @default(cuid())
+  name                    String
+  email                   String         @unique
+  businessName            String?
+  businessType            String?
+  whatsapp                String?
+  problem                 String?
+  source                  String?
+  status                  WaitlistStatus @default(PENDING)
+  marketingConsent        Boolean        @default(false)
+  confirmationTokenHash   String?        @unique
+  confirmationExpiresAt   DateTime?
+  confirmationRequestedAt DateTime?
+  confirmedAt             DateTime?
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+
+  @@index([status, createdAt])
+  @@index([marketingConsent, status])
 }
 
 model Plan {
