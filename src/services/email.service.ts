@@ -6,7 +6,7 @@ type EmailContent = {
   subject: string;
   html: string;
   text: string;
-  type: "email_verification" | "password_reset" | "business_invitation" | "welcome" | "customer_attention" | "customer_issue_assigned";
+  type: "email_verification" | "password_reset" | "business_invitation" | "welcome" | "customer_attention" | "customer_issue_assigned" | "waitlist_confirmation";
 };
 
 type ActionTemplateInput = {
@@ -179,6 +179,26 @@ class EmailService {
   sendWelcome(to: string, businessName: string) {
     const template = welcomeTemplate(businessName);
     return this.send({ to, subject: "Welcome to BizReply AI", type: "welcome", ...template });
+  }
+
+  sendWaitlistConfirmation(to: string, name: string, token: string) {
+    const url = new URL(env.WAITLIST_CONFIRMATION_URL);
+    url.searchParams.set("token", token);
+    const template = actionTemplate({
+      title: "Confirm your BizReply waitlist spot",
+      preview: "Confirm your email to join the BizReply waitlist.",
+      greetingName: name,
+      message: "Confirm your email address so we can reserve your BizReply waitlist spot.",
+      actionLabel: "Confirm waitlist spot",
+      actionUrl: url.toString(),
+      expiryNotice: `This confirmation link expires in ${env.WAITLIST_CONFIRMATION_EXPIRY_HOURS} hours and can only be used once.`,
+    });
+    return this.send({
+      to,
+      subject: "Confirm your BizReply waitlist spot",
+      type: "waitlist_confirmation",
+      ...template,
+    });
   }
 
   sendBusinessInvitation(to: string, businessName: string, role: string, token: string) {

@@ -33,6 +33,8 @@
     "test:knowledge-storage-migration": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-storage-migration.integration.test.ts",
     "test:storage-environment-policy": "tsx --test tests/storage-environment-policy.test.ts",
     "test:business-invitations": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/business-invitation-lifecycle.integration.test.ts",
+    "test:waitlist": "tsx --test tests/waitlist-policy.test.ts",
+    "test:waitlist-integration": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/waitlist-lifecycle.integration.test.ts",
     "whatsapp:credentials:migrate": "tsx prisma/migrate-whatsapp-credentials.ts",
     "postinstall": "prisma generate",
     "prepare": "husky"

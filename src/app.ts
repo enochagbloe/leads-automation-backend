@@ -30,12 +30,14 @@ import { knowledgeRouter } from "./routes/knowledge.routes";
 import { followUpRouter } from "./routes/follow-up.routes";
 import { aiPromptRouter } from "./routes/ai-prompt.routes";
 import { customerMemoryRouter } from "./routes/customer-memory.routes";
+import { waitlistRouter } from "./routes/waitlist.routes";
 
 export const app = express();
 
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: corsOrigins, credentials: true }));
+app.use("/api/waitlist", express.json({ limit: "16kb" }), waitlistRouter);
 app.use(express.json({
   limit: Math.ceil(env.KNOWLEDGE_UPLOAD_MAX_BYTES * 1.4),
   verify: (req, _res, buffer) => {
@@ -78,6 +80,7 @@ app.get("/api", (_req, res) => res.json({
     mockWhatsApp: env.NODE_ENV === "production" ? undefined : "/api/dev/mock-whatsapp/inbound-message",
     plans: "/api/plans",
     subscription: "/api/subscription",
+    waitlist: "/api/waitlist",
   },
 }));
 app.get("/api/health", async (_req, res) => {

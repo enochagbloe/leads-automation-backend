@@ -29,6 +29,9 @@ const schema = z.object({
   CACHE_SWEEP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
   RESEND_API_KEY: optionalString,
   EMAIL_FROM: z.string().min(1),
+  WAITLIST_CONFIRMATION_URL: z.string().url().default("https://bizreplyhq.com/waitlist/confirm"),
+  WAITLIST_CONFIRMATION_EXPIRY_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+  WAITLIST_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().min(30).max(3600).default(60),
   WHATSAPP_PROVIDER_MODE: z.enum(["mock", "live"]).default("mock"),
   MOCK_WHATSAPP_FORCE_FAILURE: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   ENABLE_DEV_TOOLS: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
@@ -258,4 +261,8 @@ export const env = {
   KNOWLEDGE_DOWNLOAD_URL_TTL_SECONDS: parsed.data.AWS_S3_SIGNED_URL_TTL_SECONDS
     ?? parsed.data.KNOWLEDGE_DOWNLOAD_URL_TTL_SECONDS,
 };
-export const corsOrigins = env.CORS_ORIGINS.split(",").map((origin) => origin.trim());
+export const corsOrigins = [...new Set([
+  ...env.CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
+  "https://bizreplyhq.com",
+  "https://www.bizreplyhq.com",
+])];
