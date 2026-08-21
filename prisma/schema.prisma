@@ -1461,6 +1461,8 @@ model WaitlistEntry {
   confirmationExpiresAt   DateTime?
   confirmationRequestedAt DateTime?
   confirmedAt             DateTime?
+  welcomeEmailRequestedAt DateTime?
+  welcomeEmailSentAt      DateTime?
   createdAt               DateTime       @default(now())
   updatedAt               DateTime       @updatedAt
 

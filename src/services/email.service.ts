@@ -85,6 +85,22 @@ function welcomeTemplate(greetingName: string) {
   };
 }
 
+function waitlistWelcomeTemplate(greetingName: string) {
+  const name = escapeHtml(greetingName);
+  return {
+    html: `<!doctype html><html lang="en"><body style="margin:0;background:#f4f6f8;font-family:Arial,sans-serif;color:#172033;line-height:1.6">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;padding:32px 16px"><tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border:1px solid #e6e9ed;border-radius:12px">
+<tr><td style="padding:36px"><p style="margin:0 0 28px;font-size:18px;font-weight:700">BizReply AI</p>
+<h1 style="margin:0 0 18px;font-size:26px;line-height:1.25">You're on the BizReply waitlist</h1>
+<p style="margin:0 0 12px">Hi ${name},</p>
+<p style="margin:0 0 12px">Thank you for joining the BizReply waitlist.</p>
+<p style="margin:0">We'll let you know when your access is ready and keep you updated based on your communication preferences.</p>
+</td></tr></table></td></tr></table></body></html>`,
+    text: `You're on the BizReply waitlist\n\nHi ${greetingName},\n\nThank you for joining the BizReply waitlist.\n\nWe'll let you know when your access is ready and keep you updated based on your communication preferences.`,
+  };
+}
+
 function internalNoticeTemplate(input: { title: string; preview: string; rows: Array<{ label: string; value?: string | null }> }) {
   const rows = input.rows
     .filter((row) => row.value)
@@ -196,6 +212,16 @@ class EmailService {
     return this.send({
       to,
       subject: "Confirm your BizReply waitlist spot",
+      type: "waitlist_confirmation",
+      ...template,
+    });
+  }
+
+  sendWaitlistWelcome(to: string, name: string) {
+    const template = waitlistWelcomeTemplate(name);
+    return this.send({
+      to,
+      subject: "Thank you for joining the BizReply waitlist",
       type: "waitlist_confirmation",
       ...template,
     });
