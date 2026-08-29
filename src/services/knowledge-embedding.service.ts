@@ -1,8 +1,12 @@
 import crypto from "node:crypto";
-import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentProcessingStatus, KnowledgeDocumentStatus, Prisma } from "@prisma/client";
+import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibility, KnowledgeDocumentProcessingStatus, KnowledgeDocumentStatus, KnowledgeGovernanceStatus, Prisma } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
+import {
+  customerSafeKnowledgeDocumentWhere,
+  knowledgeFactStatusesAreCustomerSafe,
+} from "./knowledge-document/knowledge-document-runtime-policy";
 
 type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK";
 
@@ -192,13 +196,18 @@ export const knowledgeEmbeddingService = {
     if (!enabled()) return;
     const document = await prisma.knowledgeDocument.findUnique({
       where: { id: documentId },
-      include: { chunks: { orderBy: { createdAt: "asc" } } },
+      include: {
+        chunks: { orderBy: { createdAt: "asc" } },
+        activeVersion: { select: { facts: { select: { governanceStatus: true } } } },
+      },
     });
     if (!document) return;
     if (
       document.status !== KnowledgeDocumentStatus.ACTIVE
       || document.processingStatus !== KnowledgeDocumentProcessingStatus.READY
+      || document.governanceStatus !== KnowledgeGovernanceStatus.APPROVED
       || document.visibility !== KnowledgeAssetVisibility.CLIENT_SENDABLE
+      || !knowledgeFactStatusesAreCustomerSafe(document.activeVersion?.facts ?? [])
     ) {
       await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
       return;
@@ -236,7 +245,9 @@ export const knowledgeEmbeddingService = {
               updatedAt: document.updatedAt,
               status: KnowledgeDocumentStatus.ACTIVE,
               processingStatus: KnowledgeDocumentProcessingStatus.READY,
+              governanceStatus: KnowledgeGovernanceStatus.APPROVED,
               visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+              ...customerSafeKnowledgeDocumentWhere,
             },
             select: {
               chunks: {

@@ -11,6 +11,7 @@ import {
 } from "../middleware/knowledge-upload";
 import {
   approveKnowledgeDocumentReviewSchema,
+  completeKnowledgeDocumentReplacementSchema,
   createKnowledgeArticleSchema,
   draftKnowledgeArticleSchema,
   generateStarterArticlesSchema,
@@ -19,6 +20,9 @@ import {
   knowledgeDocumentVersionListQuerySchema,
   knowledgeSearchQuerySchema,
   rejectKnowledgeDocumentReviewSchema,
+  permanentlyDeleteKnowledgeDocumentSchema,
+  resolveKnowledgeGovernanceReviewBatchSchema,
+  resolveKnowledgeGovernanceReviewSchema,
   updateKnowledgeArticleSchema,
   updateKnowledgeArticleStatusSchema,
   updateKnowledgeDocumentSchema,
@@ -45,6 +49,7 @@ knowledgeRouter.get("/documents", validateQuery(knowledgeDocumentListQuerySchema
 knowledgeRouter.post("/documents/upload", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeUploadMetadata, knowledgeController.uploadDocument);
 knowledgeRouter.post("/documents/:documentId/versions", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeReplacementMetadata, knowledgeController.replaceDocument);
 knowledgeRouter.get("/documents/:documentId/versions", validateQuery(knowledgeDocumentVersionListQuerySchema), knowledgeController.documentVersions);
+knowledgeRouter.get("/documents/:documentId/reviews", knowledgeController.documentReviewDetails);
 knowledgeRouter.get("/documents/:documentId/download-url", knowledgeController.documentDownloadUrl);
 knowledgeRouter.get("/documents/:documentId/download", knowledgeController.downloadDocument);
 knowledgeRouter.get("/documents/:documentId", knowledgeController.documentDetail);
@@ -55,4 +60,9 @@ knowledgeRouter.post("/documents/:documentId/restore", mutationLimiter, knowledg
 knowledgeRouter.post("/documents/:documentId/retry-processing", mutationLimiter, knowledgeController.retryDocumentProcessing);
 knowledgeRouter.post("/documents/:documentId/review/approve", mutationLimiter, validate(approveKnowledgeDocumentReviewSchema), knowledgeController.approveDocumentReview);
 knowledgeRouter.post("/documents/:documentId/review/reject", mutationLimiter, validate(rejectKnowledgeDocumentReviewSchema), knowledgeController.rejectDocumentReview);
+knowledgeRouter.post("/documents/reviews/resolve-batch", mutationLimiter, validate(resolveKnowledgeGovernanceReviewBatchSchema), knowledgeController.resolveGovernanceReviewsBatch);
+knowledgeRouter.post("/documents/reviews/:reviewId/resolve", mutationLimiter, validate(resolveKnowledgeGovernanceReviewSchema), knowledgeController.resolveGovernanceReview);
+knowledgeRouter.get("/documents/:documentId/replacement/:reviewId/compare", knowledgeController.compareDocumentReplacement);
+knowledgeRouter.post("/documents/:documentId/replacement/complete", mutationLimiter, validate(completeKnowledgeDocumentReplacementSchema), knowledgeController.completeDocumentReplacement);
+knowledgeRouter.delete("/documents/:documentId/permanent", mutationLimiter, validate(permanentlyDeleteKnowledgeDocumentSchema), knowledgeController.permanentlyDeleteDocument);
 knowledgeRouter.delete("/documents/:documentId", mutationLimiter, knowledgeController.deleteDocument);

@@ -4,6 +4,7 @@ import {
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeGovernanceResolutionAction,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -121,6 +122,34 @@ export const rejectKnowledgeDocumentReviewSchema = z.object({
   reason: trimmed.min(3).max(1_000),
 });
 
+const governanceResolutionFields = {
+  expectedVersionId: trimmed.min(1).max(191),
+  action: z.nativeEnum(KnowledgeGovernanceResolutionAction),
+  expectedCanonicalValue: z.unknown().optional(),
+  settingsInput: z.record(z.string(), z.unknown()).optional(),
+  note: trimmed.max(1_000).nullable().optional(),
+};
+
+export const resolveKnowledgeGovernanceReviewSchema = z.object(governanceResolutionFields).strict();
+
+export const resolveKnowledgeGovernanceReviewBatchSchema = z.object({
+  decisions: z.array(z.object({
+    reviewId: trimmed.min(1).max(191),
+    idempotencyKey: trimmed.min(8).max(191),
+    ...governanceResolutionFields,
+  }).strict()).min(1).max(50),
+}).strict();
+
+export const completeKnowledgeDocumentReplacementSchema = z.object({
+  reviewId: trimmed.min(1).max(191),
+  expectedVersionId: trimmed.min(1).max(191),
+  note: trimmed.max(1_000).nullable().optional(),
+}).strict();
+
+export const permanentlyDeleteKnowledgeDocumentSchema = z.object({
+  confirmPermanentDelete: z.literal(true),
+}).strict();
+
 export const knowledgeSearchQuerySchema = z.object({
   query: trimmed.min(1).max(120),
   conversationId: optionalTrimmed,
@@ -154,5 +183,9 @@ export type ReplaceKnowledgeDocumentMetadataInput = z.infer<typeof replaceKnowle
 export type UpdateKnowledgeDocumentInput = z.infer<typeof updateKnowledgeDocumentSchema>;
 export type ApproveKnowledgeDocumentReviewInput = z.infer<typeof approveKnowledgeDocumentReviewSchema>;
 export type RejectKnowledgeDocumentReviewInput = z.infer<typeof rejectKnowledgeDocumentReviewSchema>;
+export type ResolveKnowledgeGovernanceReviewInput = z.infer<typeof resolveKnowledgeGovernanceReviewSchema>;
+export type ResolveKnowledgeGovernanceReviewBatchInput = z.infer<typeof resolveKnowledgeGovernanceReviewBatchSchema>;
+export type CompleteKnowledgeDocumentReplacementInput = z.infer<typeof completeKnowledgeDocumentReplacementSchema>;
+export type PermanentlyDeleteKnowledgeDocumentInput = z.infer<typeof permanentlyDeleteKnowledgeDocumentSchema>;
 export type KnowledgeSearchQuery = z.infer<typeof knowledgeSearchQuerySchema>;
 export type SendKnowledgeAssetInput = z.infer<typeof sendKnowledgeAssetSchema>;

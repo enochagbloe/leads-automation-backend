@@ -4,7 +4,7 @@ import { z } from "zod";
 const time = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Time must use HH:mm 24-hour format");
 const nullableTime = z.union([time, z.null()]).optional();
 
-const ruleSchema = z.object({
+export const availabilityRuleSchema = z.object({
   dayOfWeek: z.nativeEnum(DayOfWeek),
   isOpen: z.boolean(),
   openTime: nullableTime,
@@ -37,7 +37,7 @@ const ruleSchema = z.object({
 
 export const upsertAvailabilitySchema = z.object({
   timezone: z.string().trim().min(1).max(100),
-  rules: z.array(ruleSchema).length(7),
+  rules: z.array(availabilityRuleSchema).length(7),
 }).strict().superRefine((input, context) => {
   const days = input.rules.map((rule) => rule.dayOfWeek);
   if (new Set(days).size !== 7) {

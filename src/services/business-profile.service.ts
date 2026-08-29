@@ -69,6 +69,10 @@ const PROFILE_SELECT = {
   updatedAt: true,
 } satisfies Prisma.BusinessSelect;
 
+export type BusinessProfileMutationGuard = {
+  assertCurrent(current: Readonly<Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>>): void;
+};
+
 function safeProfile(profile: Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>) {
   const { businessAccountId: _businessAccountId, ...safe } = profile;
   return safe;
@@ -121,7 +125,12 @@ export const businessProfileService = {
     return profile;
   },
 
-  async update(actor: BusinessProfileActor, input: UpdateBusinessProfileInput, context: Omit<AuditInput, "action">) {
+  async update(
+    actor: BusinessProfileActor,
+    input: UpdateBusinessProfileInput,
+    context: Omit<AuditInput, "action">,
+    guard?: BusinessProfileMutationGuard,
+  ) {
     if (actor.role === BusinessRole.STAFF) {
       throw new AppError(403, "You do not have permission to update business profile settings.", "FORBIDDEN");
     }
@@ -181,6 +190,7 @@ export const businessProfileService = {
           select: PROFILE_SELECT,
         });
         if (!existing) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+        guard?.assertCurrent(existing);
 
         const nextEmail = input.email === undefined ? existing.email : input.email;
         const nextPhone = input.phone === undefined ? existing.phone : input.phone;

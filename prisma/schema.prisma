@@ -674,6 +674,14 @@ enum KnowledgeDocumentProcessingJobStatus {
   FAILED
 }
 
+enum KnowledgeRuntimeRefreshJobStatus {
+  SCHEDULED
+  PROCESSING
+  FAILED
+  COMPLETED
+  EXHAUSTED
+}
+
 enum KnowledgeDocumentRetentionStatus {
   RETAINED
   PENDING_DELETION
@@ -709,6 +717,76 @@ enum KnowledgeDocumentAnalysisStatus {
   PROCESSING
   COMPLETED
   FAILED
+}
+
+enum KnowledgeGovernanceStatus {
+  REVIEW_REQUIRED
+  APPROVED
+  OUTDATED
+  ARCHIVED
+}
+
+enum KnowledgeFactGovernanceStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  SUPERSEDED
+  CONFLICT
+  ARCHIVED
+  OUTDATED
+}
+
+enum KnowledgeGovernanceComparisonType {
+  MATCH
+  CONFLICT
+  MISSING_IN_SETTINGS
+  MISSING_IN_DOCUMENT
+  POTENTIAL_REPLACEMENT
+}
+
+enum KnowledgeGovernancePriority {
+  CRITICAL
+  HIGH
+  NORMAL
+}
+
+enum KnowledgeGovernanceReviewStatus {
+  PENDING_REVIEW
+  APPLYING
+  RESOLVED
+}
+
+enum KnowledgeGovernanceResolutionOperationStatus {
+  APPLYING
+  COMPLETED
+  FAILED
+}
+
+enum KnowledgeDocumentArchiveReason {
+  USER_ARCHIVED
+  REVIEW_NOT_APPLIED
+  SUPERSEDED
+  DUPLICATE
+}
+
+enum KnowledgeGovernanceCanonicalEntityType {
+  SERVICE
+  BUSINESS_PROFILE
+  BUSINESS_AVAILABILITY
+  APPOINTMENT_SETTINGS
+  APPROVED_KNOWLEDGE
+  DOCUMENT_VERSION
+}
+
+enum KnowledgeGovernanceResolutionAction {
+  UPDATE_SETTINGS
+  KEEP_CURRENT_SETTINGS
+  ADD_TO_SETTINGS
+  APPROVE_KNOWLEDGE_ONLY
+  REVIEW_FIELDS
+  ARCHIVE
+  REPLACE
+  REVIEW_NOT_APPLIED
 }
 
 enum KnowledgeDocumentDetectedType {
@@ -759,6 +837,7 @@ enum KnowledgeDocumentFactType {
   SERVICE
   PRODUCT
   PRICE
+  SERVICE_DURATION
   FEE
   DEPOSIT
   DISCOUNT
@@ -1042,6 +1121,11 @@ enum AuditAction {
   KNOWLEDGE_DOCUMENT_NEEDS_REVIEW
   KNOWLEDGE_DOCUMENT_REVIEW_APPROVED
   KNOWLEDGE_DOCUMENT_REVIEW_REJECTED
+  KNOWLEDGE_FACT_REVIEW_APPROVED
+  KNOWLEDGE_FACT_REVIEW_REJECTED
+  KNOWLEDGE_SETTINGS_SYNCED
+  KNOWLEDGE_DOCUMENT_REPLACEMENT_CONFIRMED
+  KNOWLEDGE_DOCUMENT_PERMANENTLY_DELETED
   FOLLOW_UP_RULE_CREATED
   FOLLOW_UP_RULE_UPDATED
   FOLLOW_UP_RULE_DELETED
@@ -1187,59 +1271,62 @@ model Business {
   updatedAt                        DateTime                    @updatedAt
   deletedAt                        DateTime?
 
-  owner                                User                                  @relation("BusinessOwner", fields: [ownerId], references: [id])
-  businessAccount                      BusinessAccount                       @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
-  members                              BusinessMember[]
-  invitations                          BusinessInvitation[]
-  usageRecords                         BusinessUsageRecord[]
-  auditLogs                            AuditLog[]
-  leads                                Lead[]
-  leadActivities                       LeadActivity[]
-  conversations                        Conversation[]
-  messages                             Message[]
-  whatsAppIntegrations                 WhatsAppIntegration[]
-  webhookEventLogs                     WebhookEventLog[]
-  aiInteractionLogs                    AiInteractionLog[]
-  services                             Service[]
-  availability                         BusinessAvailability[]
-  policies                             BusinessPolicy[]
-  appointments                         Appointment[]
-  appointmentRescheduleRequests        AppointmentRescheduleRequest[]
-  appointmentActivities                AppointmentActivity[]
-  notifications                        BusinessNotification[]
-  customerIssueLogs                    CustomerIssueLog[]
-  knowledgeArticles                    KnowledgeArticle[]
-  knowledgeDocuments                   KnowledgeDocument[]
-  knowledgeDocumentVersions            KnowledgeDocumentVersion[]
-  knowledgeDocumentStorageDeletionJobs KnowledgeDocumentStorageDeletionJob[]
-  knowledgeStorageMigrationJobs        KnowledgeStorageMigrationJob[]
-  knowledgeDocumentProcessingJobs      KnowledgeDocumentProcessingJob[]
-  knowledgeDocumentUploadOperations    KnowledgeDocumentUploadOperation[]
-  knowledgeDocumentExtractions         KnowledgeDocumentExtraction[]
-  knowledgeDocumentExtractedSections   KnowledgeDocumentExtractedSection[]
-  knowledgeDocumentAnalyses            KnowledgeDocumentAnalysis[]
-  knowledgeDocumentFacts               KnowledgeDocumentFact[]
-  knowledgeAssetSendLogs               KnowledgeAssetSendLog[]
-  messageAttachments                   ConversationMessageAttachment[]
-  knowledgeDocumentChunks              KnowledgeDocumentChunk[]
-  complaintInsightReports              ComplaintInsightReport[]
-  customerIssueTimelineEvents          CustomerIssueTimelineEvent[]
-  customerIssueMessages                CustomerIssueMessage[]
-  followUpAutomationRules              FollowUpAutomationRule[]
-  followUpJobs                         FollowUpJob[]
-  followUpSendLogs                     FollowUpSendLog[]
-  premiumFollowUpInsights              PremiumFollowUpIntelligenceSnapshot[]
-  premiumFollowUpGenerations           PremiumFollowUpMessageGeneration[]
-  premiumFollowUpExecutions            PremiumFollowUpExecution[]
-  aiPromptConfigurations               AiPromptConfiguration[]
-  aiPromptVersions                     AiPromptVersion[]
-  aiPromptDraftMutations               AiPromptDraftMutation[]
-  customerMemoryProfiles               CustomerMemoryProfile[]
-  customerMemoryItems                  CustomerMemoryItem[]
-  customerMemoryExtractionJobs         CustomerMemoryExtractionJob[]
-  customerMemoryTombstones             CustomerMemoryConversationTombstone[]
-  customerMemoryItemTombstones         CustomerMemoryItemTombstone[]
-  customerMemoryDiscoveryCursor        CustomerMemoryDiscoveryCursor?
+  owner                                   User                                     @relation("BusinessOwner", fields: [ownerId], references: [id])
+  businessAccount                         BusinessAccount                          @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
+  members                                 BusinessMember[]
+  invitations                             BusinessInvitation[]
+  usageRecords                            BusinessUsageRecord[]
+  auditLogs                               AuditLog[]
+  leads                                   Lead[]
+  leadActivities                          LeadActivity[]
+  conversations                           Conversation[]
+  messages                                Message[]
+  whatsAppIntegrations                    WhatsAppIntegration[]
+  webhookEventLogs                        WebhookEventLog[]
+  aiInteractionLogs                       AiInteractionLog[]
+  services                                Service[]
+  availability                            BusinessAvailability[]
+  policies                                BusinessPolicy[]
+  appointments                            Appointment[]
+  appointmentRescheduleRequests           AppointmentRescheduleRequest[]
+  appointmentActivities                   AppointmentActivity[]
+  notifications                           BusinessNotification[]
+  customerIssueLogs                       CustomerIssueLog[]
+  knowledgeArticles                       KnowledgeArticle[]
+  knowledgeDocuments                      KnowledgeDocument[]
+  knowledgeDocumentVersions               KnowledgeDocumentVersion[]
+  knowledgeDocumentStorageDeletionJobs    KnowledgeDocumentStorageDeletionJob[]
+  knowledgeStorageMigrationJobs           KnowledgeStorageMigrationJob[]
+  knowledgeDocumentProcessingJobs         KnowledgeDocumentProcessingJob[]
+  knowledgeRuntimeRefreshJobs             KnowledgeRuntimeRefreshJob[]
+  knowledgeDocumentUploadOperations       KnowledgeDocumentUploadOperation[]
+  knowledgeDocumentExtractions            KnowledgeDocumentExtraction[]
+  knowledgeDocumentExtractedSections      KnowledgeDocumentExtractedSection[]
+  knowledgeDocumentAnalyses               KnowledgeDocumentAnalysis[]
+  knowledgeDocumentFacts                  KnowledgeDocumentFact[]
+  knowledgeGovernanceReviews              KnowledgeGovernanceReview[]
+  knowledgeGovernanceResolutionOperations KnowledgeGovernanceResolutionOperation[]
+  knowledgeAssetSendLogs                  KnowledgeAssetSendLog[]
+  messageAttachments                      ConversationMessageAttachment[]
+  knowledgeDocumentChunks                 KnowledgeDocumentChunk[]
+  complaintInsightReports                 ComplaintInsightReport[]
+  customerIssueTimelineEvents             CustomerIssueTimelineEvent[]
+  customerIssueMessages                   CustomerIssueMessage[]
+  followUpAutomationRules                 FollowUpAutomationRule[]
+  followUpJobs                            FollowUpJob[]
+  followUpSendLogs                        FollowUpSendLog[]
+  premiumFollowUpInsights                 PremiumFollowUpIntelligenceSnapshot[]
+  premiumFollowUpGenerations              PremiumFollowUpMessageGeneration[]
+  premiumFollowUpExecutions               PremiumFollowUpExecution[]
+  aiPromptConfigurations                  AiPromptConfiguration[]
+  aiPromptVersions                        AiPromptVersion[]
+  aiPromptDraftMutations                  AiPromptDraftMutation[]
+  customerMemoryProfiles                  CustomerMemoryProfile[]
+  customerMemoryItems                     CustomerMemoryItem[]
+  customerMemoryExtractionJobs            CustomerMemoryExtractionJob[]
+  customerMemoryTombstones                CustomerMemoryConversationTombstone[]
+  customerMemoryItemTombstones            CustomerMemoryItemTombstone[]
+  customerMemoryDiscoveryCursor           CustomerMemoryDiscoveryCursor?
 
   @@index([ownerId])
   @@index([businessAccountId])
@@ -1280,16 +1367,18 @@ model Service {
   missingFields                             String[]                  @default([])
   displayOrder                              Int                       @default(0)
   source                                    ServiceSource             @default(MANUAL)
+  governanceCreationOperationId             String?                   @unique
   createdById                               String?
   updatedById                               String?
   createdAt                                 DateTime                  @default(now())
   updatedAt                                 DateTime                  @updatedAt
   archivedAt                                DateTime?
 
-  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  createdBy    User?         @relation("ServiceCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  updatedBy    User?         @relation("ServiceUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
-  appointments Appointment[]
+  business                    Business                                @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdBy                   User?                                   @relation("ServiceCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy                   User?                                   @relation("ServiceUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  governanceCreationOperation KnowledgeGovernanceResolutionOperation? @relation("GovernanceCreatedService", fields: [governanceCreationOperationId], references: [id], onDelete: SetNull)
+  appointments                Appointment[]
 
   @@index([businessId])
   @@index([businessId, isArchived])
@@ -1385,36 +1474,40 @@ model BusinessMember {
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  business                           Business                       @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  user                               User                           @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
-  invitedBy                          User?                          @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
-  assignedLeads                      Lead[]                         @relation("LeadAssignee")
-  assignedConversations              Conversation[]                 @relation("ConversationAssignee")
-  assignedAppointments               Appointment[]                  @relation("AppointmentAssignee")
-  lastRescheduledAppointments        Appointment[]                  @relation("AppointmentLastRescheduler")
-  outcomeConfirmedAppointments       Appointment[]                  @relation("AppointmentOutcomeConfirmer")
-  approvedAppointmentReschedules     AppointmentRescheduleRequest[] @relation("AppointmentRescheduleApprover")
-  declinedAppointmentReschedules     AppointmentRescheduleRequest[] @relation("AppointmentRescheduleDecliner")
-  appointmentActivities              AppointmentActivity[]          @relation("AppointmentActivityActorMembership")
-  notifications                      BusinessNotification[]
-  responsibleCustomerIssues          CustomerIssueLog[]             @relation("CustomerIssueResponsible")
-  suggestedCustomerIssues            CustomerIssueLog[]             @relation("CustomerIssueSuggestedResponsible")
-  clientOwnedCustomerIssues          CustomerIssueLog[]             @relation("CustomerIssueClientOwner")
-  conversationAssignedCustomerIssues CustomerIssueLog[]             @relation("CustomerIssueConversationAssignee")
-  createdKnowledgeArticles           KnowledgeArticle[]             @relation("KnowledgeArticleCreator")
-  updatedKnowledgeArticles           KnowledgeArticle[]             @relation("KnowledgeArticleUpdater")
-  reviewedKnowledgeArticles          KnowledgeArticle[]             @relation("KnowledgeArticleReviewer")
-  publishedKnowledgeArticles         KnowledgeArticle[]             @relation("KnowledgeArticlePublisher")
-  uploadedKnowledgeDocuments         KnowledgeDocument[]            @relation("KnowledgeDocumentUploader")
-  sentKnowledgeAssets                KnowledgeAssetSendLog[]        @relation("KnowledgeAssetSender")
-  customerIssueTimelineEvents        CustomerIssueTimelineEvent[]
-  createdFollowUpRules               FollowUpAutomationRule[]       @relation("FollowUpRuleCreator")
-  updatedFollowUpRules               FollowUpAutomationRule[]       @relation("FollowUpRuleUpdater")
-  createdAiPromptConfigurations      AiPromptConfiguration[]        @relation("AiPromptConfigurationCreator")
-  updatedAiPromptConfigurations      AiPromptConfiguration[]        @relation("AiPromptConfigurationUpdater")
-  createdAiPromptVersions            AiPromptVersion[]              @relation("AiPromptVersionCreator")
+  business                                Business                                 @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user                                    User                                     @relation("MemberUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy                               User?                                    @relation("MemberInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  assignedLeads                           Lead[]                                   @relation("LeadAssignee")
+  assignedConversations                   Conversation[]                           @relation("ConversationAssignee")
+  assignedAppointments                    Appointment[]                            @relation("AppointmentAssignee")
+  lastRescheduledAppointments             Appointment[]                            @relation("AppointmentLastRescheduler")
+  outcomeConfirmedAppointments            Appointment[]                            @relation("AppointmentOutcomeConfirmer")
+  approvedAppointmentReschedules          AppointmentRescheduleRequest[]           @relation("AppointmentRescheduleApprover")
+  declinedAppointmentReschedules          AppointmentRescheduleRequest[]           @relation("AppointmentRescheduleDecliner")
+  appointmentActivities                   AppointmentActivity[]                    @relation("AppointmentActivityActorMembership")
+  notifications                           BusinessNotification[]
+  responsibleCustomerIssues               CustomerIssueLog[]                       @relation("CustomerIssueResponsible")
+  suggestedCustomerIssues                 CustomerIssueLog[]                       @relation("CustomerIssueSuggestedResponsible")
+  clientOwnedCustomerIssues               CustomerIssueLog[]                       @relation("CustomerIssueClientOwner")
+  conversationAssignedCustomerIssues      CustomerIssueLog[]                       @relation("CustomerIssueConversationAssignee")
+  createdKnowledgeArticles                KnowledgeArticle[]                       @relation("KnowledgeArticleCreator")
+  updatedKnowledgeArticles                KnowledgeArticle[]                       @relation("KnowledgeArticleUpdater")
+  reviewedKnowledgeArticles               KnowledgeArticle[]                       @relation("KnowledgeArticleReviewer")
+  publishedKnowledgeArticles              KnowledgeArticle[]                       @relation("KnowledgeArticlePublisher")
+  uploadedKnowledgeDocuments              KnowledgeDocument[]                      @relation("KnowledgeDocumentUploader")
+  sentKnowledgeAssets                     KnowledgeAssetSendLog[]                  @relation("KnowledgeAssetSender")
+  customerIssueTimelineEvents             CustomerIssueTimelineEvent[]
+  createdFollowUpRules                    FollowUpAutomationRule[]                 @relation("FollowUpRuleCreator")
+  updatedFollowUpRules                    FollowUpAutomationRule[]                 @relation("FollowUpRuleUpdater")
+  createdAiPromptConfigurations           AiPromptConfiguration[]                  @relation("AiPromptConfigurationCreator")
+  updatedAiPromptConfigurations           AiPromptConfiguration[]                  @relation("AiPromptConfigurationUpdater")
+  createdAiPromptVersions                 AiPromptVersion[]                        @relation("AiPromptVersionCreator")
+  reviewedKnowledgeGovernanceItems        KnowledgeGovernanceReview[]              @relation("KnowledgeGovernanceReviewer")
+  governedKnowledgeDocumentFacts          KnowledgeDocumentFact[]                  @relation("KnowledgeFactReviewer")
+  knowledgeGovernanceResolutionOperations KnowledgeGovernanceResolutionOperation[] @relation("KnowledgeGovernanceResolutionActor")
 
   @@unique([businessId, userId])
+  @@unique([id, businessId])
   @@index([userId])
   @@index([businessId, status])
   @@index([businessId, canManageKnowledgeHub])
@@ -1514,35 +1607,35 @@ model Subscription {
 }
 
 model AccountUsageRecord {
-  id                             String   @id @default(cuid())
-  businessAccountId              String
-  subscriptionId                 String
-  businessesCount                Int      @default(1)
-  conversationsUsed              Int      @default(0)
-  aiRepliesUsed                  Int      @default(0)
-  aiRequestsUsed                 Int      @default(0)
-  aiTokensUsed                   Int      @default(0)
-  aiMemoryExtractionRequestsUsed Int      @default(0)
-  aiMemoryExtractionTokensUsed   Int      @default(0)
-  aiKnowledgeAnalysisRequestsUsed Int     @default(0)
-  aiKnowledgeAnalysisTokensUsed   Int     @default(0)
-  aiBlockedUsed                  Int      @default(0)
-  aiHumanReviewsUsed             Int      @default(0)
-  aiBookingRequestsCreated       Int      @default(0)
-  aiSafeHandoffsTriggered        Int      @default(0)
-  aiSafeHandoffEmailsSent        Int      @default(0)
-  aiComplaintsDetected           Int      @default(0)
-  customerIssuesLogged           Int      @default(0)
-  customerIssuesRouted           Int      @default(0)
-  customerIssueEmailsSent        Int      @default(0)
-  staffCount                     Int      @default(1)
-  servicesCount                  Int      @default(0)
-  appointmentsUsed               Int      @default(0)
-  knowledgeItemsCount            Int      @default(0)
-  periodStart                    DateTime
-  periodEnd                      DateTime
-  createdAt                      DateTime @default(now())
-  updatedAt                      DateTime @updatedAt
+  id                              String   @id @default(cuid())
+  businessAccountId               String
+  subscriptionId                  String
+  businessesCount                 Int      @default(1)
+  conversationsUsed               Int      @default(0)
+  aiRepliesUsed                   Int      @default(0)
+  aiRequestsUsed                  Int      @default(0)
+  aiTokensUsed                    Int      @default(0)
+  aiMemoryExtractionRequestsUsed  Int      @default(0)
+  aiMemoryExtractionTokensUsed    Int      @default(0)
+  aiKnowledgeAnalysisRequestsUsed Int      @default(0)
+  aiKnowledgeAnalysisTokensUsed   Int      @default(0)
+  aiBlockedUsed                   Int      @default(0)
+  aiHumanReviewsUsed              Int      @default(0)
+  aiBookingRequestsCreated        Int      @default(0)
+  aiSafeHandoffsTriggered         Int      @default(0)
+  aiSafeHandoffEmailsSent         Int      @default(0)
+  aiComplaintsDetected            Int      @default(0)
+  customerIssuesLogged            Int      @default(0)
+  customerIssuesRouted            Int      @default(0)
+  customerIssueEmailsSent         Int      @default(0)
+  staffCount                      Int      @default(1)
+  servicesCount                   Int      @default(0)
+  appointmentsUsed                Int      @default(0)
+  knowledgeItemsCount             Int      @default(0)
+  periodStart                     DateTime
+  periodEnd                       DateTime
+  createdAt                       DateTime @default(now())
+  updatedAt                       DateTime @updatedAt
 
   businessAccount     BusinessAccount      @relation(fields: [businessAccountId], references: [id], onDelete: Cascade)
   subscription        Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -2059,11 +2152,15 @@ model KnowledgeDocument {
   storageObjectKey       String?
   checksum               String
   processingStatus       KnowledgeDocumentProcessingStatus @default(READY)
+  governanceStatus       KnowledgeGovernanceStatus         @default(REVIEW_REQUIRED)
   processingErrorCode    String?
   processingErrorMessage String?
   activeVersionId        String?
   uploadedByUserId       String?
   archivedAt             DateTime?
+  archiveReason          KnowledgeDocumentArchiveReason?
+  replacesDocumentId     String?
+  supersededByDocumentId String?
   deletedAt              DateTime?
   retentionStatus        KnowledgeDocumentRetentionStatus  @default(RETAINED)
   retentionExpiresAt     DateTime?
@@ -2071,19 +2168,25 @@ model KnowledgeDocument {
   createdAt              DateTime                          @default(now())
   updatedAt              DateTime                          @updatedAt
 
-  business            Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  uploadedBy          BusinessMember?                       @relation("KnowledgeDocumentUploader", fields: [uploadedByMembershipId], references: [id], onDelete: SetNull)
-  sendLogs            KnowledgeAssetSendLog[]
-  attachments         ConversationMessageAttachment[]
-  chunks              KnowledgeDocumentChunk[]
-  versions            KnowledgeDocumentVersion[]            @relation("KnowledgeDocumentVersions")
-  activeVersion       KnowledgeDocumentVersion?             @relation("ActiveKnowledgeDocumentVersion", fields: [activeVersionId, id, businessId], references: [id, documentId, businessId], onDelete: NoAction)
-  processingJobs      KnowledgeDocumentProcessingJob[]
-  storageDeletionJobs KnowledgeDocumentStorageDeletionJob[]
-  extractions         KnowledgeDocumentExtraction[]
-  extractedSections   KnowledgeDocumentExtractedSection[]
-  analyses            KnowledgeDocumentAnalysis[]
-  facts               KnowledgeDocumentFact[]
+  business             Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  uploadedBy           BusinessMember?                       @relation("KnowledgeDocumentUploader", fields: [uploadedByMembershipId], references: [id], onDelete: SetNull)
+  sendLogs             KnowledgeAssetSendLog[]
+  attachments          ConversationMessageAttachment[]
+  chunks               KnowledgeDocumentChunk[]
+  versions             KnowledgeDocumentVersion[]            @relation("KnowledgeDocumentVersions")
+  activeVersion        KnowledgeDocumentVersion?             @relation("ActiveKnowledgeDocumentVersion", fields: [activeVersionId, id, businessId], references: [id, documentId, businessId], onDelete: NoAction)
+  processingJobs       KnowledgeDocumentProcessingJob[]
+  runtimeRefreshJob    KnowledgeRuntimeRefreshJob?
+  storageDeletionJobs  KnowledgeDocumentStorageDeletionJob[]
+  extractions          KnowledgeDocumentExtraction[]
+  extractedSections    KnowledgeDocumentExtractedSection[]
+  analyses             KnowledgeDocumentAnalysis[]
+  facts                KnowledgeDocumentFact[]
+  governanceReviews    KnowledgeGovernanceReview[]
+  replacesDocument     KnowledgeDocument?                    @relation("KnowledgeDocumentReplacement", fields: [replacesDocumentId, businessId], references: [id, businessId], onDelete: NoAction)
+  supersededByDocument KnowledgeDocument?                    @relation("KnowledgeDocumentSupersession", fields: [supersededByDocumentId, businessId], references: [id, businessId], onDelete: NoAction)
+  replacementDocuments KnowledgeDocument[]                   @relation("KnowledgeDocumentReplacement")
+  supersedingDocuments KnowledgeDocument[]                   @relation("KnowledgeDocumentSupersession")
 
   @@unique([id, businessId])
   @@index([businessId])
@@ -2092,6 +2195,9 @@ model KnowledgeDocument {
   @@index([businessId, category])
   @@index([businessId, updatedAt])
   @@index([businessId, processingStatus])
+  @@index([businessId, governanceStatus])
+  @@index([businessId, replacesDocumentId])
+  @@index([businessId, supersededByDocumentId])
   @@index([businessId, checksum])
   @@index([businessId, deletedAt])
   @@index([businessId, retentionStatus, retentionExpiresAt], map: "KnowledgeDocument_business_retention_expiry_idx")
@@ -2116,6 +2222,7 @@ model KnowledgeDocumentVersion {
   uploadedByUserId       String?
   uploadedByMembershipId String?
   processingStatus       KnowledgeDocumentProcessingStatus  @default(UPLOADING)
+  governanceStatus       KnowledgeGovernanceStatus          @default(REVIEW_REQUIRED)
   processingErrorCode    String?
   processingErrorMessage String?
   isActive               Boolean                            @default(false)
@@ -2133,6 +2240,7 @@ model KnowledgeDocumentVersion {
   analysis           KnowledgeDocumentAnalysis?
   extractedSections  KnowledgeDocumentExtractedSection[]
   facts              KnowledgeDocumentFact[]
+  governanceReviews  KnowledgeGovernanceReview[]
 
   @@unique([documentId, versionNumber])
   @@unique([businessId, uploadIdempotencyKey])
@@ -2142,6 +2250,7 @@ model KnowledgeDocumentVersion {
   @@index([documentId, isActive])
   @@index([businessId, checksum])
   @@index([businessId, processingStatus])
+  @@index([businessId, governanceStatus])
   @@index([businessId, malwareScanStatus])
 }
 
@@ -2194,6 +2303,33 @@ model KnowledgeDocumentProcessingJob {
   @@unique([versionId, documentId, businessId])
   @@index([businessId, status, nextAttemptAt])
   @@index([businessId, documentId])
+}
+
+model KnowledgeRuntimeRefreshJob {
+  id                  String                           @id @default(cuid())
+  businessId          String
+  documentId          String                           @unique
+  status              KnowledgeRuntimeRefreshJobStatus @default(SCHEDULED)
+  requestedRevision   Int                              @default(1)
+  processingRevision  Int?
+  completedRevision   Int                              @default(0)
+  attemptCount        Int                              @default(0)
+  nextAttemptAt       DateTime?                        @default(now())
+  processingStartedAt DateTime?
+  cacheInvalidatedAt  DateTime?
+  embeddingsSyncedAt  DateTime?
+  completedAt         DateTime?
+  lastErrorCode       String?
+  lastErrorMessage    String?
+  createdAt           DateTime                         @default(now())
+  updatedAt           DateTime                         @updatedAt
+
+  business Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document KnowledgeDocument @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+
+  @@unique([documentId, businessId])
+  @@index([status, nextAttemptAt])
+  @@index([businessId, status])
 }
 
 model KnowledgeDocumentExtraction {
@@ -2259,42 +2395,42 @@ model KnowledgeDocumentExtractedSection {
 }
 
 model KnowledgeDocumentAnalysis {
-  id                        String                                      @id @default(cuid())
-  businessId                String
-  documentId                String
-  versionId                 String                                      @unique
-  extractionId              String                                      @unique
-  status                    KnowledgeDocumentAnalysisStatus             @default(PENDING)
-  suggestedTitle            String?
-  detectedDocumentType      KnowledgeDocumentDetectedType?
-  shortSummary              String?                                     @db.Text
-  detectedPurpose           String?                                     @db.Text
-  likelyAudience            KnowledgeDocumentAudience?
-  recommendedClassification KnowledgeDocumentRecommendedClassification?
-  classificationReason      String?                                     @db.Text
-  classificationConfidence  Float?
-  analysisConfidence        KnowledgeDocumentAnalysisConfidence?
-  requiresHumanReview       Boolean                                     @default(false)
-  topics                    String[]                                    @default([])
-  relatedServiceSuggestions Json?
-  warnings                  String[]                                    @default([])
-  analyzerName              String?
-  analyzerVersion           String?
-  provider                  String?
-  model                     String?
-  promptTokens              Int?
-  completionTokens          Int?
-  totalTokens               Int?
-  providerResultSnapshot    Json?
-  providerResultContentHash String?
+  id                          String                                      @id @default(cuid())
+  businessId                  String
+  documentId                  String
+  versionId                   String                                      @unique
+  extractionId                String                                      @unique
+  status                      KnowledgeDocumentAnalysisStatus             @default(PENDING)
+  suggestedTitle              String?
+  detectedDocumentType        KnowledgeDocumentDetectedType?
+  shortSummary                String?                                     @db.Text
+  detectedPurpose             String?                                     @db.Text
+  likelyAudience              KnowledgeDocumentAudience?
+  recommendedClassification   KnowledgeDocumentRecommendedClassification?
+  classificationReason        String?                                     @db.Text
+  classificationConfidence    Float?
+  analysisConfidence          KnowledgeDocumentAnalysisConfidence?
+  requiresHumanReview         Boolean                                     @default(false)
+  topics                      String[]                                    @default([])
+  relatedServiceSuggestions   Json?
+  warnings                    String[]                                    @default([])
+  analyzerName                String?
+  analyzerVersion             String?
+  provider                    String?
+  model                       String?
+  promptTokens                Int?
+  completionTokens            Int?
+  totalTokens                 Int?
+  providerResultSnapshot      Json?
+  providerResultContentHash   String?
   providerUsageReservationKey String?
-  providerCheckpointedAt    DateTime?
-  errorCode                 String?
-  errorMessage              String?
-  analysisStartedAt         DateTime?
-  analyzedAt                DateTime?
-  createdAt                 DateTime                                    @default(now())
-  updatedAt                 DateTime                                    @updatedAt
+  providerCheckpointedAt      DateTime?
+  errorCode                   String?
+  errorMessage                String?
+  analysisStartedAt           DateTime?
+  analyzedAt                  DateTime?
+  createdAt                   DateTime                                    @default(now())
+  updatedAt                   DateTime                                    @updatedAt
 
   business   Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade)
   document   KnowledgeDocument           @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
@@ -2311,34 +2447,125 @@ model KnowledgeDocumentAnalysis {
 }
 
 model KnowledgeDocumentFact {
-  id             String                      @id @default(cuid())
-  businessId     String
-  documentId     String
-  versionId      String
-  analysisId     String
-  factType       KnowledgeDocumentFactType
-  label          String
-  valueText      String                      @db.Text
-  currency       String?
-  numericValue   Decimal?                    @db.Decimal(18, 4)
-  sourceKind     KnowledgeDocumentSourceKind
-  sourceLabel    String?
-  pageNumber     Int?
-  sheetName      String?
-  slideNumber    Int?
-  paragraphIndex Int?
-  rowNumber      Int?
-  sourceExcerpt  String?                     @db.Text
-  confidence     Float?
-  createdAt      DateTime                    @default(now())
+  id                     String                                  @id @default(cuid())
+  businessId             String
+  documentId             String
+  versionId              String
+  analysisId             String
+  factType               KnowledgeDocumentFactType
+  label                  String
+  valueText              String                                  @db.Text
+  currency               String?
+  numericValue           Decimal?                                @db.Decimal(18, 4)
+  sourceKind             KnowledgeDocumentSourceKind
+  sourceLabel            String?
+  pageNumber             Int?
+  sheetName              String?
+  slideNumber            Int?
+  paragraphIndex         Int?
+  rowNumber              Int?
+  sourceExcerpt          String?                                 @db.Text
+  confidence             Float?
+  governanceStatus       KnowledgeFactGovernanceStatus           @default(PENDING_REVIEW)
+  governedAt             DateTime?
+  reviewedByMembershipId String?
+  canonicalEntityType    KnowledgeGovernanceCanonicalEntityType?
+  canonicalEntityId      String?
+  canonicalField         String?
+  acceptedValue          Json?
+  createdAt              DateTime                                @default(now())
 
-  business Business                  @relation(fields: [businessId], references: [id], onDelete: Cascade)
-  document KnowledgeDocument         @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
-  version  KnowledgeDocumentVersion  @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
-  analysis KnowledgeDocumentAnalysis @relation(fields: [analysisId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+  business          Business                    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document          KnowledgeDocument           @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version           KnowledgeDocumentVersion    @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  analysis          KnowledgeDocumentAnalysis   @relation(fields: [analysisId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+  governanceReviews KnowledgeGovernanceReview[]
+  reviewedBy        BusinessMember?             @relation("KnowledgeFactReviewer", fields: [reviewedByMembershipId], references: [id], onDelete: SetNull)
 
+  @@unique([id, versionId, documentId, businessId])
   @@index([businessId, documentId, versionId])
   @@index([businessId, factType])
+  @@index([businessId, governanceStatus])
+  @@index([businessId, canonicalEntityType, canonicalEntityId])
+}
+
+model KnowledgeGovernanceReview {
+  id                      String                                 @id @default(cuid())
+  businessId              String
+  documentId              String
+  versionId               String
+  factId                  String?
+  comparisonKey           String
+  comparisonType          KnowledgeGovernanceComparisonType
+  priority                KnowledgeGovernancePriority
+  reviewStatus            KnowledgeGovernanceReviewStatus        @default(PENDING_REVIEW)
+  canonicalEntityType     KnowledgeGovernanceCanonicalEntityType
+  canonicalEntityId       String?
+  canonicalField          String?
+  existingValue           Json?
+  documentValue           Json?
+  normalizedExistingValue String?
+  normalizedDocumentValue String?
+  requiresHumanReview     Boolean                                @default(true)
+  blocksAiUse             Boolean                                @default(true)
+  relatedDocumentId       String?
+  relatedVersionId        String?
+  detectedAt              DateTime                               @default(now())
+  reviewedAt              DateTime?
+  reviewedByMembershipId  String?
+  resolutionAction        KnowledgeGovernanceResolutionAction?
+  resolutionReason        String?                                @db.Text
+  createdAt               DateTime                               @default(now())
+  updatedAt               DateTime                               @updatedAt
+
+  business             Business                                 @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  document             KnowledgeDocument                        @relation(fields: [documentId, businessId], references: [id, businessId], onDelete: Cascade)
+  version              KnowledgeDocumentVersion                 @relation(fields: [versionId, documentId, businessId], references: [id, documentId, businessId], onDelete: Cascade)
+  fact                 KnowledgeDocumentFact?                   @relation(fields: [factId, versionId, documentId, businessId], references: [id, versionId, documentId, businessId], onDelete: Cascade)
+  reviewedBy           BusinessMember?                          @relation("KnowledgeGovernanceReviewer", fields: [reviewedByMembershipId], references: [id], onDelete: SetNull)
+  resolutionOperations KnowledgeGovernanceResolutionOperation[]
+
+  @@unique([businessId, versionId, comparisonKey])
+  @@unique([id, businessId])
+  @@index([businessId, reviewStatus, priority])
+  @@index([businessId, documentId, versionId])
+  @@index([businessId, factId])
+  @@index([canonicalEntityType, canonicalEntityId])
+  @@index([relatedDocumentId, relatedVersionId])
+}
+
+model KnowledgeGovernanceResolutionOperation {
+  id                  String                                       @id @default(cuid())
+  businessId          String
+  reviewId            String
+  actorMembershipId   String
+  idempotencyKey      String
+  requestHash         String
+  action              KnowledgeGovernanceResolutionAction
+  expectedVersionId   String
+  settingsInput       Json?
+  requestInput        Json?
+  status              KnowledgeGovernanceResolutionOperationStatus @default(APPLYING)
+  resultSnapshot      Json?
+  processingStartedAt DateTime?
+  leaseOwner          String?
+  leaseExpiresAt      DateTime?
+  attemptCount        Int                                          @default(0)
+  errorCode           String?
+  errorMessage        String?
+  completedAt         DateTime?
+  createdAt           DateTime                                     @default(now())
+  updatedAt           DateTime                                     @updatedAt
+
+  business       Business                  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  review         KnowledgeGovernanceReview @relation(fields: [reviewId, businessId], references: [id, businessId], onDelete: Cascade)
+  actor          BusinessMember            @relation("KnowledgeGovernanceResolutionActor", fields: [actorMembershipId, businessId], references: [id, businessId], onDelete: Restrict)
+  createdService Service?                  @relation("GovernanceCreatedService")
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId, reviewId, status])
+  @@index([businessId, actorMembershipId])
+  @@index([status, leaseExpiresAt])
 }
 
 model KnowledgeDocumentUploadOperation {

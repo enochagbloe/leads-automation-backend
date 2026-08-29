@@ -15,6 +15,7 @@ import {
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeGovernanceStatus,
   CustomerIssueCategory,
   CustomerIssueSeverity,
   CustomerIssueStatus,
@@ -29,6 +30,7 @@ import { getAiPlanPermissions } from "./ai-usage.service";
 import { customerMemoryResolverService } from "./customer-memory/customer-memory-resolver.service";
 import { CUSTOMER_MEMORY_TRUST_CLASSIFICATION } from "./customer-memory/customer-memory-safety.service";
 import { CustomerMemoryRuntimeContext } from "./customer-memory/customer-memory.types";
+import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
 
 export type AiBusinessContext = {
   business: {
@@ -429,7 +431,9 @@ export const aiBusinessContextService = {
           document: {
             status: KnowledgeDocumentStatus.ACTIVE,
             processingStatus: KnowledgeDocumentProcessingStatus.READY,
+            governanceStatus: KnowledgeGovernanceStatus.APPROVED,
             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+            ...customerSafeKnowledgeDocumentWhere,
           },
         },
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],

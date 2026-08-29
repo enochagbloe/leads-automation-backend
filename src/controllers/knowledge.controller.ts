@@ -6,15 +6,19 @@ import { knowledgeDocumentLifecycleService } from "../services/knowledge-documen
 import { knowledgeDocumentQueryService } from "../services/knowledge-document/knowledge-document-query.service";
 import { knowledgeDocumentReplacementService } from "../services/knowledge-document/knowledge-document-replacement.service";
 import { knowledgeDocumentReviewService } from "../services/knowledge-document/knowledge-document-review.service";
+import { knowledgeGovernanceResolutionService } from "../services/knowledge-document/knowledge-governance-resolution.service";
 import { AppError } from "../utils/errors";
 import { requestMetadata } from "../utils/request";
 import {
   ApproveKnowledgeDocumentReviewInput,
+  CompleteKnowledgeDocumentReplacementInput,
   KnowledgeArticleListQuery,
   KnowledgeDocumentListQuery,
   KnowledgeDocumentVersionListQuery,
   KnowledgeSearchQuery,
   RejectKnowledgeDocumentReviewInput,
+  ResolveKnowledgeGovernanceReviewBatchInput,
+  ResolveKnowledgeGovernanceReviewInput,
 } from "../validation/knowledge.schemas";
 
 function actor(req: Request) {
@@ -162,6 +166,41 @@ export const knowledgeController = {
     actor(req),
     param(req, "documentId"),
     req.body as RejectKnowledgeDocumentReviewInput,
+    requestMetadata(req),
+  )),
+  resolveGovernanceReview: async (req, res) => res.json(await knowledgeGovernanceResolutionService.resolve(
+    actor(req),
+    param(req, "reviewId"),
+    req.body as ResolveKnowledgeGovernanceReviewInput,
+    req.get("Idempotency-Key"),
+    requestMetadata(req),
+  )),
+  resolveGovernanceReviewsBatch: async (req, res) => res.json(await knowledgeGovernanceResolutionService.resolveBatch(
+    actor(req),
+    req.body as ResolveKnowledgeGovernanceReviewBatchInput,
+    requestMetadata(req),
+  )),
+  completeDocumentReplacement: async (req, res) => res.json(await knowledgeGovernanceResolutionService.completeReplacement(
+    actor(req),
+    param(req, "documentId"),
+    req.body as CompleteKnowledgeDocumentReplacementInput,
+    requestMetadata(req),
+  )),
+  permanentlyDeleteDocument: async (req, res) => res.json(await knowledgeDocumentLifecycleService.permanentlyDelete(
+    actor(req),
+    param(req, "documentId"),
+    req.body.confirmPermanentDelete,
+    requestMetadata(req),
+  )),
+  compareDocumentReplacement: async (req, res) => res.json(await knowledgeGovernanceResolutionService.compareReplacement(
+    actor(req),
+    param(req, "documentId"),
+    param(req, "reviewId"),
+    requestMetadata(req),
+  )),
+  documentReviewDetails: async (req, res) => res.json(await knowledgeGovernanceResolutionService.reviewDetails(
+    actor(req),
+    param(req, "documentId"),
     requestMetadata(req),
   )),
 

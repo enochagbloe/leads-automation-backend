@@ -1,4 +1,4 @@
-import { AuditAction, PlanCode } from "@prisma/client";
+import { AuditAction, PlanCode, Prisma } from "@prisma/client";
 import { AppointmentActor } from "./appointment.types";
 import { AppointmentAutoConfirmSettingsInput, AppointmentSettingsInput } from "../../validation/appointment.schemas";
 import { AuditInput, auditService } from "../audit.service";
@@ -10,6 +10,10 @@ import { invalidateAppointmentCaches } from "./appointment-cache.service";
 import { requireManager } from "./appointment-access.service";
 import { activeSubscription, assertAppointmentConfirmationModeAllowed, validateBusiness } from "./appointment-validation.service";
 import { json } from "./appointment-record.service";
+
+export type AppointmentSettingsMutationGuard = {
+  assertCurrent(current: Readonly<{ appointmentConfirmationMode: string }>): void;
+};
 
 export async function getAutoConfirmSettings(actor: AppointmentActor) {
     const [business, subscription] = await Promise.all([
@@ -88,33 +92,54 @@ export async function updateAutoConfirmSettings(actor: AppointmentActor, input: 
     };
 }
 
-export async function updateSettings(actor: AppointmentActor, input: AppointmentSettingsInput, context: Omit<AuditInput, "action">) {
+export async function updateSettings(
+  actor: AppointmentActor,
+  input: AppointmentSettingsInput,
+  context: Omit<AuditInput, "action">,
+  guard?: AppointmentSettingsMutationGuard,
+) {
     requireManager(actor);
     const subscription = await activeSubscription(actor);
     assertAppointmentConfirmationModeAllowed(subscription.plan.code, input.appointmentConfirmationMode);
-    const existing = await validateBusiness(actor);
-    const updated = await prisma.business.update({
-      where: { id: actor.businessId },
-      data: { appointmentConfirmationMode: input.appointmentConfirmationMode },
-      select: { id: true, appointmentConfirmationMode: true, updatedAt: true },
-    });
-    await Promise.all([
-      invalidateAppointmentCaches(actor.businessId),
-      auditService.log({
-        ...context,
-        action: AuditAction.APPOINTMENT_CONFIRMATION_MODE_UPDATED,
-        businessId: actor.businessId,
-        userId: actor.userId,
-        metadata: json({
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`
+        SELECT "id" FROM "Business"
+        WHERE "id" = ${actor.businessId}
+          AND "businessAccountId" = ${actor.businessAccountId}
+          AND "deletedAt" IS NULL
+        FOR UPDATE
+      `);
+      const existing = await tx.business.findFirst({
+        where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
+        select: { appointmentConfirmationMode: true },
+      });
+      if (!existing) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+      guard?.assertCurrent(existing);
+      const next = await tx.business.update({
+        where: { id: actor.businessId },
+        data: { appointmentConfirmationMode: input.appointmentConfirmationMode },
+        select: { id: true, appointmentConfirmationMode: true, updatedAt: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          ...context,
+          action: AuditAction.APPOINTMENT_CONFIRMATION_MODE_UPDATED,
           businessId: actor.businessId,
-          oldValue: existing.appointmentConfirmationMode,
-          newValue: updated.appointmentConfirmationMode,
-          confirmationMode: updated.appointmentConfirmationMode,
-          actorUserId: actor.userId,
+          userId: actor.userId,
           actorMembershipId: actor.membershipId,
-        }),
-      }),
-    ]);
+          metadata: json({
+            businessId: actor.businessId,
+            oldValue: existing.appointmentConfirmationMode,
+            newValue: next.appointmentConfirmationMode,
+            confirmationMode: next.appointmentConfirmationMode,
+            actorUserId: actor.userId,
+            actorMembershipId: actor.membershipId,
+          }),
+        },
+      });
+      return next;
+    });
+    await invalidateAppointmentCaches(actor.businessId);
     realtimeService.publish({
       type: "business.appointment.updated",
       businessId: actor.businessId,

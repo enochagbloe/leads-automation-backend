@@ -1,33 +1,1362 @@
 
 
 
-5. **P2: Unsupported-analysis completion ignores document/version update counts.**  
-The job becomes `COMPLETED` even if deletion or lifecycle changes prevent the document and version from entering `NEEDS_REVIEW`.
+# BizReply Knowledge Hub V2 — Round 3.3
 
-[completion transaction](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-worker.service.ts:447)
+## AI Runtime Safety + Outdated Knowledge + Notifications + Final Integration
 
-Required fix: verify both update counts before completing the job.
+You are working on the existing **BizReply AI backend**.
 
-6. **P2: Suspended businesses can still be processed.**  
-The worker checks document ownership and deletion, but analysis only verifies that the business exists and is not deleted. `BusinessStatus.SUSPENDED` is not rejected.
+This is **Round 3.3 of Knowledge Hub V2**.
 
-[worker validation](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-worker.service.ts)  
-[business lookup](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-analysis.service.ts)
+Round 3.1 already implemented:
 
-7. **P2: Round 2 classification fields are incomplete.**  
-The specification requires `classificationReason` and `classificationConfidence`; neither is persisted.
+* fact-level governance
+* document governance
+* comparison records
+* `MATCH`
+* `CONFLICT`
+* `MISSING_IN_SETTINGS`
+* `MISSING_IN_DOCUMENT`
+* review priorities
+* Settings/canonical entity bindings
+* replacement detection
 
-[analysis model](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/prisma/schema.prisma)
+Round 3.2 already implemented:
 
-**Verification**
+* human review
+* `UPDATE_SETTINGS`
+* `KEEP_CURRENT_SETTINGS`
+* `ADD_TO_SETTINGS`
+* `APPROVE_KNOWLEDGE_ONLY`
+* fact-level resolution
+* Settings synchronization
+* document approval recalculation
+* archive/restore
+* replacement lifecycle
+* permanent deletion controls
+* provenance/audit
+* stale-review protection
 
-- TypeScript build: passed
-- Test typecheck: passed
-- 64 focused policy/unit tests: passed
-- 6 database integration suites: passed
-- Version-replacement integration suite: failed twice
-- Prisma: 99 migrations found, database up to date
+Do not rebuild these systems.
 
-**Final Verdict: FAIL**
+Round 3.3 connects governance to the **live AI runtime** and ensures unresolved or outdated knowledge can never silently reach customers.
 
-Do not deploy Round 2 to live production yet. The uncertain-analysis `READY` transition, unrecoverable AI reservation state, and failing replacement concurrency path are release blockers.
+---
+
+# 1. OBJECTIVE
+
+The question Round 3.3 must answer is:
+
+> “Now that BizReply knows which information is approved, conflicting or outdated, how does the AI safely use that information during real customer conversations?”
+
+The runtime flow must become:
+
+```text
+Customer message
+        ↓
+Conversation runtime
+        ↓
+Build business context
+        ↓
+Load canonical Settings
+        ↓
+Load approved Knowledge Hub facts
+        ↓
+Apply governance safety filter
+        ↓
+Check unresolved conflict guards
+        ↓
+Safe?
+   ↙          ↘
+ yes          no
+ ↓             ↓
+AI reply    human handoff
+```
+
+The AI must never be responsible for deciding governance dynamically.
+
+Governance must be enforced **before the model receives authoritative context**.
+
+---
+
+# 2. AUTHORITATIVE KNOWLEDGE POLICY
+
+Define a deterministic runtime policy.
+
+Facts with these states may potentially be used:
+
+```text
+APPROVED
+```
+
+provided they are:
+
+* current
+* not superseded
+* not archived
+* not outdated
+* not blocked by unresolved conflict
+* valid for the current business
+* valid for the currently active document/version
+
+Facts with these states must NOT be supplied as authoritative customer-facing knowledge:
+
+```text
+PENDING_REVIEW
+CONFLICT
+REJECTED
+SUPERSEDED
+ARCHIVED
+OUTDATED
+```
+
+Do not rely only on an LLM prompt saying:
+
+> Ignore conflicting information.
+
+Unsafe information must be filtered in code before context generation.
+
+---
+
+# 3. SETTINGS REMAIN AUTHORITATIVE — WITH ONE IMPORTANT EXCEPTION
+
+Normally structured business Settings are canonical.
+
+Example:
+
+```text
+Service:
+Consultation = GHS 500
+```
+
+The AI may use this confirmed Settings value.
+
+However, there is a critical exception.
+
+If a newly uploaded document creates an unresolved conflict against that field:
+
+```text
+Settings:
+Consultation = GHS 400
+
+New document:
+Consultation = GHS 500
+
+Review:
+CONFLICT
+UNRESOLVED
+```
+
+the system must NOT blindly give GHS 400 to the AI.
+
+The new document may represent an updated price waiting for human confirmation.
+
+The affected field must temporarily become:
+
+```text
+RUNTIME GUARDED
+```
+
+until the conflict is resolved.
+
+---
+
+# 4. KNOWLEDGE CONFLICT GUARD
+
+Implement a runtime governance guard at canonical field/fact granularity.
+
+Conceptually:
+
+```text
+businessId
+canonicalEntityType
+canonicalEntityId
+canonicalField
+reviewItemId
+priority
+status
+blocksAiUse
+requiresHumanReview
+```
+
+Do not necessarily create another table if Round 3.1 already provides enough indexed review data to resolve this efficiently.
+
+The system needs a performant way to answer:
+
+> “Is this particular business fact currently unsafe for AI use?”
+
+Example:
+
+```text
+Service: Consultation
+Field: basePrice
+Guard: unresolved CRITICAL conflict
+```
+
+The guard applies only to that field.
+
+Do NOT disable:
+
+* the entire Service
+* the entire document
+* the entire Knowledge Hub
+* the entire AI assistant
+
+unless the conflict actually affects everything required for the response.
+
+---
+
+# 5. PARTIAL AI AVAILABILITY
+
+Example:
+
+```text
+Document contains 20 facts
+
+18 APPROVED
+2 CONFLICT
+```
+
+The AI may continue using the 18 approved facts.
+
+It must avoid the two unresolved facts.
+
+If the customer asks:
+
+> “Where are you located?”
+
+and location is approved:
+
+```text
+AI answers normally.
+```
+
+If the customer asks:
+
+> “How much is consultation?”
+
+and consultation price is conflicted:
+
+```text
+AI does not guess.
+```
+
+This fact-level behavior is mandatory.
+
+---
+
+# 6. HUMAN HANDOFF FOR KNOWLEDGE CONFLICT
+
+Use BizReply's **existing conversation human-review/handoff infrastructure**.
+
+Do not build a separate Knowledge Hub chat escalation system.
+
+Add an appropriate review reason such as:
+
+```text
+KNOWLEDGE_CONFLICT
+```
+
+to the existing human-review taxonomy if one does not already exist.
+
+When a customer requests a guarded fact:
+
+```text
+Customer:
+"How much is consultation?"
+```
+
+and the price is conflicted:
+
+```text
+do not answer GHS 400
+do not answer GHS 500
+do not tell the customer both values
+do not guess
+```
+
+Trigger human review/handoff.
+
+---
+
+# 7. STAFF-FACING HANDOFF CONTEXT
+
+Internal review information should explain exactly why the AI stopped.
+
+Example:
+
+```text
+Human review required
+
+Reason:
+Customer requested information that currently has an unresolved Knowledge Hub conflict.
+
+Affected information:
+Consultation price
+
+Current Settings:
+GHS 400
+
+New document:
+GHS 500
+
+Source:
+2026 Service Catalogue.pdf
+Page 3
+
+Review Item:
+<reviewItemId>
+```
+
+This internal information may contain the compared values.
+
+Customer-facing messages should not expose internal review metadata.
+
+Follow existing BizReply safe handoff wording.
+
+---
+
+# 8. AFTER CONFLICT RESOLUTION
+
+Suppose staff resolves:
+
+```text
+Consultation = GHS 500
+```
+
+through Round 3.2.
+
+After successful resolution:
+
+```text
+review resolved
+        ↓
+runtime guard removed
+        ↓
+AI business context invalidated
+        ↓
+updated Settings available
+        ↓
+AI can use GHS 500
+```
+
+Do not require application restart.
+
+The change must propagate through existing cache/context invalidation.
+
+---
+
+# 9. MANUAL SETTINGS EDIT → OUTDATED KNOWLEDGE
+
+This is a core Round 3.3 requirement.
+
+Example:
+
+Previously approved document:
+
+```text
+Consultation = GHS 500
+```
+
+Settings synchronized:
+
+```text
+Consultation = GHS 500
+```
+
+Later the owner manually changes Settings:
+
+```text
+Consultation = GHS 550
+```
+
+The manual Settings change is an explicit authenticated human action.
+
+Therefore:
+
+```text
+GHS 550 = authoritative current Settings
+```
+
+The old document-linked fact must become:
+
+```text
+OUTDATED
+aiUsable = false
+```
+
+The related document should receive an:
+
+```text
+OUTDATED
+```
+
+governance condition/status where appropriate.
+
+Reason:
+
+```text
+SETTINGS_CHANGED_AFTER_APPROVAL
+```
+
+---
+
+# 10. OUTDATED IS DIFFERENT FROM CONFLICT
+
+These two scenarios must behave differently.
+
+## Unresolved uploaded-document conflict
+
+```text
+Settings = 400
+New document = 500
+Human has not reviewed
+```
+
+Runtime:
+
+```text
+Neither disputed value should be confidently used.
+Human handoff if customer needs it.
+```
+
+## Manual Settings update after previous approval
+
+```text
+Approved document = 500
+Owner manually changes Settings = 550
+```
+
+Runtime:
+
+```text
+Settings 550 is authoritative.
+Old document fact becomes OUTDATED.
+AI may use 550.
+```
+
+This distinction is extremely important.
+
+---
+
+# 11. SETTINGS → KNOWLEDGE RECONCILIATION
+
+Round 3.3 must hook into canonical Settings mutation flows.
+
+At minimum inspect:
+
+* Service updates
+* pricing changes
+* Service duration changes
+* Business Profile changes
+* Business Availability changes
+* appointment/service rule changes where mapped
+
+After a confirmed Settings change:
+
+```text
+Settings mutation succeeds
+        ↓
+find approved knowledge bindings
+        ↓
+compare approved linked value
+        ↓
+if still same:
+nothing required
+
+if different:
+fact → OUTDATED
+document warning/status → OUTDATED
+reason → SETTINGS_CHANGED_AFTER_APPROVAL
+```
+
+Do not re-run the full AI document-analysis pipeline for every Settings edit.
+
+Use deterministic existing bindings from Round 3.1/3.2.
+
+---
+
+# 12. DOCUMENT OUTDATED SEMANTICS
+
+If one fact becomes outdated:
+
+```text
+Document:
+20 facts
+1 outdated
+19 still valid
+```
+
+Do NOT automatically disable all 20 facts.
+
+The affected fact:
+
+```text
+OUTDATED
+```
+
+The other 19 approved and still-valid facts may remain usable.
+
+Document-level `OUTDATED` should act as a warning that some knowledge requires review, not necessarily as a blanket runtime ban.
+
+Runtime authority remains fact-level.
+
+---
+
+# 13. OUTDATED REVIEW ITEM
+
+When Settings change causes linked knowledge to become outdated, create or update a review/warning item containing:
+
+```text
+document
+fact
+canonical entity
+canonical field
+old document value
+new Settings value
+reason
+priority
+detectedAt
+```
+
+The UI should later be able to show:
+
+> This document contains information that no longer matches your current Settings.
+
+The user may later:
+
+* update document knowledge from Settings
+* keep it as historical information
+* upload a replacement document
+* archive the old document
+
+Do not silently modify the source document itself.
+
+---
+
+# 14. AI CONTEXT BUILDER INTEGRATION
+
+Inspect the existing:
+
+```text
+ai-context-builder.service.ts
+business-knowledge services
+knowledge services
+retrieval/embedding integration
+```
+
+Add governance filtering at the correct layer.
+
+The final context builder must not return unsafe facts as authoritative knowledge.
+
+Prefer a structure conceptually like:
+
+```text
+Business Settings
+Approved Knowledge
+Runtime Knowledge Guards
+```
+
+before generating the final LLM context.
+
+Do not scatter governance checks randomly throughout prompts.
+
+Create a reusable deterministic policy/service.
+
+---
+
+# 15. EMBEDDING / RETRIEVAL SAFETY
+
+If existing document embeddings are already generated:
+
+An archived/outdated/conflicted fact must not become customer-authoritative simply because its source document exists in the embedding store.
+
+Round 3.3 must ensure retrieval respects governance.
+
+Possible approaches depend on existing implementation:
+
+* metadata filtering
+* authority filtering after retrieval
+* document/fact eligibility checks
+* removal/resync from runtime retrieval index
+
+Choose the least disruptive solution compatible with the current architecture.
+
+Do NOT begin the full Round 9B RAG architecture here.
+
+---
+
+# 16. KNOWLEDGE SOURCE PRECEDENCE
+
+Use the following conceptual precedence:
+
+```text
+1. Current human-confirmed structured Settings
+
+2. Approved Knowledge Hub facts linked to current Settings
+
+3. Approved standalone Knowledge Hub information
+
+4. Customer memory / conversation-specific confirmed context where applicable
+```
+
+But:
+
+```text
+unresolved governance conflict
+```
+
+must block use of the specific affected field regardless of normal precedence.
+
+Unreviewed extraction is never authoritative.
+
+---
+
+# 17. REVIEW SUMMARY API
+
+Provide a backend summary that Dashboard/Knowledge Hub can consume efficiently.
+
+Return concepts such as:
+
+```text
+totalUnresolved
+critical
+high
+normal
+outdatedDocuments
+conflictedDocuments
+replacementSuggestions
+```
+
+Example:
+
+```json
+{
+  "totalUnresolved": 7,
+  "priority": {
+    "critical": 3,
+    "high": 2,
+    "normal": 2
+  },
+  "outdatedDocuments": 1,
+  "replacementSuggestions": 1
+}
+```
+
+Follow existing API response conventions.
+
+---
+
+# 18. KNOWLEDGE HUB REVIEW QUEUE
+
+Ensure backend can provide a filterable review queue.
+
+Filters should support:
+
+```text
+priority
+status
+comparisonType
+factType
+documentId
+outdated
+```
+
+Return enough information for frontend to render:
+
+```text
+Service Pricing
+CRITICAL
+
+Consultation
+Current: GHS 400
+Document: GHS 500
+
+Source:
+2026 Pricing.pdf
+Page 2
+```
+
+Do not require frontend to make dozens of joins.
+
+---
+
+# 19. SETTINGS MISMATCH INDICATORS
+
+Relevant Settings endpoints should expose enough information for frontend to know when the field has:
+
+```text
+unresolved conflict
+outdated linked knowledge
+```
+
+Do not necessarily pollute every Settings DTO with large Knowledge Hub objects.
+
+A lightweight structure is sufficient.
+
+Example:
+
+```json
+{
+  "knowledgeGovernance": {
+    "hasConflict": true,
+    "priority": "CRITICAL",
+    "reviewItemId": "..."
+  }
+}
+```
+
+Or expose a dedicated lookup endpoint.
+
+Choose architecture consistent with existing frontend/backend patterns.
+
+---
+
+# 20. CRITICAL CONFLICT EMAIL
+
+When Round 3.1 detects a new unresolved `CRITICAL` conflict, Round 3.3 must notify the business owner through existing email/notification infrastructure.
+
+Examples:
+
+```text
+price conflict
+payment instruction conflict
+critical appointment rule conflict
+service availability conflict
+```
+
+Do not send the email within the database transaction.
+
+Persist first.
+
+Then dispatch/queue notification.
+
+The email should communicate:
+
+* important business information needs review
+* affected category
+* document
+* safe link/reference to Knowledge Hub if current email infrastructure supports it
+
+Do not include sensitive full document contents unnecessarily.
+
+---
+
+# 21. EMAIL DEDUPLICATION
+
+Worker retries must not spam users.
+
+Persist notification identity/state.
+
+Equivalent uniqueness:
+
+```text
+reviewItemId
+notificationType
+recipient/business
+```
+
+A newly detected critical conflict should generate one initial notification.
+
+Do not implement aggressive repeating reminders in this round unless an existing notification framework already safely supports them.
+
+---
+
+# 22. REALTIME EVENTS
+
+Publish realtime events for:
+
+```text
+business.knowledge.review.created
+business.knowledge.conflict.detected
+business.knowledge.conflict.resolved
+business.knowledge.document.outdated
+business.knowledge.fact.outdated
+business.knowledge.settings_reconciled
+business.knowledge.runtime_guard.updated
+```
+
+Use current naming conventions where equivalent events already exist.
+
+Payloads should be lightweight and safe.
+
+Examples:
+
+```text
+businessId
+reviewItemId
+documentId
+factId
+priority
+status
+updatedAt
+```
+
+Do not send full source document content over websocket unnecessarily.
+
+---
+
+# 23. DASHBOARD WARNINGS
+
+Backend must support a dashboard experience such as:
+
+```text
+Knowledge needs attention
+
+3 critical issues may affect customer replies.
+
+• Consultation price conflict
+• Weekend business hours conflict
+• Appointment deposit rule conflict
+```
+
+This is backend support only.
+
+Do not implement frontend UI in this task.
+
+---
+
+# 24. CONVERSATION SAFETY CHECK
+
+Integrate governance safety into the live AI response pipeline at the correct point.
+
+Before generating a customer-facing answer:
+
+```text
+Identify required business facts
+        ↓
+check runtime guards
+        ↓
+if required fact blocked:
+handoff
+```
+
+Do not invoke handoff merely because *some* unrelated conflict exists elsewhere in Knowledge Hub.
+
+The conflict must be relevant to the requested information.
+
+Use deterministic matching where possible.
+
+Avoid making another AI call simply to determine whether every conflict is relevant if existing intent/tool/context architecture can identify the requested structured entity.
+
+---
+
+# 25. TOOL / FUNCTION SAFETY
+
+If BizReply's AI uses tools/functions for:
+
+* Services
+* appointments
+* business information
+* pricing
+
+those tools must also respect governance guards.
+
+It is insufficient to filter only prompt context if an AI tool can still retrieve:
+
+```text
+Consultation price = 400
+```
+
+while that field has an unresolved conflict.
+
+Create the safety check at a reusable service/domain layer so both:
+
+```text
+prompt context
+AI tools
+```
+
+can enforce it.
+
+---
+
+# 26. APPOINTMENT SAFETY
+
+If an unresolved conflict affects an operational booking rule such as:
+
+* service duration
+* availability
+* deposit requirement
+* manager approval
+* appointment confirmation mode
+* service availability
+
+the AI must not execute a booking decision that depends on the disputed field.
+
+Use existing appointment human-review/escalation behavior.
+
+Do not create unsafe appointments using stale operational rules.
+
+---
+
+# 27. CUSTOMER MEMORY
+
+Do not mark unresolved Knowledge Hub information as customer memory truth.
+
+Example:
+
+```text
+Conflicted price = GHS 500
+```
+
+must not be persisted as confirmed memory merely because it appeared in a document or temporary AI context.
+
+Existing customer memory should continue operating independently.
+
+Do not redesign customer memory in Round 3.3.
+
+---
+
+# 28. CACHE INVALIDATION
+
+When any of these events occur:
+
+```text
+conflict created
+conflict resolved
+fact approved
+fact outdated
+document archived
+document restored
+Settings synchronized
+manual Settings change invalidates fact
+```
+
+invalidate the appropriate:
+
+```text
+AI business context
+Business Knowledge cache
+Service/Profile/Availability caches where applicable
+retrieval eligibility cache
+```
+
+Reuse existing invalidation helpers.
+
+Avoid broad global cache invalidation.
+
+---
+
+# 29. MULTI-TENANCY
+
+Runtime conflict checks must always include `businessId`.
+
+Never allow:
+
+```text
+Business A conflict
+```
+
+to block or influence:
+
+```text
+Business B AI runtime
+```
+
+Every guard/review/knowledge lookup must remain tenant-scoped.
+
+Add tests.
+
+---
+
+# 30. PERFORMANCE
+
+This logic runs in the customer-message path.
+
+Do not make every AI reply perform:
+
+* full Knowledge Hub scans
+* full document comparisons
+* expensive unindexed queries
+* document re-analysis
+
+Runtime checks should rely on persisted Round 3.1 governance results.
+
+Ensure relevant indexes exist for queries such as:
+
+```text
+businessId
+status
+blocksAiUse
+canonicalEntityType
+canonicalEntityId
+canonicalField
+priority
+```
+
+Consider a short-lived tenant-scoped cache if justified, with reliable invalidation.
+
+Correctness is more important than premature caching.
+
+---
+
+# 31. FAILURE BEHAVIOR
+
+If the governance safety service itself fails unexpectedly while resolving a potentially critical business fact:
+
+Prefer conservative behavior.
+
+For customer-facing sensitive operational information:
+
+```text
+price
+payments
+booking rules
+availability
+refund/cancellation
+```
+
+do not guess.
+
+Use existing human escalation if safety cannot be established.
+
+For unrelated general conversation, do not unnecessarily disable the entire system.
+
+---
+
+# 32. AUDIT
+
+Audit significant runtime governance events where appropriate.
+
+Examples:
+
+```text
+KNOWLEDGE_FACT_MARKED_OUTDATED
+KNOWLEDGE_RUNTIME_CONFLICT_BLOCKED
+KNOWLEDGE_SETTINGS_RECONCILED
+```
+
+Do not create an audit log for every harmless AI read if that would create excessive database growth.
+
+Human decisions remain fully audited from Round 3.2.
+
+Runtime handoff caused by knowledge conflict should be traceable through existing conversation/human-review records.
+
+---
+
+# 33. TESTS — REQUIRED
+
+Implement serious tests.
+
+### Approved fact usable
+
+```text
+Fact = APPROVED
+No guard
+```
+
+Expected:
+
+AI context includes it.
+
+---
+
+### Conflict excluded
+
+```text
+Fact = CONFLICT
+```
+
+Expected:
+
+not authoritative in AI context.
+
+---
+
+### Outdated excluded
+
+```text
+Fact = OUTDATED
+```
+
+Expected:
+
+old value unavailable.
+
+---
+
+### Archived excluded
+
+Expected:
+
+archived information unavailable to runtime authority.
+
+---
+
+### Superseded excluded
+
+Expected:
+
+old replaced fact unavailable.
+
+---
+
+### Partial knowledge
+
+```text
+18 approved
+2 conflicted
+```
+
+Expected:
+
+18 remain usable.
+
+---
+
+### Unrelated conflict
+
+Price conflict exists.
+
+Customer asks business location.
+
+Expected:
+
+AI answers location normally.
+
+---
+
+### Relevant conflict
+
+Price conflict exists.
+
+Customer asks price.
+
+Expected:
+
+human handoff.
+
+No disputed value returned.
+
+---
+
+### Conflict resolved
+
+Human resolves price.
+
+Expected:
+
+guard removed and current authoritative value available.
+
+---
+
+### Manual Settings update
+
+```text
+approved document = 500
+Settings manually changed = 550
+```
+
+Expected:
+
+```text
+old fact OUTDATED
+document warning OUTDATED
+AI uses 550
+```
+
+---
+
+### Manual unrelated Settings update
+
+Document contains price + address.
+
+Owner changes address only.
+
+Expected:
+
+address-linked fact outdated.
+
+Price fact remains approved/usable.
+
+---
+
+### Critical notification
+
+New critical conflict.
+
+Expected:
+
+owner notification generated.
+
+---
+
+### Critical notification retry
+
+Processing retries.
+
+Expected:
+
+no duplicate email.
+
+---
+
+### Runtime tool safety
+
+AI Service lookup/tool must not expose guarded price.
+
+---
+
+### Appointment conflict
+
+Booking rule conflict exists.
+
+Expected:
+
+AI does not auto-book using disputed configuration.
+
+---
+
+### Tenant isolation
+
+Business A guards do not affect Business B.
+
+---
+
+### Governance service error
+
+Unable to establish safety for critical fact.
+
+Expected:
+
+safe escalation rather than guessing.
+
+---
+
+### Cache invalidation
+
+Conflict resolved.
+
+Expected:
+
+subsequent AI runtime sees new authority without restart.
+
+---
+
+# 34. FINAL ROUND 3 END-TO-END TEST
+
+Build an integration scenario:
+
+```text
+1. Service Settings:
+   Consultation = GHS 400
+
+2. Upload pricing document:
+   Consultation = GHS 500
+
+3. Round 3.1:
+   CONFLICT
+   CRITICAL
+
+4. Round 3.3:
+   runtime guard active
+
+5. Customer asks:
+   "How much is consultation?"
+
+6. Expected:
+   AI does not quote 400 or 500
+   human handoff created
+
+7. Owner reviews through Round 3.2:
+   UPDATE_SETTINGS → 500
+
+8. Expected:
+   conflict resolved
+   guard removed
+   AI context invalidated
+
+9. Customer asks again:
+   "How much is consultation?"
+
+10. Expected:
+    GHS 500 is available as authoritative
+
+11. Owner later manually changes:
+    Settings → GHS 550
+
+12. Expected:
+    linked old document fact → OUTDATED
+    document flagged OUTDATED
+    AI uses Settings GHS 550
+    dashboard/Knowledge Hub warning exists
+```
+
+This test represents the core Round 3 product promise.
+
+---
+
+# 35. OUT OF SCOPE
+
+Do NOT implement:
+
+* full RAG/pgvector redesign
+* Knowledge Hub Round 9B
+* Business Assistant
+* frontend UI
+* WhatsApp onboarding
+* conversation Neon → S3 archival
+* unrelated appointment redesign
+* new notification platforms
+* unrelated code cleanup
+
+Round 3.3 completes governance integration only.
+
+---
+
+# 36. DEFINITION OF DONE
+
+Round 3.3 is complete when:
+
+```text
+Approved information
+→ AI can use safely
+
+Unresolved conflicting information
+→ affected fact blocked
+
+Customer asks for blocked information
+→ existing human handoff
+
+Unrelated approved information
+→ AI continues working normally
+
+Human resolves conflict
+→ runtime updates immediately
+
+Owner manually updates Settings
+→ old linked knowledge becomes OUTDATED
+→ current Settings becomes authoritative
+
+Critical governance problems
+→ dashboard/review data + realtime + owner email
+
+Archived/outdated/conflicted knowledge
+→ never silently leaks into customer replies
+```
+
+---
+
+# 37. DELIVERY REPORT
+
+When complete, return:
+
+1. new/modified runtime governance services
+2. AI context-builder changes
+3. AI tool/function changes
+4. conversation handoff integration
+5. Settings → Knowledge reconciliation implementation
+6. outdated-state behavior
+7. review-summary APIs
+8. notification implementation
+9. realtime events
+10. cache invalidation strategy
+11. database/index changes
+12. all tests added and their results
+13. anything that should explicitly move to Round 4
+
+Do not begin Round 4 as part of this implementation.
+
+Do not declare Round 3 complete if an unresolved critical Knowledge Hub conflict can still cause the AI to confidently give a customer a disputed value.

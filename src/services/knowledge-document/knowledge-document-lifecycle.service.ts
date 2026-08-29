@@ -2,11 +2,13 @@ import crypto from "node:crypto";
 import {
   AuditAction,
   BusinessRole,
+  KnowledgeDocumentArchiveReason,
   KnowledgeDocumentProcessingJobStatus,
   KnowledgeDocumentProcessingStatus,
   KnowledgeDocumentRetentionStatus,
   KnowledgeDocumentStorageDeletionJobStatus,
   KnowledgeDocumentStatus,
+  KnowledgeGovernanceStatus,
 } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
@@ -16,6 +18,11 @@ import { aiUsageService } from "../ai-usage.service";
 import { AuditInput, auditService } from "../audit.service";
 import { knowledgeEmbeddingService } from "../knowledge-embedding.service";
 import { realtimeService } from "../realtime.service";
+import { storageService } from "../storage.service";
+import {
+  lockKnowledgeDocumentGovernance,
+  lockKnowledgeDocumentLifecycleChange,
+} from "./knowledge-document-governance-lock.service";
 import { assertKnowledgeDocumentCapacity } from "./knowledge-document-quota.service";
 import {
   assertCanManageKnowledgeDocuments,
@@ -80,12 +87,28 @@ async function refreshRuntimeKnowledge(actor: KnowledgeDocumentActor, documentId
 }
 
 export const knowledgeDocumentLifecycleService = {
-  async archive(actor: KnowledgeDocumentActor, documentId: string, context: Omit<AuditInput, "action">) {
+  async archive(
+    actor: KnowledgeDocumentActor,
+    documentId: string,
+    context: Omit<AuditInput, "action">,
+    archiveReason = KnowledgeDocumentArchiveReason.USER_ARCHIVED,
+  ) {
     await assertCanManageKnowledgeDocuments(actor, context, "KNOWLEDGE_DOCUMENT_ARCHIVE");
     await assertDocumentScope(actor, documentId, context, "KNOWLEDGE_DOCUMENT_ARCHIVE");
-    const changed = await prisma.knowledgeDocument.updateMany({
-      where: { id: documentId, businessId: actor.businessId, status: KnowledgeDocumentStatus.ACTIVE, deletedAt: null },
-      data: { status: KnowledgeDocumentStatus.ARCHIVED, archivedAt: new Date() },
+    const changed = await prisma.$transaction(async (tx) => {
+      await lockKnowledgeDocumentLifecycleChange(tx, actor.businessId, documentId);
+      const archivedAt = new Date();
+      const document = await tx.knowledgeDocument.updateMany({
+        where: { id: documentId, businessId: actor.businessId, status: KnowledgeDocumentStatus.ACTIVE, deletedAt: null },
+        data: { status: KnowledgeDocumentStatus.ARCHIVED, archivedAt, archiveReason, governanceStatus: KnowledgeGovernanceStatus.ARCHIVED },
+      });
+      if (document.count === 1) {
+        await tx.knowledgeDocumentVersion.updateMany({
+          where: { businessId: actor.businessId, documentId, isActive: true },
+          data: { governanceStatus: KnowledgeGovernanceStatus.ARCHIVED },
+        });
+      }
+      return document;
     });
     if (changed.count !== 1) throw new AppError(404, "Active knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
     await log(actor, context, AuditAction.KNOWLEDGE_DOCUMENT_ARCHIVED, documentId);
@@ -98,17 +121,69 @@ export const knowledgeDocumentLifecycleService = {
     await assertCanManageKnowledgeDocuments(actor, context, "KNOWLEDGE_DOCUMENT_RESTORE");
     await assertDocumentScope(actor, documentId, context, "KNOWLEDGE_DOCUMENT_RESTORE");
     const restored = await prisma.$transaction(async (tx) => {
+      await lockKnowledgeDocumentLifecycleChange(tx, actor.businessId, documentId);
       const document = await tx.knowledgeDocument.findFirst({
         where: { id: documentId, businessId: actor.businessId, status: KnowledgeDocumentStatus.ARCHIVED, deletedAt: null },
-        select: { id: true, fileSize: true },
+        select: {
+          id: true,
+          fileSize: true,
+          activeVersion: { select: { id: true, storageObjectKey: true } },
+        },
       });
       if (!document) throw new AppError(404, "Archived knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
       await assertKnowledgeDocumentCapacity(tx, actor, 0);
+      await tx.knowledgeDocumentVersion.updateMany({
+        where: { businessId: actor.businessId, documentId, isActive: true },
+        data: { governanceStatus: KnowledgeGovernanceStatus.REVIEW_REQUIRED },
+      });
+      if (document.activeVersion?.storageObjectKey) {
+        await tx.knowledgeDocumentProcessingJob.upsert({
+          where: { versionId: document.activeVersion.id },
+          create: {
+            businessId: actor.businessId,
+            documentId,
+            versionId: document.activeVersion.id,
+            status: KnowledgeDocumentProcessingJobStatus.QUEUED,
+            nextAttemptAt: new Date(),
+          },
+          update: {
+            status: KnowledgeDocumentProcessingJobStatus.QUEUED,
+            attemptCount: 0,
+            nextAttemptAt: new Date(),
+            processingStartedAt: null,
+            completedAt: null,
+            errorCode: null,
+            errorMessage: null,
+          },
+        });
+        await tx.knowledgeDocumentVersion.update({
+          where: { id: document.activeVersion.id },
+          data: {
+            processingStatus: KnowledgeDocumentProcessingStatus.QUEUED,
+            processingErrorCode: null,
+            processingErrorMessage: null,
+          },
+        });
+      }
       return tx.knowledgeDocument.update({
         where: { id: document.id },
-        data: { status: KnowledgeDocumentStatus.ACTIVE, archivedAt: null },
+        data: {
+          status: KnowledgeDocumentStatus.ACTIVE,
+          archivedAt: null,
+          archiveReason: null,
+          governanceStatus: KnowledgeGovernanceStatus.REVIEW_REQUIRED,
+          processingStatus: document.activeVersion?.storageObjectKey
+            ? KnowledgeDocumentProcessingStatus.QUEUED
+            : KnowledgeDocumentProcessingStatus.NEEDS_REVIEW,
+          processingErrorCode: document.activeVersion?.storageObjectKey
+            ? null
+            : "KNOWLEDGE_DOCUMENT_GOVERNANCE_REVIEW_REQUIRED",
+          processingErrorMessage: document.activeVersion?.storageObjectKey
+            ? null
+            : "Review the restored document before customer use.",
+        },
       });
-    });
+    }, { maxWait: 10_000, timeout: 30_000 });
     await log(actor, context, AuditAction.KNOWLEDGE_DOCUMENT_RESTORED, documentId);
     await refreshRuntimeKnowledge(actor, documentId);
     publish(actor, "knowledge.document.restored", documentId);
@@ -119,6 +194,7 @@ export const knowledgeDocumentLifecycleService = {
     await assertCanManageKnowledgeDocuments(actor, context, "KNOWLEDGE_DOCUMENT_DELETE");
     await assertDocumentScope(actor, documentId, context, "KNOWLEDGE_DOCUMENT_DELETE");
     const changed = await prisma.$transaction(async (tx) => {
+      await lockKnowledgeDocumentLifecycleChange(tx, actor.businessId, documentId);
       const existing = await tx.knowledgeDocument.findFirst({
         where: {
           id: documentId,
@@ -303,5 +379,101 @@ export const knowledgeDocumentLifecycleService = {
     await log(actor, context, AuditAction.KNOWLEDGE_DOCUMENT_PROCESSING_RETRY_REQUESTED, documentId);
     publish(actor, "knowledge.document.queued", documentId);
     return result;
+  },
+
+  async permanentlyDelete(
+    actor: KnowledgeDocumentActor,
+    documentId: string,
+    confirmPermanentDelete: true,
+    context: Omit<AuditInput, "action">,
+  ) {
+    if (confirmPermanentDelete !== true) {
+      throw new AppError(422, "Explicit permanent-delete confirmation is required.", "KNOWLEDGE_DOCUMENT_PERMANENT_DELETE_CONFIRMATION_REQUIRED");
+    }
+    const membership = await assertCanManageKnowledgeDocuments(actor, context, "KNOWLEDGE_DOCUMENT_PERMANENT_DELETE");
+    if (!membership || membership.role !== BusinessRole.BUSINESS_OWNER) {
+      throw new AppError(403, "Only the business owner can permanently delete a knowledge document.", "KNOWLEDGE_DOCUMENT_PERMANENT_DELETE_FORBIDDEN");
+    }
+    const document = await prisma.$transaction(async (tx) => {
+      await lockKnowledgeDocumentLifecycleChange(tx, actor.businessId, documentId);
+      const lockedDocument = await tx.knowledgeDocument.findFirst({
+        where: { id: documentId, businessId: actor.businessId },
+        select: {
+          id: true,
+          versions: {
+            where: { storageObjectKey: { not: null }, storageDeletedAt: null },
+            select: { id: true, storageProvider: true, storageObjectKey: true },
+          },
+        },
+      });
+      if (!lockedDocument) {
+        throw new AppError(404, "Knowledge document not found.", "KNOWLEDGE_DOCUMENT_NOT_FOUND");
+      }
+      const changed = await tx.knowledgeDocument.updateMany({
+        where: { id: documentId, businessId: actor.businessId },
+        data: {
+          status: KnowledgeDocumentStatus.DELETED,
+          deletedAt: new Date(),
+          processingStatus: KnowledgeDocumentProcessingStatus.FAILED,
+          processingErrorCode: "KNOWLEDGE_DOCUMENT_PERMANENT_DELETE_PENDING",
+          processingErrorMessage: "Permanent storage deletion is in progress.",
+        },
+      });
+      if (changed.count !== 1) throw new AppError(409, "The document changed during deletion.", "KNOWLEDGE_DOCUMENT_STATE_CHANGED");
+      return lockedDocument;
+    }, { maxWait: 10_000, timeout: 30_000 });
+
+    for (const version of document.versions) {
+      try {
+        await storageService.deleteFile(version.storageObjectKey!, version.storageProvider);
+      } catch (error) {
+        throw new AppError(503, "The stored document could not be deleted. Try again later.", "KNOWLEDGE_DOCUMENT_STORAGE_DELETE_FAILED", {
+          versionId: version.id,
+        });
+      }
+      await prisma.knowledgeDocumentVersion.updateMany({
+        where: { id: version.id, documentId, businessId: actor.businessId, storageDeletedAt: null },
+        data: { storageDeletedAt: new Date(), storageObjectKey: null, isActive: false },
+      });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await lockKnowledgeDocumentGovernance(tx, documentId);
+      const remaining = await tx.knowledgeDocumentVersion.count({
+        where: { documentId, businessId: actor.businessId, storageObjectKey: { not: null }, storageDeletedAt: null },
+      });
+      if (remaining > 0) throw new AppError(409, "Stored document cleanup is incomplete.", "KNOWLEDGE_DOCUMENT_STORAGE_DELETE_INCOMPLETE");
+      await Promise.all([
+        tx.knowledgeDocument.updateMany({
+          where: { businessId: actor.businessId, replacesDocumentId: documentId },
+          data: { replacesDocumentId: null },
+        }),
+        tx.knowledgeDocument.updateMany({
+          where: { businessId: actor.businessId, supersededByDocumentId: documentId },
+          data: { supersededByDocumentId: null },
+        }),
+      ]);
+      await tx.auditLog.create({
+        data: {
+          ...context,
+          action: AuditAction.KNOWLEDGE_DOCUMENT_PERMANENTLY_DELETED,
+          businessId: actor.businessId,
+          userId: actor.userId,
+          actorMembershipId: actor.membershipId,
+          metadata: { documentId, permanentlyDeletedAt: new Date().toISOString() },
+        },
+      });
+      const deleted = await tx.knowledgeDocument.deleteMany({ where: { id: documentId, businessId: actor.businessId } });
+      if (deleted.count !== 1) throw new AppError(409, "The document changed during deletion.", "KNOWLEDGE_DOCUMENT_STATE_CHANGED");
+    }, { maxWait: 10_000, timeout: 30_000 });
+
+    await invalidateAiBusinessContext(actor.businessId);
+    realtimeService.publish({
+      type: "business.knowledge.document.permanently_deleted",
+      businessId: actor.businessId,
+      roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+      payload: { documentId },
+    });
+    return { id: documentId, permanentlyDeleted: true };
   },
 };

@@ -14,6 +14,7 @@ import {
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeGovernanceStatus,
   KnowledgeStorageProvider,
   MembershipStatus,
   PlanCode,
@@ -42,6 +43,7 @@ import { AuditInput, auditService } from "./audit.service";
 import { AiCompletionResult, aiProvider } from "./ai-provider.service";
 import { cacheService } from "./cache.service";
 import { knowledgeEmbeddingService } from "./knowledge-embedding.service";
+import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
 import {
   assertKnowledgeAssetCapacity as assertAssetCapacityTx,
   currentKnowledgeHubSubscription as currentSubscriptionTx,
@@ -124,10 +126,12 @@ function shouldBroadcastArticle(article: { status: KnowledgeArticleStatus; visib
 function shouldBroadcastDocument(document: {
   status: KnowledgeDocumentStatus;
   processingStatus: KnowledgeDocumentProcessingStatus;
+  governanceStatus: KnowledgeGovernanceStatus;
   visibility: KnowledgeAssetVisibility;
 }) {
   return document.status === KnowledgeDocumentStatus.ACTIVE
     && document.processingStatus === KnowledgeDocumentProcessingStatus.READY
+    && document.governanceStatus === KnowledgeGovernanceStatus.APPROVED
     && document.visibility === KnowledgeAssetVisibility.CLIENT_SENDABLE;
 }
 
@@ -732,7 +736,9 @@ function documentAccessWhere(actor: KnowledgeActor, documentId?: string): Prisma
     ...(actor.role === BusinessRole.STAFF ? {
       status: KnowledgeDocumentStatus.ACTIVE,
       processingStatus: KnowledgeDocumentProcessingStatus.READY,
+      governanceStatus: KnowledgeGovernanceStatus.APPROVED,
       visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+      ...customerSafeKnowledgeDocumentWhere,
     } : {}),
   };
 }
@@ -1450,7 +1456,9 @@ export const knowledgeService = {
             id: { in: documentIds },
             status: KnowledgeDocumentStatus.ACTIVE,
             processingStatus: KnowledgeDocumentProcessingStatus.READY,
+            governanceStatus: KnowledgeGovernanceStatus.APPROVED,
             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+            ...customerSafeKnowledgeDocumentWhere,
           },
         }) : [],
       ]);
@@ -1495,7 +1503,9 @@ export const knowledgeService = {
         businessId: actor.businessId,
         status: KnowledgeDocumentStatus.ACTIVE,
         processingStatus: KnowledgeDocumentProcessingStatus.READY,
+        governanceStatus: KnowledgeGovernanceStatus.APPROVED,
         visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+        ...customerSafeKnowledgeDocumentWhere,
         OR: [
           { title: { contains: query.query, mode: "insensitive" } },
           { description: { contains: query.query, mode: "insensitive" } },
@@ -1532,7 +1542,17 @@ export const knowledgeService = {
 
     const asset = input.assetType === KnowledgeAssetSendType.ARTICLE_PDF
       ? await prisma.knowledgeArticle.findFirst({ where: { id: input.articleId!, businessId: actor.businessId, status: KnowledgeArticleStatus.PUBLISHED, visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE } })
-      : await prisma.knowledgeDocument.findFirst({ where: { id: input.documentId!, businessId: actor.businessId, status: KnowledgeDocumentStatus.ACTIVE, processingStatus: KnowledgeDocumentProcessingStatus.READY, visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE } });
+      : await prisma.knowledgeDocument.findFirst({
+        where: {
+          id: input.documentId!,
+          businessId: actor.businessId,
+          status: KnowledgeDocumentStatus.ACTIVE,
+          processingStatus: KnowledgeDocumentProcessingStatus.READY,
+          governanceStatus: KnowledgeGovernanceStatus.APPROVED,
+          visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+          ...customerSafeKnowledgeDocumentWhere,
+        },
+      });
     if (!asset) throw new AppError(404, "Knowledge asset is not sendable.", "KNOWLEDGE_ASSET_NOT_SENDABLE");
 
     await auditService.log({
