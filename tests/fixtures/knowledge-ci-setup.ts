@@ -7,7 +7,7 @@ async function main() {
   } });
   const account = await prisma.businessAccount.create({ data: { name: "CI account", ownerId: user.id } });
   const business = await prisma.business.create({ data: {
-    businessAccountId: account.id, ownerId: user.id, name: "CI clinic", industry: "Healthcare", slug: "ci-clinic", status: "ACTIVE",
+    businessAccountId: account.id, ownerId: user.id, name: "CI clinic", industry: "Healthcare", slug: "ci-clinic", status: "ACTIVE", email: "clinic@example.invalid",
   } });
   await prisma.businessMember.create({ data: { businessId: business.id, userId: user.id, role: "BUSINESS_OWNER", status: "ACTIVE", canManageKnowledgeHub: true } });
   const plan = await prisma.plan.findUniqueOrThrow({ where: { code: "PREMIUM" } });
