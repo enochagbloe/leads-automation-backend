@@ -26,8 +26,6 @@ export function allowedKnowledgeGovernanceActions(review: ReviewPolicyInput) {
   if (review.comparisonType === KnowledgeGovernanceComparisonType.MISSING_IN_SETTINGS) {
     if (review.canonicalField && (
       review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.BUSINESS_PROFILE
-      || review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.BUSINESS_AVAILABILITY
-      || review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.APPOINTMENT_SETTINGS
       || (review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.SERVICE && review.canonicalEntityId)
     )) actions.add(KnowledgeGovernanceResolutionAction.UPDATE_SETTINGS);
     if (review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.SERVICE && !review.canonicalEntityId) {
