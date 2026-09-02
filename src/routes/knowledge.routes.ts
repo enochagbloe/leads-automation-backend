@@ -19,6 +19,7 @@ import {
   knowledgeDocumentListQuerySchema,
   knowledgeDocumentVersionListQuerySchema,
   knowledgeSearchQuerySchema,
+  knowledgeGovernanceReviewQueueQuerySchema,
   rejectKnowledgeDocumentReviewSchema,
   permanentlyDeleteKnowledgeDocumentSchema,
   resolveKnowledgeGovernanceReviewBatchSchema,
@@ -46,6 +47,8 @@ knowledgeRouter.patch("/articles/:articleId/status", mutationLimiter, validate(u
 knowledgeRouter.delete("/articles/:articleId", mutationLimiter, knowledgeController.archiveArticle);
 
 knowledgeRouter.get("/documents", validateQuery(knowledgeDocumentListQuerySchema), knowledgeController.listDocuments);
+knowledgeRouter.get("/documents/reviews/summary", knowledgeController.governanceSummary);
+knowledgeRouter.get("/documents/reviews", validateQuery(knowledgeGovernanceReviewQueueQuerySchema), knowledgeController.governanceQueue);
 knowledgeRouter.post("/documents/upload", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeUploadMetadata, knowledgeController.uploadDocument);
 knowledgeRouter.post("/documents/:documentId/versions", mutationLimiter, uploadKnowledgeDocument, validateKnowledgeReplacementMetadata, knowledgeController.replaceDocument);
 knowledgeRouter.get("/documents/:documentId/versions", validateQuery(knowledgeDocumentVersionListQuerySchema), knowledgeController.documentVersions);

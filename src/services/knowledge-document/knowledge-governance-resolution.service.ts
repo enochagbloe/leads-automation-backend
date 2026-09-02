@@ -403,6 +403,7 @@ async function executeDomainAction(
         ? { durationMinutes: Number(raw) }
         : { [field]: raw });
     const service = await serviceService.update(actor, review.canonicalEntityId, update, context, {
+      skipKnowledgeReconciliation: true,
       assertCurrent(current) {
         assertCanonicalValueUnchanged(review, normalizedServiceValue(review, current));
       },
@@ -415,6 +416,7 @@ async function executeDomainAction(
     const raw = input.settingsInput?.[field] ?? profileSourceValue(review, field);
     const update = updateBusinessProfileSchema.parse({ [field]: raw });
     const profile = await businessProfileService.update(actor, update, context, {
+      skipKnowledgeReconciliation: true,
       assertCurrent(current) {
         const value = current[field as keyof typeof current];
         assertCanonicalValueUnchanged(review, normalizeGovernanceText(String(value ?? "")));
@@ -434,6 +436,7 @@ async function executeDomainAction(
       openTime: proposed.openTime as string | null,
       closeTime: proposed.closeTime as string | null,
     }, context, {
+      skipKnowledgeReconciliation: true,
       assertCurrent(current) {
         const normalized = current
           ? `${current.dayOfWeek}:${current.isOpen}:${current.openTime}:${current.closeTime}`
@@ -447,6 +450,7 @@ async function executeDomainAction(
   if (review.canonicalEntityType === KnowledgeGovernanceCanonicalEntityType.APPOINTMENT_SETTINGS) {
     const update = appointmentSettingsSchema.parse(proposedFact(review));
     const result = await updateAppointmentSettings(actor, update, context, {
+      skipKnowledgeReconciliation: true,
       assertCurrent(current) {
         assertCanonicalValueUnchanged(review, current.appointmentConfirmationMode);
       },
@@ -768,6 +772,18 @@ async function refresh(actor: KnowledgeDocumentActor, result: { reviewId?: strin
     businessId: actor.businessId,
     roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
     payload: { reviewId: result.reviewId, documentId: result.documentId, versionId: result.versionId, action: result.action, governanceStatus: result.documentGovernanceStatus },
+  });
+  realtimeService.publish({
+    type: "business.knowledge.conflict.resolved",
+    businessId: actor.businessId,
+    roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+    payload: { reviewItemId: result.reviewId, documentId: result.documentId, versionId: result.versionId },
+  });
+  realtimeService.publish({
+    type: "business.knowledge.runtime_guard.updated",
+    businessId: actor.businessId,
+    roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+    payload: { reviewItemId: result.reviewId, documentId: result.documentId, status: "RESOLVED" },
   });
   if (isKnowledgeSettingsMutation(result.action)) {
     realtimeService.publish({

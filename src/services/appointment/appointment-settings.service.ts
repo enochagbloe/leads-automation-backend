@@ -10,9 +10,11 @@ import { invalidateAppointmentCaches } from "./appointment-cache.service";
 import { requireManager } from "./appointment-access.service";
 import { activeSubscription, assertAppointmentConfirmationModeAllowed, validateBusiness } from "./appointment-validation.service";
 import { json } from "./appointment-record.service";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "../knowledge-document/knowledge-settings-reconciliation.service";
 
 export type AppointmentSettingsMutationGuard = {
   assertCurrent(current: Readonly<{ appointmentConfirmationMode: string }>): void;
+  skipKnowledgeReconciliation?: boolean;
 };
 
 export async function getAutoConfirmSettings(actor: AppointmentActor) {
@@ -137,7 +139,19 @@ export async function updateSettings(
           }),
         },
       });
-      return next;
+      const reconciliation = guard?.skipKnowledgeReconciliation ? null : await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "APPOINTMENT_SETTINGS",
+        canonicalEntityId: actor.businessId,
+        fields: [{
+          canonicalField: "appointmentConfirmationMode",
+          value: next.appointmentConfirmationMode,
+          normalizedValue: next.appointmentConfirmationMode,
+        }],
+      });
+      return { next, reconciliation };
     });
     await invalidateAppointmentCaches(actor.businessId);
     realtimeService.publish({
@@ -145,9 +159,10 @@ export async function updateSettings(
       businessId: actor.businessId,
       payload: {
         businessId: actor.businessId,
-        appointmentConfirmationMode: updated.appointmentConfirmationMode,
-        updatedAt: updated.updatedAt.toISOString(),
+        appointmentConfirmationMode: updated.next.appointmentConfirmationMode,
+        updatedAt: updated.next.updatedAt.toISOString(),
       },
     });
-    return { settings: updated };
+    publishKnowledgeSettingsReconciliation(actor.businessId, updated.reconciliation);
+    return { settings: updated.next };
 }

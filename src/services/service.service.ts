@@ -24,6 +24,8 @@ import {
   ServiceListQuery,
   UpdateServiceInput,
 } from "../validation/service.schemas";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "./knowledge-document/knowledge-settings-reconciliation.service";
+import { normalizeGovernanceCurrency, normalizeGovernanceNumber } from "./knowledge-document/knowledge-document-governance.service";
 
 export type ServiceActor = {
   userId: string;
@@ -35,6 +37,7 @@ export type ServiceActor = {
 
 export type ServiceMutationGuard = {
   assertCurrent(current: Readonly<Service>): void;
+  skipKnowledgeReconciliation?: boolean;
 };
 
 export type ServiceCreationOptions = {
@@ -528,7 +531,7 @@ export const serviceService = {
       assertSafeBookingRules(merged);
       const readiness = calculateServiceReadiness(merged);
       const changedFields = Object.keys(input).filter((field) => String(existing[field as keyof typeof existing] ?? "") !== String(input[field as keyof UpdateServiceInput] ?? ""));
-      if (changedFields.length === 0) return { service: existing, changedFields };
+      if (changedFields.length === 0) return { service: existing, changedFields, reconciliation: null };
       const updated = await tx.service.update({
         where: { id: serviceId },
         data: { ...input, ...readiness, updatedById: actor.userId },
@@ -551,12 +554,35 @@ export const serviceService = {
           }),
         },
       });
-      return { service: updated, changedFields };
+      const reconciliationFields = [...new Set([
+        ...changedFields,
+        ...(changedFields.includes("currency") ? ["basePrice"] : []),
+      ])];
+      const reconciliation = guard?.skipKnowledgeReconciliation ? null : await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE",
+        canonicalEntityId: serviceId,
+        fields: reconciliationFields.map((field) => ({
+          canonicalField: field,
+          value: updated[field as keyof typeof updated],
+          ...(field === "basePrice" ? {
+            normalizedValue: updated.basePrice === null
+              ? ""
+              : `${normalizeGovernanceCurrency(updated.currency)}:${normalizeGovernanceNumber(updated.basePrice)}`,
+          } : field === "durationMinutes" ? {
+            normalizedValue: normalizeGovernanceNumber(updated.durationMinutes),
+          } : {}),
+        })),
+      });
+      return { service: updated, changedFields, reconciliation };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
     if (result.changedFields.length === 0) return safeService(result.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.updated", actor, result.service, result.changedFields);
     publish("business.services.summary.updated", actor);
+    publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
     return safeService(result.service);
   },
 

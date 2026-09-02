@@ -21,6 +21,7 @@ import {
   CustomerIssueStatus,
   FollowUpContextType,
   FollowUpJobStatus,
+  KnowledgeFactGovernanceStatus,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -31,6 +32,7 @@ import { customerMemoryResolverService } from "./customer-memory/customer-memory
 import { CUSTOMER_MEMORY_TRUST_CLASSIFICATION } from "./customer-memory/customer-memory-safety.service";
 import { CustomerMemoryRuntimeContext } from "./customer-memory/customer-memory.types";
 import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
+import { loadKnowledgeRuntimeGuards } from "./knowledge-document/knowledge-runtime-governance.service";
 
 export type AiBusinessContext = {
   business: {
@@ -114,6 +116,25 @@ export type AiBusinessContext = {
     documentTitle: string;
     chunkText: string;
     pageNumber?: number | null;
+  }>;
+  approvedKnowledgeFacts: Array<{
+    id: string;
+    documentId: string;
+    documentTitle: string;
+    factType: string;
+    label: string;
+    valueText: string;
+    currency?: string | null;
+    numericValue?: number | null;
+    sourceLabel?: string | null;
+    pageNumber?: number | null;
+  }>;
+  runtimeKnowledgeGuards: Array<{
+    reviewItemId: string;
+    canonicalEntityType: string;
+    canonicalEntityId: string | null;
+    canonicalField: string | null;
+    priority: string;
   }>;
   lead: {
     id?: string;
@@ -362,7 +383,7 @@ export const aiBusinessContextService = {
       },
     };
 
-    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages, existingCustomerIssues, pendingFollowUpContexts, customerMemory] = await Promise.all([
+    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, approvedKnowledgeFacts, runtimeKnowledgeGuards, recentMessages, existingCustomerIssues, pendingFollowUpContexts, customerMemory] = await Promise.all([
       prisma.service.findMany({
         where: { businessId: input.businessId, isActive: true, isArchived: false },
         orderBy: [
@@ -446,6 +467,39 @@ export const aiBusinessContextService = {
           document: { select: { title: true } },
         },
       }),
+      prisma.knowledgeDocumentFact.findMany({
+        where: {
+          businessId: input.businessId,
+          governanceStatus: KnowledgeFactGovernanceStatus.APPROVED,
+          document: {
+            status: KnowledgeDocumentStatus.ACTIVE,
+            visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+            deletedAt: null,
+          },
+          version: { isActive: true },
+          governanceReviews: {
+            none: {
+              blocksAiUse: true,
+              reviewStatus: { in: ["PENDING_REVIEW", "APPLYING"] },
+            },
+          },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        take: 50,
+        select: {
+          id: true,
+          documentId: true,
+          factType: true,
+          label: true,
+          valueText: true,
+          currency: true,
+          numericValue: true,
+          sourceLabel: true,
+          pageNumber: true,
+          document: { select: { title: true } },
+        },
+      }),
+      loadKnowledgeRuntimeGuards(input.businessId),
       prisma.message.findMany({
         where: {
           businessId: input.businessId,
@@ -515,17 +569,24 @@ export const aiBusinessContextService = {
       const bReady = READY_SERVICE_STATUSES.includes(b.readinessStatus) ? 0 : 1;
       return aReady - bReady || a.name.localeCompare(b.name);
     });
+    const guarded = (entityType: string, entityId: string | null, field: string) => runtimeKnowledgeGuards.some(
+      (guard) => guard.canonicalEntityType === entityType
+        && (entityId === null || guard.canonicalEntityId === null || guard.canonicalEntityId === entityId)
+        && guard.canonicalField === field,
+    );
     const mappedServices = sortedServices.slice(0, 20).map((service) => ({
       id: service.id,
       name: service.name,
       category: service.category,
       description: service.description,
       priceType: service.priceType,
-      basePrice: priceValue(service.basePrice),
+      basePrice: guarded("SERVICE", service.id, "basePrice") ? null : priceValue(service.basePrice),
       currency: service.currency,
       priceDescription: service.priceDescription,
-      durationMinutes: service.durationMinutes,
-      isBookable: service.isBookable,
+      durationMinutes: guarded("SERVICE", service.id, "durationMinutes") ? null : service.durationMinutes,
+      isBookable: service.isBookable && !runtimeKnowledgeGuards.some((guard) => guard.canonicalEntityType === "SERVICE"
+        && guard.canonicalEntityId === service.id
+        && ["durationMinutes", "isBookable", "requiresPayment", "requiresDepositBeforeConfirmation"].includes(guard.canonicalField ?? "")),
       allowedLocationTypes: service.allowedLocationTypes,
       defaultLocationType: service.defaultLocationType,
       autoConfirmEligible: service.autoConfirmEligible,
@@ -541,6 +602,7 @@ export const aiBusinessContextService = {
     }));
 
     const weeklyHours = availabilityRules
+      .filter((rule) => !guarded("BUSINESS_AVAILABILITY", null, rule.dayOfWeek))
       .sort((a, b) => DAY_ORDER[a.dayOfWeek] - DAY_ORDER[b.dayOfWeek])
       .map((rule) => ({
         dayOfWeek: DAY_ORDER[rule.dayOfWeek],
@@ -590,14 +652,14 @@ export const aiBusinessContextService = {
         id: business.id,
         name: business.name,
         industry: business.industry,
-        description: business.description,
-        country: business.country,
-        city: business.city,
-        address: business.address,
-        serviceArea: business.serviceArea,
-        phone: business.phone,
-        email: business.email,
-        website: business.website,
+        description: guarded("BUSINESS_PROFILE", null, "description") ? null : business.description,
+        country: guarded("BUSINESS_PROFILE", null, "country") ? null : business.country,
+        city: guarded("BUSINESS_PROFILE", null, "city") ? null : business.city,
+        address: guarded("BUSINESS_PROFILE", null, "address") ? null : business.address,
+        serviceArea: guarded("BUSINESS_PROFILE", null, "serviceArea") ? null : business.serviceArea,
+        phone: guarded("BUSINESS_PROFILE", null, "phone") ? null : business.phone,
+        email: guarded("BUSINESS_PROFILE", null, "email") ? null : business.email,
+        website: guarded("BUSINESS_PROFILE", null, "website") ? null : business.website,
         timezone: business.timezone,
         defaultCurrency: business.defaultCurrency,
       },
@@ -625,6 +687,25 @@ export const aiBusinessContextService = {
         documentTitle: chunk.document.title,
         chunkText: truncate(chunk.chunkText, 900),
         pageNumber: chunk.pageNumber,
+      })),
+      approvedKnowledgeFacts: approvedKnowledgeFacts.map((fact) => ({
+        id: fact.id,
+        documentId: fact.documentId,
+        documentTitle: fact.document.title,
+        factType: fact.factType,
+        label: truncate(fact.label, 180),
+        valueText: truncate(fact.valueText, 700),
+        currency: fact.currency,
+        numericValue: priceValue(fact.numericValue),
+        sourceLabel: fact.sourceLabel,
+        pageNumber: fact.pageNumber,
+      })),
+      runtimeKnowledgeGuards: runtimeKnowledgeGuards.map((guard) => ({
+        reviewItemId: guard.reviewItemId,
+        canonicalEntityType: guard.canonicalEntityType,
+        canonicalEntityId: guard.canonicalEntityId,
+        canonicalField: guard.canonicalField,
+        priority: guard.priority,
       })),
       lead: conversation.lead ? {
         id: conversation.lead.id,
@@ -677,7 +758,9 @@ export const aiBusinessContextService = {
       planCapabilities: {
         plan: input.plan,
         ...getAiPlanPermissions(input.plan),
-        appointmentAutoConfirmMode: business.appointmentConfirmationMode,
+        appointmentAutoConfirmMode: guarded("APPOINTMENT_SETTINGS", null, "appointmentConfirmationMode")
+          ? AppointmentConfirmationMode.MANUAL_CONFIRMATION_REQUIRED
+          : business.appointmentConfirmationMode,
         tone: business.aiTone,
       },
       safetyInstructions: {
@@ -867,6 +950,12 @@ export const aiPromptContextFormatter = {
       pageNumber: chunk.pageNumber,
       text: truncate(chunk.chunkText, 700),
     }));
+    const approvedKnowledgeFacts = context.approvedKnowledgeFacts.slice(0, 40).map((fact) => ({
+      ...fact,
+      label: truncate(fact.label, 180),
+      valueText: truncate(fact.valueText, 700),
+      documentTitle: truncate(fact.documentTitle, 180),
+    }));
     const recentMessages = context.recentMessages.slice(-12).map((message) => ({
       ...message,
       text: truncate(message.text, 700),
@@ -898,6 +987,15 @@ export const aiPromptContextFormatter = {
         customerFacingPolicies: dataSection("UNTRUSTED_DATA", policies),
         publishedKnowledgeArticles: dataSection("UNTRUSTED_DATA", knowledgeArticles),
         uploadedDocumentChunks: dataSection("UNTRUSTED_DATA", documentChunks),
+        governanceApprovedKnowledgeFacts: dataSection("UNTRUSTED_DATA", approvedKnowledgeFacts),
+        runtimeKnowledgeSafety: dataSection("TRUSTED_BACKEND_STATE", {
+          blockedFields: context.runtimeKnowledgeGuards.map((guard) => ({
+            canonicalEntityType: guard.canonicalEntityType,
+            canonicalEntityId: guard.canonicalEntityId,
+            canonicalField: guard.canonicalField,
+          })),
+          instruction: "Blocked fields are unavailable. Never infer, quote, or use a value for them.",
+        }),
         leadProfile: dataSection("UNTRUSTED_DATA", context.lead),
         exactTriggerMessage: dataSection("UNTRUSTED_DATA", {
           ...context.triggerMessage,

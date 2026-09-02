@@ -141,6 +141,7 @@ enum HumanReviewType {
   AI_PROVIDER_FAILED
   QUOTA_EXCEEDED
   SAFETY_BLOCKED
+  KNOWLEDGE_CONFLICT
   OTHER
 }
 
@@ -574,6 +575,7 @@ enum BusinessNotificationType {
   CUSTOMER_MEMORY_EXTRACTION_EXHAUSTED
   KNOWLEDGE_ARTICLE_NEEDS_REVIEW
   KNOWLEDGE_ASSET_SEND_FAILED
+  KNOWLEDGE_CONFLICT_REQUIRES_REVIEW
   APPOINTMENT_NEEDS_CONFIRMATION
   APPOINTMENT_OUTCOME_REQUIRED
   APPOINTMENT_NEEDS_REVIEW
@@ -742,6 +744,7 @@ enum KnowledgeGovernanceComparisonType {
   MISSING_IN_SETTINGS
   MISSING_IN_DOCUMENT
   POTENTIAL_REPLACEMENT
+  SETTINGS_CHANGED
 }
 
 enum KnowledgeGovernancePriority {
@@ -754,6 +757,14 @@ enum KnowledgeGovernanceReviewStatus {
   PENDING_REVIEW
   APPLYING
   RESOLVED
+}
+
+enum KnowledgeGovernanceNotificationStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  EXHAUSTED
 }
 
 enum KnowledgeGovernanceResolutionOperationStatus {
@@ -1126,6 +1137,9 @@ enum AuditAction {
   KNOWLEDGE_SETTINGS_SYNCED
   KNOWLEDGE_DOCUMENT_REPLACEMENT_CONFIRMED
   KNOWLEDGE_DOCUMENT_PERMANENTLY_DELETED
+  KNOWLEDGE_FACT_MARKED_OUTDATED
+  KNOWLEDGE_RUNTIME_CONFLICT_BLOCKED
+  KNOWLEDGE_SETTINGS_RECONCILED
   FOLLOW_UP_RULE_CREATED
   FOLLOW_UP_RULE_UPDATED
   FOLLOW_UP_RULE_DELETED
@@ -1266,6 +1280,7 @@ model Business {
   aiHandoffOnLowConfidence         Boolean                     @default(true)
   aiTone                           AiTone                      @default(PROFESSIONAL)
   aiMinConfidence                  Float?
+  knowledgeRuntimeRevision        Int                         @default(0)
   status                           BusinessStatus              @default(PENDING_SETUP)
   createdAt                        DateTime                    @default(now())
   updatedAt                        DateTime                    @updatedAt
@@ -2515,6 +2530,12 @@ model KnowledgeGovernanceReview {
   reviewedByMembershipId  String?
   resolutionAction        KnowledgeGovernanceResolutionAction?
   resolutionReason        String?                                @db.Text
+  criticalNotificationStatus KnowledgeGovernanceNotificationStatus?
+  criticalNotificationAttempts Int                                @default(0)
+  criticalNotificationStartedAt DateTime?
+  criticalNotificationSentAt DateTime?
+  criticalNotificationNextAttemptAt DateTime?
+  criticalNotificationErrorCode String?
   createdAt               DateTime                               @default(now())
   updatedAt               DateTime                               @updatedAt
 
@@ -2528,6 +2549,8 @@ model KnowledgeGovernanceReview {
   @@unique([businessId, versionId, comparisonKey])
   @@unique([id, businessId])
   @@index([businessId, reviewStatus, priority])
+  @@index([businessId, reviewStatus, blocksAiUse, canonicalEntityType, canonicalEntityId, canonicalField])
+  @@index([criticalNotificationStatus, criticalNotificationNextAttemptAt])
   @@index([businessId, documentId, versionId])
   @@index([businessId, factId])
   @@index([canonicalEntityType, canonicalEntityId])

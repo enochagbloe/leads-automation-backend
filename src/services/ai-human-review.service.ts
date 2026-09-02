@@ -190,6 +190,7 @@ export const aiHumanReviewService = {
           reason: input.reason,
           messageId: input.messageId ?? null,
           source: input.source,
+          ...(input.metadata ?? {}),
         }),
       }, tx);
       await tx.auditLog.create({
@@ -234,6 +235,7 @@ export const aiHumanReviewService = {
         reason: input.reason,
         messageId: input.messageId ?? null,
         source: input.source,
+        ...(input.metadata ?? {}),
       },
     });
 

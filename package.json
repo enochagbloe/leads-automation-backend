@@ -27,6 +27,8 @@
     "test:knowledge-governance": "tsx --test tests/knowledge-document-governance-policy.test.ts",
     "test:knowledge-governance-resolution": "tsx --test tests/knowledge-governance-resolution-policy.test.ts",
     "test:knowledge-runtime-refresh": "tsx --test tests/knowledge-runtime-refresh-policy.test.ts",
+    "test:knowledge-runtime-governance": "tsx --test tests/knowledge-runtime-governance-policy.test.ts",
+    "test:knowledge-settings-reconciliation": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-settings-reconciliation.integration.test.ts",
     "test:knowledge-governance-resolution-integration": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-governance-resolution.integration.test.ts",
     "test:knowledge-tenant-constraints": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-document-tenant-constraints.integration.test.ts",
     "test:knowledge-upload-idempotency": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/knowledge-document-upload-idempotency.integration.test.ts",

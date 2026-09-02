@@ -20,3 +20,15 @@ export function knowledgeFactStatusesAreCustomerSafe(
   return facts.length > 0
     && facts.every((fact) => fact.governanceStatus === KnowledgeFactGovernanceStatus.APPROVED);
 }
+
+export function knowledgeFactIsRuntimeUsable(input: {
+  governanceStatus: KnowledgeFactGovernanceStatus;
+  activeDocument: boolean;
+  activeVersion: boolean;
+  blockedByUnresolvedReview: boolean;
+}) {
+  return input.governanceStatus === KnowledgeFactGovernanceStatus.APPROVED
+    && input.activeDocument
+    && input.activeVersion
+    && !input.blockedByUnresolvedReview;
+}

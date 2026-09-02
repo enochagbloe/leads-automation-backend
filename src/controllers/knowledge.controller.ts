@@ -7,6 +7,7 @@ import { knowledgeDocumentQueryService } from "../services/knowledge-document/kn
 import { knowledgeDocumentReplacementService } from "../services/knowledge-document/knowledge-document-replacement.service";
 import { knowledgeDocumentReviewService } from "../services/knowledge-document/knowledge-document-review.service";
 import { knowledgeGovernanceResolutionService } from "../services/knowledge-document/knowledge-governance-resolution.service";
+import { knowledgeGovernanceQueryService } from "../services/knowledge-document/knowledge-governance-query.service";
 import { AppError } from "../utils/errors";
 import { requestMetadata } from "../utils/request";
 import {
@@ -16,6 +17,7 @@ import {
   KnowledgeDocumentListQuery,
   KnowledgeDocumentVersionListQuery,
   KnowledgeSearchQuery,
+  KnowledgeGovernanceReviewQueueQuery,
   RejectKnowledgeDocumentReviewInput,
   ResolveKnowledgeGovernanceReviewBatchInput,
   ResolveKnowledgeGovernanceReviewInput,
@@ -75,6 +77,11 @@ function safeStreamError(error: unknown) {
 }
 
 export const knowledgeController = {
+  governanceSummary: async (req, res) => res.json(await knowledgeGovernanceQueryService.summary(actor(req))),
+  governanceQueue: async (req, res) => res.json(await knowledgeGovernanceQueryService.queue(
+    actor(req),
+    res.locals.validatedQuery as KnowledgeGovernanceReviewQueueQuery,
+  )),
   stats: async (req, res) => res.json(await knowledgeService.stats(actor(req))),
 
   listArticles: async (req, res) => res.json(await knowledgeService.listArticles(actor(req), res.locals.validatedQuery as KnowledgeArticleListQuery)),

@@ -7,6 +7,7 @@ import { invalidateBusinessSetupStatus } from "./business-setup.service";
 import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "./knowledge-document/knowledge-settings-reconciliation.service";
 
 export type AvailabilityActor = {
   userId: string;
@@ -36,6 +37,7 @@ const RULE_SELECT = {
 type PublicRule = Prisma.BusinessAvailabilityGetPayload<{ select: typeof RULE_SELECT }>;
 export type AvailabilityMutationGuard = {
   assertCurrent(current: Readonly<PublicRule> | null): void;
+  skipKnowledgeReconciliation?: boolean;
 };
 type AvailabilityRulePatch = Pick<UpsertAvailabilityInput["rules"][number], "dayOfWeek" | "isOpen" | "openTime" | "closeTime">
   & Partial<Pick<UpsertAvailabilityInput["rules"][number], "breakStartTime" | "breakEndTime" | "appliesToAllServices">>;
@@ -297,7 +299,18 @@ export const availabilityService = {
           },
         });
       }
-      return { rules, changedDays, timezoneChanged };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "BUSINESS_AVAILABILITY",
+        fields: rules.filter((rule) => changedDays.includes(rule.dayOfWeek)).map((rule) => ({
+          canonicalField: rule.dayOfWeek,
+          value: normalizedRule(rule),
+          normalizedValue: `${rule.dayOfWeek}:${rule.isOpen}:${rule.openTime}:${rule.closeTime}`,
+        })),
+      });
+      return { rules, changedDays, timezoneChanged, reconciliation };
     }, TRANSACTION_OPTIONS);
 
     if (result.changedDays.length > 0 || result.timezoneChanged) {
@@ -314,6 +327,7 @@ export const availabilityService = {
           payload: { businessId: actor.businessId, updatedAt, changedDays: result.changedDays },
         });
       }
+      publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
     }
     return this.get(actor);
   },
@@ -357,7 +371,7 @@ export const availabilityService = {
       });
       const nextValue = normalizedRule(validated);
       const changed = JSON.stringify(previousValue) !== JSON.stringify(nextValue);
-      if (!changed && existing) return { rule: existing, changed: false };
+      if (!changed && existing) return { rule: existing, changed: false, reconciliation: null };
 
       const times = {
         openTime: validated.isOpen ? validated.openTime ?? null : null,
@@ -405,7 +419,19 @@ export const availabilityService = {
           }),
         },
       });
-      return { rule, changed: true };
+      const reconciliation = guard?.skipKnowledgeReconciliation ? null : await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "BUSINESS_AVAILABILITY",
+        canonicalEntityId: rule.id,
+        fields: [{
+          canonicalField: rule.dayOfWeek,
+          value: normalizedRule(rule),
+          normalizedValue: `${rule.dayOfWeek}:${rule.isOpen}:${rule.openTime}:${rule.closeTime}`,
+        }],
+      });
+      return { rule, changed: true, reconciliation };
     }, TRANSACTION_OPTIONS);
 
     if (result.changed) {
@@ -422,6 +448,7 @@ export const availabilityService = {
           payload: { businessId: actor.businessId, updatedAt, changedDays: [input.dayOfWeek] },
         });
       }
+      publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
     }
     return this.get(actor);
   },

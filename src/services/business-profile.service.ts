@@ -8,6 +8,7 @@ import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.s
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
 import { assertAppointmentConfirmationModeAllowed } from "./appointment.service";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "./knowledge-document/knowledge-settings-reconciliation.service";
 
 export type BusinessProfileActor = {
   userId: string;
@@ -71,6 +72,7 @@ const PROFILE_SELECT = {
 
 export type BusinessProfileMutationGuard = {
   assertCurrent(current: Readonly<Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>>): void;
+  skipKnowledgeReconciliation?: boolean;
 };
 
 function safeProfile(profile: Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>) {
@@ -174,6 +176,7 @@ export const businessProfileService = {
     let result: {
       updated: Prisma.BusinessGetPayload<{ select: typeof PROFILE_SELECT }>;
       actualChangedFields: string[];
+      reconciliation: { factIds: string[]; documentIds: string[]; reviewIds: string[] } | null;
     };
     try {
       result = await prisma.$transaction(async (tx) => {
@@ -202,7 +205,7 @@ export const businessProfileService = {
           const key = field as keyof typeof existing;
           return existing[key] !== input[field as keyof UpdateBusinessProfileInput];
         });
-        if (actualChangedFields.length === 0) return { updated: existing, actualChangedFields };
+        if (actualChangedFields.length === 0) return { updated: existing, actualChangedFields, reconciliation: null };
 
         const data = Object.fromEntries(actualChangedFields.map((field) => [field, input[field as keyof UpdateBusinessProfileInput]]));
         const previousValues = Object.fromEntries(actualChangedFields.map((field) => [field, existing[field as keyof typeof existing]]));
@@ -235,7 +238,38 @@ export const businessProfileService = {
             }),
           },
         });
-        return { updated: next, actualChangedFields };
+        let reconciliation: { factIds: string[]; documentIds: string[]; reviewIds: string[] } | null = null;
+        if (!guard?.skipKnowledgeReconciliation) {
+          const profileFields = actualChangedFields.filter((field) => field !== "appointmentConfirmationMode");
+          const items = [await reconcileKnowledgeAfterSettingsMutation(tx, {
+            businessId: actor.businessId,
+            actorUserId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            canonicalEntityType: "BUSINESS_PROFILE",
+            canonicalEntityId: actor.businessId,
+            fields: profileFields.map((field) => ({ canonicalField: field, value: next[field as keyof typeof next] })),
+          })];
+          if (actualChangedFields.includes("appointmentConfirmationMode")) {
+            items.push(await reconcileKnowledgeAfterSettingsMutation(tx, {
+              businessId: actor.businessId,
+              actorUserId: actor.userId,
+              actorMembershipId: actor.membershipId,
+              canonicalEntityType: "APPOINTMENT_SETTINGS",
+              canonicalEntityId: actor.businessId,
+              fields: [{
+                canonicalField: "appointmentConfirmationMode",
+                value: next.appointmentConfirmationMode,
+                normalizedValue: next.appointmentConfirmationMode,
+              }],
+            }));
+          }
+          reconciliation = {
+            factIds: [...new Set(items.flatMap((item) => item.factIds))],
+            documentIds: [...new Set(items.flatMap((item) => item.documentIds))],
+            reviewIds: [...new Set(items.flatMap((item) => item.reviewIds))],
+          };
+        }
+        return { updated: next, actualChangedFields, reconciliation };
       });
     } catch (error) {
       if (
@@ -246,7 +280,7 @@ export const businessProfileService = {
       }
       throw error;
     }
-    const { updated, actualChangedFields } = result;
+    const { updated, actualChangedFields, reconciliation } = result;
     if (actualChangedFields.length === 0) return safeProfile(updated);
 
     await Promise.all([
@@ -263,6 +297,7 @@ export const businessProfileService = {
       broadcastToStaff: true,
       payload: { businessId: actor.businessId, changedFields: actualChangedFields, updatedAt: updated.updatedAt.toISOString() },
     });
+    publishKnowledgeSettingsReconciliation(actor.businessId, reconciliation);
     if (actualChangedFields.includes("timezone")) {
       for (const type of ["business.availability.updated", "business.availability.summary.updated"] as const) {
         realtimeService.publish({

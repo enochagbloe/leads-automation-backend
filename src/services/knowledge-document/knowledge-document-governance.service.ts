@@ -7,6 +7,7 @@ import {
   KnowledgeGovernanceCanonicalEntityType,
   KnowledgeGovernanceComparisonType,
   KnowledgeGovernancePriority,
+  KnowledgeGovernanceNotificationStatus,
   KnowledgeGovernanceReviewStatus,
   KnowledgeGovernanceStatus,
   Prisma,
@@ -573,6 +574,16 @@ export async function evaluateAndPersistKnowledgeGovernance(
         blocksAiUse: candidate.blocksAiUse,
         relatedDocumentId: candidate.relatedDocumentId,
         relatedVersionId: candidate.relatedVersionId,
+        criticalNotificationStatus: candidate.requiresHumanReview
+          && candidate.comparisonType === KnowledgeGovernanceComparisonType.CONFLICT
+          && candidate.priority === KnowledgeGovernancePriority.CRITICAL
+          ? KnowledgeGovernanceNotificationStatus.PENDING
+          : undefined,
+        criticalNotificationNextAttemptAt: candidate.requiresHumanReview
+          && candidate.comparisonType === KnowledgeGovernanceComparisonType.CONFLICT
+          && candidate.priority === KnowledgeGovernancePriority.CRITICAL
+          ? governedAt
+          : undefined,
       })),
     });
   }

@@ -1360,3 +1360,161 @@ When complete, return:
 Do not begin Round 4 as part of this implementation.
 
 Do not declare Round 3 complete if an unresolved critical Knowledge Hub conflict can still cause the AI to confidently give a customer a disputed value.
+
+
+**Production Findings**
+
+1. **P1: Runtime governance can ignore blocking conflicts.**  
+Guard loading is capped at 100, so additional unresolved conflicts are invisible. Matching also requires literal label terms, causing synonym failures such as “consult” versus “consultation.”  
+[knowledge-runtime-governance.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-runtime-governance.service.ts:59)  
+[knowledge-runtime-governance.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-runtime-governance.service.ts:75)
+
+Fix: query operational guards by canonical entity/field without a cap. Customer-message checks should fail closed for sensitive intents when complete guard evaluation cannot be guaranteed.
+
+2. **P1: Blocked booking requests can remain permanently in progress.**  
+`BOOKING_REQUEST_IN_PROGRESS` is inserted before missing-field and governance checks. When a conflict blocks booking, that reservation remains without an appointment. Retrying the same message returns `AI_BOOKING_REQUEST_IN_PROGRESS` indefinitely.  
+[ai-reply-engine.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-reply-engine.service.ts:283)  
+[ai-reply-engine.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-reply-engine.service.ts:344)
+
+Fix: perform deterministic validation and governance checks before reserving, or persist a terminal/retryable reservation status and release it on blocked paths.
+
+3. **P1: Knowledge cache invalidation still has a stale-write race.**  
+The cache key and final validity check use only customer-memory revision. A context build started before a Settings change can write stale prices, hours, or appointment rules after invalidation completes. `knowledgeRuntimeRevision` was added to Prisma but is never read or incremented.  
+[ai-context-builder.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-context-builder.service.ts:226)  
+[ai-context-builder.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-context-builder.service.ts:800)  
+[schema.prisma](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/prisma/schema.prisma:1283)
+
+Fix: increment the revision transactionally on every runtime knowledge mutation, include it in cache keys, and recheck it before and after caching.
+
+4. **P1: Archiving a service does not invalidate approved knowledge about it.**  
+Service updates trigger reconciliation, but archive and restore do not. Approved document facts can remain available to AI after the linked service is archived.  
+[service.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/service.service.ts:589)  
+[ai-context-builder.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/ai-context-builder.service.ts:470)
+
+Fix: reconcile linked facts during archive/restore and verify canonical service activity when resolving runtime facts.
+
+5. **P2: Runtime refresh work is executed twice.**  
+Processing enqueues a durable refresh and then immediately invalidates cache and synchronizes embeddings. The durable worker later repeats both operations, potentially doubling embedding provider requests and cost.  
+[knowledge-document-worker.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-worker.service.ts:1055)  
+[knowledge-document-worker.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-document-worker.service.ts:1063)
+
+Fix: use the durable refresh job as the canonical path, or checkpoint the job when immediate refresh succeeds.
+
+6. **P2: Unbound facts can be invalidated by unrelated entity changes.**  
+Reconciliation matches both the requested canonical entity ID and `canonicalEntityId: null`. Updating one service may therefore mark an ambiguous knowledge-only fact outdated even when it belongs elsewhere.  
+[knowledge-settings-reconciliation.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-settings-reconciliation.service.ts:55)
+
+Fix: only reconcile exact entity bindings. Unbound knowledge-only facts require explicit remapping or separate conservative review logic.
+
+7. **P2: Notification delivery can send an already-resolved conflict.**  
+Review status is checked when delivery begins, but not immediately before sending email. A manager can resolve the review during that interval and still receive a stale urgent notification.  
+[knowledge-governance-notification.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-governance-notification.service.ts:54)  
+[knowledge-governance-notification.service.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/services/knowledge-document/knowledge-governance-notification.service.ts:115)
+
+8. **P2: `outdated=false` is parsed incorrectly.**  
+`z.coerce.boolean()` treats the non-empty string `"false"` as `true`, so the API can return the opposite queue filter.  
+[knowledge.schemas.ts](/home/codewithenoch/Documents/codingProjects/myPersonal/BizReplyAi/bizreplyai-backend/src/validation/knowledge.schemas.ts:153)
+
+**Verification**
+
+- Prisma schema validation: passed.
+- TypeScript build: passed.
+- Test typecheck: passed.
+- Runtime governance tests: 5 passed.
+- Runtime refresh tests: 3 passed.
+- Governance resolution tests: 9 passed.
+- Settings reconciliation integration test: passed.
+- Migration status: `20260829130000_knowledge_runtime_revision` is pending.
+- Tests ran under Node 18 despite the project requiring Node 20 or newer.
+
+**Verdict: FAIL for production.**
+
+The first four P1 findings and pending migration must be resolved before moving to the next sprint or deploying this implementation.
+
+
+first fixing
+
+
+In src/services/ai-context-builder.service.ts:
+
+> +            governanceStatus: KnowledgeGovernanceStatus.APPROVED,
+             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
++            ...customerSafeKnowledgeDocumentWhere,
+P1 Badge Apply conflict guards to structured settings
+
+When an unresolved governance review blocks a structured field such as a service's basePrice, this predicate only removes document chunks; the service query earlier in this same context builder still selects and supplies the disputed canonical price without consulting KnowledgeGovernanceReview. As a result, the model can confidently quote the old setting while the new price conflict is pending instead of withholding that field and triggering human review.
+
+Useful? React with 👍 / 👎.
+
+In src/services/service.service.ts:
+
+> +  async update(
++    actor: ServiceActor,
++    serviceId: string,
++    input: UpdateServiceInput,
++    context: Omit<AuditInput, "action">,
++    guard?: ServiceMutationGuard,
++  ) {
+P1 Badge Reconcile approved facts after manual settings changes
+
+For a normal service update the new guard is omitted, so changing a governed field such as basePrice commits without marking approved facts bound to that service and field as OUTDATED or scheduling a knowledge runtime refresh. Those facts therefore remain APPROVED, the document continues to pass the new runtime eligibility checks, and customer context can contain the updated setting alongside stale document text.
+
+Useful? React with 👍 / 👎.
+
+In prisma/migrations/20260824120000_knowledge_governance_foundation/migration.sql:
+
+> +ALTER TABLE "KnowledgeDocument"
++  ADD COLUMN "governanceStatus" "KnowledgeGovernanceStatus" NOT NULL DEFAULT 'REVIEW_REQUIRED';
++ALTER TABLE "KnowledgeDocumentVersion"
++  ADD COLUMN "governanceStatus" "KnowledgeGovernanceStatus" NOT NULL DEFAULT 'REVIEW_REQUIRED';
++ALTER TABLE "KnowledgeDocumentFact"
++  ADD COLUMN "governanceStatus" "KnowledgeFactGovernanceStatus" NOT NULL DEFAULT 'PENDING_REVIEW',
+P1 Badge Backfill governance for existing ready documents
+
+On a database containing existing knowledge, these defaults convert every previously ready document/version to REVIEW_REQUIRED and every fact to PENDING_REVIEW, while the newly added runtime queries accept only APPROVED. The migration neither evaluates/backfills those rows nor queues them for reprocessing, and the retry endpoint only accepts FAILED documents, so all existing customer-facing documents disappear from AI context and retrieval after deployment with no ordinary recovery path.
+
+Useful? React with 👍 / 👎.
+
+In src/services/knowledge-document/knowledge-document-runtime-policy.ts:
+
+> +      facts: {
++        some: {},
++        every: { governanceStatus: KnowledgeFactGovernanceStatus.APPROVED },
++      },
+P2 Badge Preserve approved facts when one fact is unresolved
+
+For a document containing both approved facts and one pending, conflicting, rejected, or outdated fact, the every relation rejects the entire document. Consequently all otherwise approved information in that document is removed from context and embeddings, rather than filtering only the unsafe fact; this unnecessarily disables unrelated customer-safe knowledge whenever a document has a partial governance issue.
+
+Useful? React with 👍 / 👎.
+
+In src/services/knowledge-document/knowledge-document-governance.service.ts:
+
+> +  const unresolved = candidates.filter((candidate) => candidate.requiresHumanReview).length;
++  const approvedFacts = [...factStatuses.values()].filter((status) => status === KnowledgeFactGovernanceStatus.APPROVED).length;
++  const governanceStatus = !input.analysisRequiresHumanReview && facts.length > 0 && unresolved === 0 && approvedFacts === facts.length
++    ? KnowledgeGovernanceStatus.APPROVED
++    : KnowledgeGovernanceStatus.REVIEW_REQUIRED;
+P2 Badge Allow factless documents to complete governance
+
+Documents whose analysis extracts no structured facts can never become usable because this condition unconditionally requires facts.length > 0. Such a document produces no governance review candidates to resolve, enters NEEDS_REVIEW, and the manual approval path also requires a positive governance fact count, leaving ordinary informational documents with no supported transition to APPROVED.
+
+Useful? React with 👍 / 👎.
+
+In src/services/knowledge-document/knowledge-document-governance.service.ts:
+
+> +    comparisonType: exact
++      ? KnowledgeGovernanceComparisonType.MATCH
++      : existingValues.length
++        ? KnowledgeGovernanceComparisonType.CONFLICT
++        : KnowledgeGovernanceComparisonType.MISSING_IN_SETTINGS,
+P2 Badge Treat an empty target profile field as missing
+
+When a document proposes a phone, website, or address whose target field is empty but any other profile field is populated, this classifies the item as CONFLICT solely because existingValues is nonempty. UPDATE_SETTINGS is then offered, but the stale-value guard cannot accept the null snapshot and always throws KNOWLEDGE_REVIEW_STALE, while ADD_TO_SETTINGS is unavailable for profile conflicts; the user therefore cannot accept the proposed value.
+
+Useful? React with 👍 / 👎.
+
+—
+Reply to this email directly, view it on GitHub, or unsubscribe.
+You are receiving this because you authored the thread.
+
+the baclend cound not reject a revie giving an error message the service is tempurailyy not avaliablr please try again shortly

@@ -37,7 +37,8 @@ import { knowledgeStorageMigrationService } from "../knowledge-storage-migration
 import { knowledgeDocumentUploadReconciliationService } from "./knowledge-document-upload-reconciliation.service";
 import { evaluateAndPersistKnowledgeGovernance } from "./knowledge-document-governance.service";
 import { knowledgeGovernanceResolutionService } from "./knowledge-governance-resolution.service";
-import { knowledgeRuntimeRefreshService } from "./knowledge-runtime-refresh.service";
+import { enqueueKnowledgeRuntimeRefresh, knowledgeRuntimeRefreshService } from "./knowledge-runtime-refresh.service";
+import { knowledgeGovernanceNotificationService } from "./knowledge-governance-notification.service";
 import {
   canRetryKnowledgeDocumentJob,
   knowledgeDocumentBusinessIsProcessable,
@@ -1051,6 +1052,10 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
       if (document.count !== 1 || version.count !== 1) {
         throw new AppError(409, "Knowledge document changed during processing.", "KNOWLEDGE_DOCUMENT_PROCESSING_STATE_CHANGED");
       }
+      await enqueueKnowledgeRuntimeRefresh(tx, {
+        businessId: current.businessId,
+        documentId: current.documentId,
+      });
       return { governance, processingStatus, requiresHumanReview };
     }, { maxWait: 5_000, timeout: 20_000 });
     if (!completed) return;
@@ -1101,6 +1106,46 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
         criticalCount: completed.governance.criticalCount,
       },
     });
+    const createdReviews = await prisma.knowledgeGovernanceReview.findMany({
+      where: {
+        businessId: current.businessId,
+        documentId: current.documentId,
+        versionId: current.versionId,
+        reviewStatus: "PENDING_REVIEW",
+      },
+      select: { id: true, factId: true, priority: true, comparisonType: true },
+      take: 100,
+    });
+    for (const review of createdReviews) {
+      realtimeService.publish({
+        type: "business.knowledge.review.created",
+        businessId: current.businessId,
+        roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+        payload: {
+          reviewItemId: review.id,
+          documentId: current.documentId,
+          factId: review.factId,
+          priority: review.priority,
+          comparisonType: review.comparisonType,
+        },
+      });
+      if (review.comparisonType === "CONFLICT") {
+        realtimeService.publish({
+          type: "business.knowledge.conflict.detected",
+          businessId: current.businessId,
+          roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+          payload: { reviewItemId: review.id, documentId: current.documentId, factId: review.factId, priority: review.priority },
+        });
+      }
+    }
+    if (createdReviews.some((review) => review.comparisonType === "CONFLICT")) {
+      realtimeService.publish({
+        type: "business.knowledge.runtime_guard.updated",
+        businessId: current.businessId,
+        roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+        payload: { documentId: current.documentId, versionId: current.versionId, status: "ACTIVE" },
+      });
+    }
     if (completed.requiresHumanReview) {
       await recordAudit(AuditAction.KNOWLEDGE_DOCUMENT_NEEDS_REVIEW, processingInput, {
         warningCodes: analysis.warnings,
@@ -1191,6 +1236,9 @@ export const knowledgeDocumentWorkerService = {
         env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
       );
       await knowledgeRuntimeRefreshService.processDueJobs(
+        env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
+      );
+      await knowledgeGovernanceNotificationService.processDue(
         env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
       );
       await recoverStaleJobs();

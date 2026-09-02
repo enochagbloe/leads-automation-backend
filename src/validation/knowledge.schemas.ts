@@ -5,6 +5,10 @@ import {
   KnowledgeDocumentStatus,
   KnowledgeDocumentProcessingStatus,
   KnowledgeGovernanceResolutionAction,
+  KnowledgeGovernanceComparisonType,
+  KnowledgeGovernancePriority,
+  KnowledgeGovernanceReviewStatus,
+  KnowledgeDocumentFactType,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -146,6 +150,17 @@ export const completeKnowledgeDocumentReplacementSchema = z.object({
   note: trimmed.max(1_000).nullable().optional(),
 }).strict();
 
+export const knowledgeGovernanceReviewQueueQuerySchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+  priority: z.nativeEnum(KnowledgeGovernancePriority).optional(),
+  status: z.nativeEnum(KnowledgeGovernanceReviewStatus).optional(),
+  comparisonType: z.nativeEnum(KnowledgeGovernanceComparisonType).optional(),
+  factType: z.nativeEnum(KnowledgeDocumentFactType).optional(),
+  documentId: optionalTrimmed,
+  outdated: z.coerce.boolean().optional(),
+});
+
 export const permanentlyDeleteKnowledgeDocumentSchema = z.object({
   confirmPermanentDelete: z.literal(true),
 }).strict();
@@ -186,6 +201,7 @@ export type RejectKnowledgeDocumentReviewInput = z.infer<typeof rejectKnowledgeD
 export type ResolveKnowledgeGovernanceReviewInput = z.infer<typeof resolveKnowledgeGovernanceReviewSchema>;
 export type ResolveKnowledgeGovernanceReviewBatchInput = z.infer<typeof resolveKnowledgeGovernanceReviewBatchSchema>;
 export type CompleteKnowledgeDocumentReplacementInput = z.infer<typeof completeKnowledgeDocumentReplacementSchema>;
+export type KnowledgeGovernanceReviewQueueQuery = z.infer<typeof knowledgeGovernanceReviewQueueQuerySchema>;
 export type PermanentlyDeleteKnowledgeDocumentInput = z.infer<typeof permanentlyDeleteKnowledgeDocumentSchema>;
 export type KnowledgeSearchQuery = z.infer<typeof knowledgeSearchQuerySchema>;
 export type SendKnowledgeAssetInput = z.infer<typeof sendKnowledgeAssetSchema>;
