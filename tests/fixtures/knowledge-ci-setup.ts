@@ -11,9 +11,13 @@ async function main() {
   } });
   await prisma.businessMember.create({ data: { businessId: business.id, userId: user.id, role: "BUSINESS_OWNER", status: "ACTIVE", canManageKnowledgeHub: true } });
   const plan = await prisma.plan.findUniqueOrThrow({ where: { code: "PREMIUM" } });
-  await prisma.subscription.create({ data: {
+  const subscription = await prisma.subscription.create({ data: {
     businessAccountId: account.id, planId: plan.id, status: "ACTIVE",
     currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
+  } });
+  await prisma.accountUsageRecord.create({ data: {
+    businessAccountId: account.id, subscriptionId: subscription.id,
+    periodStart: subscription.currentPeriodStart, periodEnd: subscription.currentPeriodEnd,
   } });
 }
 main().finally(() => prisma.$disconnect()).catch((error) => { console.error(error); process.exitCode = 1; });
