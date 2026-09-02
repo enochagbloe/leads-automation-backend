@@ -33,6 +33,7 @@ import { CUSTOMER_MEMORY_TRUST_CLASSIFICATION } from "./customer-memory/customer
 import { CustomerMemoryRuntimeContext } from "./customer-memory/customer-memory.types";
 import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
 import { loadKnowledgeRuntimeGuards } from "./knowledge-document/knowledge-runtime-governance.service";
+import { loadCustomerSafeKnowledgeFacts } from "./knowledge-document/knowledge-approved-facts.service";
 import { redactGuardedContextPricing, redactGuardedServicePricing } from "./knowledge-document/knowledge-structured-context-policy";
 
 export type AiBusinessContext = {
@@ -229,11 +230,21 @@ function cacheKey(input: {
   conversationId: string;
   messageId: string;
   memoryRevision: number;
+  knowledgeRuntimeRevision: number;
   plan: PlanCode;
   maxMessages: number;
   maxContextTokens: number;
 }) {
-  return `business:${input.businessId}:ai-context:conversation:${input.conversationId}:message:${input.messageId}:memory:${input.memoryRevision}:${input.plan}:${input.maxMessages}:${input.maxContextTokens}`;
+  return `business:${input.businessId}:ai-context:conversation:${input.conversationId}:message:${input.messageId}:memory:${input.memoryRevision}:knowledge:${input.knowledgeRuntimeRevision}:${input.plan}:${input.maxMessages}:${input.maxContextTokens}`;
+}
+
+async function knowledgeRuntimeRevision(businessId: string) {
+  const business = await prisma.business.findFirst({
+    where: { id: businessId, deletedAt: null },
+    select: { knowledgeRuntimeRevision: true },
+  });
+  if (!business) throw new AppError(404, "Business not found.", "AI_CONTEXT_BUSINESS_NOT_FOUND");
+  return business.knowledgeRuntimeRevision;
 }
 
 function priceValue(value: unknown) {
@@ -286,6 +297,7 @@ export const aiBusinessContextService = {
     plan: PlanCode;
     maxMessages?: number;
     maxContextTokens?: number;
+    knowledgeRetryCount?: number;
   }): Promise<AiBusinessContext> {
     const maxMessages = input.maxMessages ?? env.AI_MAX_CONTEXT_MESSAGES;
     const maxContextTokens = input.maxContextTokens ?? env.AI_MAX_BUSINESS_CONTEXT_TOKENS;
@@ -326,11 +338,13 @@ export const aiBusinessContextService = {
     if (!triggerMessage) throw new AppError(404, "Trigger message not found while building AI context.", "AI_CONTEXT_TRIGGER_MESSAGE_NOT_FOUND");
 
     const initialMemoryRevision = conversation.lead.customerMemoryProfile?.memoryRevision ?? 0;
+    const initialKnowledgeRevision = await knowledgeRuntimeRevision(input.businessId);
     const initialKey = cacheKey({
       businessId: input.businessId,
       conversationId: input.conversationId,
       messageId: input.messageId,
       memoryRevision: initialMemoryRevision,
+      knowledgeRuntimeRevision: initialKnowledgeRevision,
       plan: input.plan,
       maxMessages,
       maxContextTokens,
@@ -344,7 +358,7 @@ export const aiBusinessContextService = {
         memoryRevision: cached.customerMemory.memoryRevision,
         memoryEnabled: cached.customerMemory.memoryEnabled,
       });
-      if (current) return redactGuardedContextPricing(cached);
+      if (current && await knowledgeRuntimeRevision(input.businessId) === initialKnowledgeRevision) return redactGuardedContextPricing(cached);
       await cacheService.del(initialKey);
     }
 
@@ -468,38 +482,7 @@ export const aiBusinessContextService = {
           document: { select: { title: true } },
         },
       }),
-      prisma.knowledgeDocumentFact.findMany({
-        where: {
-          businessId: input.businessId,
-          governanceStatus: KnowledgeFactGovernanceStatus.APPROVED,
-          document: {
-            status: KnowledgeDocumentStatus.ACTIVE,
-            visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
-            deletedAt: null,
-          },
-          version: { isActive: true },
-          governanceReviews: {
-            none: {
-              blocksAiUse: true,
-              reviewStatus: { in: ["PENDING_REVIEW", "APPLYING"] },
-            },
-          },
-        },
-        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
-        take: 50,
-        select: {
-          id: true,
-          documentId: true,
-          factType: true,
-          label: true,
-          valueText: true,
-          currency: true,
-          numericValue: true,
-          sourceLabel: true,
-          pageNumber: true,
-          document: { select: { title: true } },
-        },
-      }),
+      loadCustomerSafeKnowledgeFacts(input.businessId, { limit: 50 }),
       loadKnowledgeRuntimeGuards(input.businessId),
       prisma.message.findMany({
         where: {
@@ -798,17 +781,22 @@ export const aiBusinessContextService = {
       });
     }
 
-    if (memorySnapshotCurrent && context.customerMemory.memoryEnabled && !context.customerMemory.degraded) {
+    if (memorySnapshotCurrent && context.customerMemory.memoryEnabled && !context.customerMemory.degraded
+      && await knowledgeRuntimeRevision(input.businessId) === initialKnowledgeRevision) {
       const finalKey = cacheKey({
         businessId: input.businessId,
         conversationId: input.conversationId,
         messageId: input.messageId,
         memoryRevision: context.customerMemory.memoryRevision,
+        knowledgeRuntimeRevision: initialKnowledgeRevision,
         plan: input.plan,
         maxMessages,
         maxContextTokens,
       });
       await cacheService.set(finalKey, context, CACHE_TTL_SECONDS);
+      if (await knowledgeRuntimeRevision(input.businessId) !== initialKnowledgeRevision) {
+        await cacheService.del(finalKey);
+      }
       const stillCurrent = await customerMemoryResolverService.isSnapshotCurrent({
         businessId: input.businessId,
         leadId: conversation.leadId,
@@ -825,6 +813,12 @@ export const aiBusinessContextService = {
           fallback: memoryFallback,
         });
       }
+    }
+    if (await knowledgeRuntimeRevision(input.businessId) !== initialKnowledgeRevision) {
+      if ((input.knowledgeRetryCount ?? 0) >= 2) {
+        throw new AppError(409, "Business knowledge is changing; retry with current settings.", "AI_CONTEXT_KNOWLEDGE_CHANGED");
+      }
+      return this.buildBusinessContextForAi({ ...input, knowledgeRetryCount: (input.knowledgeRetryCount ?? 0) + 1 });
     }
     return context;
   },

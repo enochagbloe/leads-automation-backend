@@ -158,7 +158,7 @@ export const knowledgeGovernanceReviewQueueQuerySchema = z.object({
   comparisonType: z.nativeEnum(KnowledgeGovernanceComparisonType).optional(),
   factType: z.nativeEnum(KnowledgeDocumentFactType).optional(),
   documentId: optionalTrimmed,
-  outdated: z.coerce.boolean().optional(),
+  outdated: z.preprocess((value) => value === "true" ? true : value === "false" ? false : value, z.boolean().optional()),
 });
 
 export const permanentlyDeleteKnowledgeDocumentSchema = z.object({

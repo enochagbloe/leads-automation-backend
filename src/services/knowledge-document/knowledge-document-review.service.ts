@@ -202,7 +202,6 @@ async function decide(
           documentId,
           businessId: actor.businessId,
           status: "COMPLETED",
-          requiresHumanReview: true,
         },
         data: { requiresHumanReview: false },
       });

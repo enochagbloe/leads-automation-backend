@@ -47,19 +47,20 @@ export async function reconcileKnowledgeAfterSettingsMutation(
     canonicalEntityType: "SERVICE" | "BUSINESS_PROFILE" | "BUSINESS_AVAILABILITY" | "APPOINTMENT_SETTINGS";
     canonicalEntityId?: string | null;
     fields: ReconciliationField[];
+    invalidateAllLinkedFacts?: boolean;
   },
 ) {
   const changedFields = new Map(input.fields.map((field) => [field.canonicalField, field]));
-  if (changedFields.size === 0) return { factIds: [], documentIds: [], reviewIds: [] };
+  if (changedFields.size === 0 && !input.invalidateAllLinkedFacts) return { factIds: [], documentIds: [], reviewIds: [] };
 
   const bindings = await tx.knowledgeGovernanceReview.findMany({
     where: {
       businessId: input.businessId,
       canonicalEntityType: input.canonicalEntityType,
       ...(input.canonicalEntityId !== undefined
-        ? { OR: [{ canonicalEntityId: input.canonicalEntityId }, { canonicalEntityId: null }] }
+        ? { canonicalEntityId: input.canonicalEntityId }
         : {}),
-      canonicalField: { in: [...changedFields.keys()] },
+      ...(input.invalidateAllLinkedFacts ? {} : { canonicalField: { in: [...changedFields.keys()] } }),
       reviewStatus: KnowledgeGovernanceReviewStatus.RESOLVED,
       fact: { governanceStatus: KnowledgeFactGovernanceStatus.APPROVED },
       version: { isActive: true },
@@ -81,6 +82,7 @@ export async function reconcileKnowledgeAfterSettingsMutation(
 
   const outdated = bindings.filter((binding) => {
     if (!binding.factId || !binding.canonicalField) return false;
+    if (input.invalidateAllLinkedFacts) return true;
     const next = changedFields.get(binding.canonicalField);
     if (!next) return false;
     return knowledgeSettingBindingIsOutdated({
@@ -113,7 +115,7 @@ export async function reconcileKnowledgeAfterSettingsMutation(
 
   const reviewIds: string[] = [];
   for (const binding of outdated) {
-    const field = changedFields.get(binding.canonicalField!)!;
+    const field = changedFields.get(binding.canonicalField!) ?? { value: null, normalizedValue: "" };
     const comparisonKey = `settings_changed:${binding.factId}:${binding.canonicalEntityId ?? "none"}:${binding.canonicalField}`;
     const review = await tx.knowledgeGovernanceReview.upsert({
       where: { businessId_versionId_comparisonKey: { businessId: input.businessId, versionId: binding.versionId, comparisonKey } },

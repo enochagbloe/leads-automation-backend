@@ -6,8 +6,8 @@ import {
   knowledgeFactStatusesAreCustomerSafe,
 } from "../src/services/knowledge-document/knowledge-document-runtime-policy";
 
-test("customer runtime requires at least one fact and all facts approved", () => {
-  assert.equal(knowledgeFactStatusesAreCustomerSafe([]), false);
+test("approved informational documents may have no structured facts", () => {
+  assert.equal(knowledgeFactStatusesAreCustomerSafe([]), true);
   assert.equal(knowledgeFactStatusesAreCustomerSafe([
     { governanceStatus: KnowledgeFactGovernanceStatus.APPROVED },
   ]), true);
@@ -22,7 +22,6 @@ test("customer-safe database filter rejects any non-approved active-version fact
     activeVersion: {
       is: {
         facts: {
-          some: {},
           every: { governanceStatus: KnowledgeFactGovernanceStatus.APPROVED },
         },
       },

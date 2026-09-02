@@ -280,7 +280,7 @@ async function waitForExistingBookingAppointment(input: { key: string; businessI
   return null;
 }
 
-async function createAiBookingRequest(input: {
+export async function createAiBookingRequest(input: {
   context: AiBusinessContext;
   businessAccountId: string;
   conversationId: string;
@@ -301,32 +301,7 @@ async function createAiBookingRequest(input: {
     const appointment = await appointmentFromBookingLog(previous.appointmentId, input.context.business.id);
     if (appointment) return appointment;
   }
-  try {
-    await prisma.aiInteractionLog.create({
-      data: {
-        businessId: input.context.business.id,
-        businessAccountId: input.businessAccountId,
-        conversationId: input.conversationId,
-        messageId: input.messageId,
-        provider: "OPENROUTER",
-        model: env.OPENROUTER_DEFAULT_MODEL ?? "unknown",
-        suggestedAction: "CREATE_BOOKING_REQUEST",
-        shouldReply: false,
-        requiresHumanReview: false,
-        bookingRequestCreated: false,
-        bookingIdempotencyKey: key,
-        latencyMs: 0,
-        status: "BOOKING_REQUEST_IN_PROGRESS",
-      },
-    });
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      const appointment = await waitForExistingBookingAppointment({ key, businessId: input.context.business.id });
-      if (appointment) return appointment;
-      throw new AppError(409, "AI booking request is already being processed for this message.", "AI_BOOKING_REQUEST_IN_PROGRESS");
-    }
-    throw error;
-  }
+
 
   const intent = input.decision.appointmentIntent;
   const missing = new Set(intent?.missingFields ?? []);
@@ -376,6 +351,32 @@ async function createAiBookingRequest(input: {
   const customerLocation = intent?.customerLocation?.trim() || null;
   const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
   const locationType = resolveAiBookingLocationType(service, intent?.locationType);
+  try {
+    await prisma.aiInteractionLog.create({
+      data: {
+        businessId: input.context.business.id,
+        businessAccountId: input.businessAccountId,
+        conversationId: input.conversationId,
+        messageId: input.messageId,
+        provider: "OPENROUTER",
+        model: env.OPENROUTER_DEFAULT_MODEL ?? "unknown",
+        suggestedAction: "CREATE_BOOKING_REQUEST",
+        shouldReply: false,
+        requiresHumanReview: false,
+        bookingRequestCreated: false,
+        bookingIdempotencyKey: key,
+        latencyMs: 0,
+        status: "BOOKING_REQUEST_IN_PROGRESS",
+      },
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const appointment = await waitForExistingBookingAppointment({ key, businessId: input.context.business.id });
+      if (appointment) return appointment;
+      throw new AppError(409, "AI booking request is already being processed for this message.", "AI_BOOKING_REQUEST_IN_PROGRESS");
+    }
+    throw error;
+  }
   const appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
     leadId: input.leadId,
     conversationId: input.conversationId,

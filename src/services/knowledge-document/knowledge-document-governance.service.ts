@@ -258,7 +258,7 @@ function resultForServiceFact(fact: GovernanceFact, services: CanonicalService[]
   });
 }
 
-function profileComparison(fact: GovernanceFact, business: {
+export function profileComparison(fact: GovernanceFact, business: {
   email: string | null;
   phone: string | null;
   website: string | null;
@@ -298,7 +298,7 @@ function profileComparison(fact: GovernanceFact, business: {
     factId: fact.id,
     comparisonType: exact
       ? KnowledgeGovernanceComparisonType.MATCH
-      : existingValues.length
+      : (targetField ? Boolean(targetCurrentValue) : existingValues.length > 0)
         ? KnowledgeGovernanceComparisonType.CONFLICT
         : KnowledgeGovernanceComparisonType.MISSING_IN_SETTINGS,
     priority: KnowledgeGovernancePriority.HIGH,
@@ -306,7 +306,7 @@ function profileComparison(fact: GovernanceFact, business: {
     canonicalField: targetField,
     existingValue: exact ? { field: exact[0], value: exact[1] } : existingValues,
     documentValue: documentFactValue(fact),
-    normalizedExistingValue: targetCurrentValue ? normalizeGovernanceText(targetCurrentValue) : undefined,
+    normalizedExistingValue: targetField ? normalizeGovernanceText(targetCurrentValue) : undefined,
     normalizedDocumentValue: proposed,
     requiresHumanReview: !exact,
     blocksAiUse: !exact,
@@ -590,7 +590,7 @@ export async function evaluateAndPersistKnowledgeGovernance(
 
   const unresolved = candidates.filter((candidate) => candidate.requiresHumanReview).length;
   const approvedFacts = [...factStatuses.values()].filter((status) => status === KnowledgeFactGovernanceStatus.APPROVED).length;
-  const governanceStatus = !input.analysisRequiresHumanReview && facts.length > 0 && unresolved === 0 && approvedFacts === facts.length
+  const governanceStatus = !input.analysisRequiresHumanReview && unresolved === 0 && approvedFacts === facts.length
     ? KnowledgeGovernanceStatus.APPROVED
     : KnowledgeGovernanceStatus.REVIEW_REQUIRED;
   await Promise.all([

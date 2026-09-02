@@ -605,11 +605,16 @@ export const serviceService = {
         data: { isArchived: true, isActive: false, readinessStatus: ServiceReadinessStatus.ARCHIVED, missingFields: [], archivedAt: new Date(), updatedById: actor.userId },
       });
       await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_ARCHIVED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
-      return { service: updated, changed: true };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE", canonicalEntityId: serviceId, fields: [], invalidateAllLinkedFacts: true,
+      });
+      return { service: updated, changed: true, reconciliation };
     }, TRANSACTION_OPTIONS);
     if (!service.changed) return safeService(service.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.archived", actor, service.service);
+    publishKnowledgeSettingsReconciliation(actor.businessId, service.reconciliation ?? null);
     publish("business.services.summary.updated", actor);
     return safeService(service.service);
   },
@@ -628,11 +633,16 @@ export const serviceService = {
         data: { isArchived: false, isActive: true, archivedAt: null, ...readiness, updatedById: actor.userId },
       });
       await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_RESTORED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
-      return { service: updated, changed: true };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE", canonicalEntityId: serviceId, fields: [], invalidateAllLinkedFacts: true,
+      });
+      return { service: updated, changed: true, reconciliation };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
     if (!service.changed) return safeService(service.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.restored", actor, service.service);
+    publishKnowledgeSettingsReconciliation(actor.businessId, service.reconciliation ?? null);
     publish("business.services.summary.updated", actor);
     return safeService(service.service);
   },

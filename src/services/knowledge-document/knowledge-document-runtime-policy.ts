@@ -7,7 +7,6 @@ export const customerSafeKnowledgeDocumentWhere = {
   activeVersion: {
     is: {
       facts: {
-        some: {},
         every: { governanceStatus: KnowledgeFactGovernanceStatus.APPROVED },
       },
     },
@@ -17,8 +16,7 @@ export const customerSafeKnowledgeDocumentWhere = {
 export function knowledgeFactStatusesAreCustomerSafe(
   facts: ReadonlyArray<{ governanceStatus: KnowledgeFactGovernanceStatus }>,
 ) {
-  return facts.length > 0
-    && facts.every((fact) => fact.governanceStatus === KnowledgeFactGovernanceStatus.APPROVED);
+  return facts.every((fact) => fact.governanceStatus === KnowledgeFactGovernanceStatus.APPROVED);
 }
 
 export function knowledgeFactIsRuntimeUsable(input: {

@@ -1,0 +1,60 @@
+name: Knowledge governance checks
+on:
+  push:
+    branches: [working]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bizreplyai
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: cp .env.example .env
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prisma validate
+      - run: pnpm build && pnpm typecheck:tests
+      - run: pnpm exec prisma migrate deploy
+      - run: pnpm exec tsx prisma/seed.ts && pnpm exec tsx tests/fixtures/knowledge-ci-setup.ts
+      - name: Policy and regression tests
+        run: >-
+          pnpm exec tsx --test --test-concurrency=1
+          tests/knowledge-document-governance-policy.test.ts
+          tests/knowledge-document-runtime-policy.test.ts
+          tests/knowledge-document-review-policy.test.ts
+          tests/knowledge-governance-resolution-policy.test.ts
+          tests/knowledge-runtime-governance-policy.test.ts
+          tests/knowledge-runtime-guard-loading.test.ts
+          tests/knowledge-runtime-refresh-policy.test.ts
+          tests/knowledge-structured-context-policy.test.ts
+          tests/knowledge-governance-regressions.test.ts
+      - name: Database integration tests
+        env:
+          RUN_DATABASE_INTEGRATION_TESTS: 'true'
+        run: >-
+          pnpm exec tsx --test --test-concurrency=1
+          tests/knowledge-settings-reconciliation.integration.test.ts
+          tests/knowledge-governance-resolution.integration.test.ts
+          tests/knowledge-governance-operation-reconciliation.integration.test.ts
+          tests/knowledge-governance-replacement-stale.integration.test.ts
+          tests/knowledge-governance-recovery.integration.test.ts

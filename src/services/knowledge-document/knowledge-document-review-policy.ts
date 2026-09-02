@@ -34,9 +34,8 @@ export function evaluateKnowledgeDocumentReviewState(state: KnowledgeDocumentRev
   }
   const approvable = state.extractionStatus === KnowledgeDocumentExtractionStatus.COMPLETED
     && state.analysisStatus === KnowledgeDocumentAnalysisStatus.COMPLETED
-    && state.requiresHumanReview === true
+    && (state.requiresHumanReview === true || state.governanceFactCount === 0)
     && state.unresolvedGovernanceReviewCount === 0
-    && state.governanceFactCount > 0
     && state.nonApprovedGovernanceFactCount === 0;
   return {
     reviewable: true,

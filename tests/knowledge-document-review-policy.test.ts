@@ -30,6 +30,12 @@ test("a completed active analysis can be approved or rejected", () => {
   });
 });
 
+test("completed informational documents with no facts have a manual approval path", () => {
+  assert.equal(evaluateKnowledgeDocumentReviewState({
+    ...validState, governanceFactCount: 0, requiresHumanReview: false,
+  }).approvable, true);
+});
+
 test("whole-document approval cannot bypass unresolved fact governance", () => {
   assert.deepEqual(evaluateKnowledgeDocumentReviewState({
     ...validState,

@@ -169,7 +169,7 @@ function snapshotCanonicalValue(review: ResolutionReview) {
       const value = entry && typeof entry === "object" && !Array.isArray(entry) ? entry as Record<string, unknown> : {};
       return value.field === review.canonicalField;
     }) as Record<string, unknown> | undefined;
-    return match?.value == null ? null : normalizeGovernanceText(String(match.value));
+    return normalizeGovernanceText(match?.value == null ? "" : String(match.value));
   }
   return null;
 }
@@ -656,7 +656,7 @@ async function finalize(
         },
       }),
     ]);
-    const factsCustomerSafe = factCount > 0 && nonApprovedFactCount === 0;
+    const factsCustomerSafe = nonApprovedFactCount === 0;
     const documentApproved = unresolved === 0 && factsCustomerSafe;
     const governanceStatus = documentApproved ? KnowledgeGovernanceStatus.APPROVED : KnowledgeGovernanceStatus.REVIEW_REQUIRED;
     const processingStatus = documentApproved ? KnowledgeDocumentProcessingStatus.READY : KnowledgeDocumentProcessingStatus.NEEDS_REVIEW;

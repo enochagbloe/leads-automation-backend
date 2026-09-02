@@ -112,7 +112,22 @@ async function deliver(reviewId: string) {
       metadata: { reviewItemId: review.id, documentId: review.documentId, priority: review.priority },
     });
   }
-  const sent = await emailService.sendKnowledgeConflictReviewEmail(owner.user.email, {
+  const changed = await prisma.$transaction(async (tx) => {
+    // Serialize final delivery with resolution's row update. Recheck after
+    // creating dashboard notifications, which may have taken time.
+    const current = await tx.$queryRaw<Array<{ reviewStatus: string; criticalNotificationStatus: string }>>`
+      SELECT "reviewStatus", "criticalNotificationStatus" FROM "KnowledgeGovernanceReview"
+      WHERE "id" = ${review.id} AND "businessId" = ${review.businessId} FOR UPDATE
+    `;
+    if (!current[0] || current[0].criticalNotificationStatus !== KnowledgeGovernanceNotificationStatus.PROCESSING) return { count: 0 };
+    if (current[0].reviewStatus === KnowledgeGovernanceReviewStatus.RESOLVED) {
+      await tx.knowledgeGovernanceReview.updateMany({
+        where: { id: review.id, criticalNotificationStatus: KnowledgeGovernanceNotificationStatus.PROCESSING },
+        data: { criticalNotificationStatus: KnowledgeGovernanceNotificationStatus.SENT, criticalNotificationNextAttemptAt: null },
+      });
+      return { count: 0 };
+    }
+    const sent = await emailService.sendKnowledgeConflictReviewEmail(owner.user.email, {
     reviewItemId: review.id,
     businessName: review.business.name,
     affectedCategory: review.fact?.label ?? review.fact?.factType ?? review.canonicalField ?? "Business information",
@@ -120,7 +135,7 @@ async function deliver(reviewId: string) {
     reviewUrl: `${env.FRONTEND_URL}/dashboard?settings=knowledge&review=${encodeURIComponent(review.id)}`,
   });
   if (!sent) throw new Error("KNOWLEDGE_CONFLICT_EMAIL_FAILED");
-  const changed = await prisma.knowledgeGovernanceReview.updateMany({
+    return tx.knowledgeGovernanceReview.updateMany({
     where: { id: review.id, criticalNotificationStatus: KnowledgeGovernanceNotificationStatus.PROCESSING },
     data: {
       criticalNotificationStatus: KnowledgeGovernanceNotificationStatus.SENT,
@@ -129,6 +144,7 @@ async function deliver(reviewId: string) {
       criticalNotificationErrorCode: null,
     },
   });
+  }, { maxWait: 10_000, timeout: 30_000 });
   if (changed.count === 1) {
     realtimeService.publish({
       type: "business.knowledge.conflict.detected",

@@ -39,6 +39,7 @@ import { evaluateAndPersistKnowledgeGovernance } from "./knowledge-document-gove
 import { knowledgeGovernanceResolutionService } from "./knowledge-governance-resolution.service";
 import { enqueueKnowledgeRuntimeRefresh, knowledgeRuntimeRefreshService } from "./knowledge-runtime-refresh.service";
 import { knowledgeGovernanceNotificationService } from "./knowledge-governance-notification.service";
+import { backfillKnowledgeGovernance } from "./knowledge-governance-backfill.service";
 import {
   canRetryKnowledgeDocumentJob,
   knowledgeDocumentBusinessIsProcessable,
@@ -1060,20 +1061,7 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
     }, { maxWait: 5_000, timeout: 20_000 });
     if (!completed) return;
 
-    const runtimeRefresh = await Promise.allSettled([
-      invalidateAiBusinessContext(current.businessId),
-      knowledgeEmbeddingService.syncDocument(current.documentId),
-    ]);
-    for (const result of runtimeRefresh) {
-      if (result.status === "rejected") {
-        console.error("Knowledge runtime refresh failed after document processing", {
-          businessId: current.businessId,
-          documentId: current.documentId,
-          versionId: current.versionId,
-          error: result.reason,
-        });
-      }
-    }
+    // The durable runtime-refresh job owns cache invalidation and embedding sync.
     await recordAudit(AuditAction.KNOWLEDGE_DOCUMENT_ANALYSIS_COMPLETED, processingInput, {
       processingStatus: completed.processingStatus,
       requiresHumanReview: completed.requiresHumanReview,
@@ -1231,6 +1219,7 @@ export const knowledgeDocumentWorkerService = {
         env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
       );
       await knowledgeDocumentStorageCleanupService.processDueJobs();
+      await backfillKnowledgeGovernance(env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE);
       await knowledgeStorageMigrationService.tick();
       await knowledgeGovernanceResolutionService.reconcileStaleOperations(
         env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,

@@ -3,12 +3,13 @@ import { KnowledgeArticleStatus, KnowledgeAssetSendType, KnowledgeAssetVisibilit
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
+import { loadCustomerSafeKnowledgeFacts } from "./knowledge-document/knowledge-approved-facts.service";
 import {
   customerSafeKnowledgeDocumentWhere,
   knowledgeFactStatusesAreCustomerSafe,
 } from "./knowledge-document/knowledge-document-runtime-policy";
 
-type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK";
+type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK" | "DOCUMENT_FACT";
 
 type VectorSearchResult = {
   sourceType: EmbeddingSourceType;
@@ -209,9 +210,11 @@ export const knowledgeEmbeddingService = {
       || document.visibility !== KnowledgeAssetVisibility.CLIENT_SENDABLE
       || !knowledgeFactStatusesAreCustomerSafe(document.activeVersion?.facts ?? [])
     ) {
+      await this.syncApprovedFacts(document.businessId, document.id);
       await this.deleteSource(document.businessId, "DOCUMENT_CHUNK", document.id);
       return;
     }
+    await this.deleteSource(document.businessId, "DOCUMENT_FACT", document.id);
     const inputs = document.chunks.slice(0, MAX_DOCUMENT_EMBEDDING_CHUNKS).map((chunk): EmbeddingInput => ({
         businessId: document.businessId,
         sourceType: "DOCUMENT_CHUNK",
@@ -273,6 +276,32 @@ export const knowledgeEmbeddingService = {
               AND "sourceType" = ${"DOCUMENT_CHUNK"}
               AND "sourceId" = ${document.id}
           `;
+          for (const embedding of prepared) await writeEmbedding(tx, embedding);
+        }, { maxWait: 10_000, timeout: 30_000 });
+      },
+    });
+  },
+
+  async syncApprovedFacts(businessId: string, documentId: string) {
+    const facts = await loadCustomerSafeKnowledgeFacts(businessId, { documentId, limit: MAX_DOCUMENT_EMBEDDING_CHUNKS });
+    if (!facts.length) {
+      await this.deleteSource(businessId, "DOCUMENT_FACT", documentId);
+      return;
+    }
+    const inputs = facts.map((fact): EmbeddingInput => ({
+      businessId, sourceType: "DOCUMENT_FACT", sourceId: documentId, chunkId: fact.id,
+      title: fact.document.title, content: `${fact.label}\n${fact.valueText}`,
+    }));
+    await prepareAndReplaceEmbeddingBatch({
+      items: inputs, prepare: prepareEmbedding,
+      failure: () => new AppError(503, "Approved fact embeddings could not be generated.", "KNOWLEDGE_DOCUMENT_EMBEDDING_GENERATION_FAILED"),
+      replace: async (prepared) => {
+        await prisma.$transaction(async (tx) => {
+          const current = await loadCustomerSafeKnowledgeFacts(businessId, { documentId, limit: MAX_DOCUMENT_EMBEDDING_CHUNKS }, tx);
+          if (current.length !== facts.length || current.some((fact, i) => fact.id !== facts[i]?.id || fact.valueText !== facts[i]?.valueText || fact.label !== facts[i]?.label)) {
+            throw new AppError(409, "Approved knowledge changed during embedding.", "KNOWLEDGE_DOCUMENT_EMBEDDING_SOURCE_CHANGED");
+          }
+          await tx.$executeRaw`DELETE FROM "KnowledgeSearchEmbedding" WHERE "businessId" = ${businessId} AND "sourceType" = 'DOCUMENT_FACT' AND "sourceId" = ${documentId}`;
           for (const embedding of prepared) await writeEmbedding(tx, embedding);
         }, { maxWait: 10_000, timeout: 30_000 });
       },
