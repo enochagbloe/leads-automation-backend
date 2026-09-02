@@ -11,6 +11,9 @@ import { createAiBookingRequest } from "../src/services/ai-reply-engine.service"
 import { knowledgeRuntimeGovernanceService } from "../src/services/knowledge-document/knowledge-runtime-governance.service";
 import { knowledgeGovernanceNotificationService } from "../src/services/knowledge-document/knowledge-governance-notification.service";
 import { emailService } from "../src/services/email.service";
+import { aiBusinessContextService } from "../src/services/ai-context-builder.service";
+import { cacheService } from "../src/services/cache.service";
+import { customerMemoryResolverService } from "../src/services/customer-memory/customer-memory-resolver.service";
 
 test("missing phone is addable despite an existing email", () => {
   const review = profileComparison({ id: "fact", factType: "CONTACT_INFORMATION", label: "Phone", valueText: "+233 200 111 222", currency: null, numericValue: null, sourceExcerpt: null }, {
@@ -85,4 +88,34 @@ test("notification delivery rechecks resolution immediately before sending", asy
   const send = t.mock.method(emailService, "sendKnowledgeConflictReviewEmail", async () => true);
   await knowledgeGovernanceNotificationService.processDue(1);
   assert.equal(send.mock.callCount(), 0);
+});
+
+test("a settings change during cache write rebuilds the context at the new revision", async (t) => {
+  let revision = 0;
+  const keys: string[] = [];
+  const deleted: string[] = [];
+  const memory = { memoryRevision: 1, memoryEnabled: true, degraded: false };
+  t.mock.method(prisma.conversation, "findFirst", async () => ({
+    id: "conversation", leadId: "lead", lead: { customerMemoryProfile: memory, updatedAt: new Date(), lastContactedAt: null },
+  }));
+  t.mock.method(prisma.message, "findFirst", async () => ({ id: "message", content: "Hello", messageType: "TEXT", createdAt: new Date() }));
+  t.mock.method(prisma.business, "findFirst", async () => ({ id: "business", name: revision === 0 ? "Old name" : "New name", knowledgeRuntimeRevision: revision, timezone: "UTC" }));
+  for (const model of [prisma.service, prisma.businessAvailability, prisma.businessPolicy, prisma.knowledgeArticle,
+    prisma.knowledgeDocumentChunk, prisma.knowledgeDocumentFact, prisma.knowledgeGovernanceReview,
+    prisma.message, prisma.customerIssueLog, prisma.followUpJob]) {
+    t.mock.method(model, "findMany", async () => []);
+  }
+  t.mock.method(customerMemoryResolverService, "resolveRuntimeSafely", async () => memory);
+  t.mock.method(customerMemoryResolverService, "isSnapshotCurrent", async () => true);
+  t.mock.method(cacheService, "get", async () => null);
+  t.mock.method(cacheService, "set", async (key: string) => { keys.push(key); revision = 1; });
+  t.mock.method(cacheService, "del", async (key: string) => { deleted.push(key); });
+  const context = await aiBusinessContextService.buildBusinessContextForAi({
+    businessId: "business", conversationId: "conversation", messageId: "message", plan: "BASIC",
+  });
+  assert.equal(context.business.name, "New name");
+  assert.equal(keys.length, 2);
+  assert.match(keys[0]!, /knowledge:0:/);
+  assert.match(keys[1]!, /knowledge:1:/);
+  assert.ok(deleted.includes(keys[0]!));
 });
