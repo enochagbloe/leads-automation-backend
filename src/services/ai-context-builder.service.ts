@@ -33,6 +33,7 @@ import { CUSTOMER_MEMORY_TRUST_CLASSIFICATION } from "./customer-memory/customer
 import { CustomerMemoryRuntimeContext } from "./customer-memory/customer-memory.types";
 import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
 import { loadKnowledgeRuntimeGuards } from "./knowledge-document/knowledge-runtime-governance.service";
+import { redactGuardedContextPricing, redactGuardedServicePricing } from "./knowledge-document/knowledge-structured-context-policy";
 
 export type AiBusinessContext = {
   business: {
@@ -343,7 +344,7 @@ export const aiBusinessContextService = {
         memoryRevision: cached.customerMemory.memoryRevision,
         memoryEnabled: cached.customerMemory.memoryEnabled,
       });
-      if (current) return cached;
+      if (current) return redactGuardedContextPricing(cached);
       await cacheService.del(initialKey);
     }
 
@@ -574,7 +575,7 @@ export const aiBusinessContextService = {
         && (entityId === null || guard.canonicalEntityId === null || guard.canonicalEntityId === entityId)
         && guard.canonicalField === field,
     );
-    const mappedServices = sortedServices.slice(0, 20).map((service) => ({
+    const mappedServices = sortedServices.slice(0, 20).map((service) => redactGuardedServicePricing({
       id: service.id,
       name: service.name,
       category: service.category,
@@ -599,7 +600,7 @@ export const aiBusinessContextService = {
       requiredSkillTags: service.requiredSkillTags,
       allowAiToChooseLocationType: service.allowAiToChooseLocationType,
       readinessStatus: service.readinessStatus,
-    }));
+    }, runtimeKnowledgeGuards));
 
     const weeklyHours = availabilityRules
       .filter((rule) => !guarded("BUSINESS_AVAILABILITY", null, rule.dayOfWeek))
@@ -765,7 +766,7 @@ export const aiBusinessContextService = {
       },
       safetyInstructions: {
         canAnswerServiceQuestions: mappedServices.length > 0,
-        canAnswerPricingQuestions: mappedServices.some((service) => service.priceType !== ServicePriceType.NOT_SET),
+        canAnswerPricingQuestions: mappedServices.some((service) => service.priceType != null && service.priceType !== ServicePriceType.NOT_SET),
         canAnswerAvailabilityQuestions: availability !== null,
         canAnswerPolicyQuestions: policies.length > 0,
         canDetectBookingIntent: true,
@@ -862,6 +863,7 @@ function untrustedCustomerMemoryData(context: AiBusinessContext) {
 
 export const aiPromptContextFormatter = {
   buildSystemPrompt(context: AiBusinessContext) {
+    context = redactGuardedContextPricing(context);
     return [
       "You are BizReply AI, a business WhatsApp assistant.",
       "Return only valid JSON. Do not wrap it in markdown.",
@@ -906,6 +908,7 @@ export const aiPromptContextFormatter = {
   },
 
   format(context: AiBusinessContext) {
+    context = redactGuardedContextPricing(context);
     const services = context.services.slice(0, 50).map((service) => ({
       id: service.id,
       name: truncate(service.name, 160),
