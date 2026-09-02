@@ -3,6 +3,7 @@ import {
   KnowledgeDocumentStatus,
   KnowledgeGovernanceReviewStatus,
 } from "@prisma/client";
+import type { KnowledgeGovernanceCanonicalEntityType, Prisma } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 
 const SENSITIVE_INTENT = /\b(price|pricing|cost|how much|fee|charge|rate|deposit|discount|pay|payment|bank|mobile money|refund|cancel(?:lation)?|book(?:ing)?|appointment|schedule|slot|available|availability|open|clos(?:e|ing)|hours?|duration|how long|address|location|where are you)\b/i;
@@ -49,11 +50,9 @@ export type KnowledgeRuntimeGuard = {
   };
 };
 
-function normalizedTerms(value: string | null | undefined) {
-  if (!value) return [];
-  return value.toLowerCase().match(/[a-z0-9]{4,}/g)?.filter((term) => ![
-    "price", "service", "document", "current", "business", "information",
-  ].includes(term)).slice(0, 8) ?? [];
+function isSensitiveCustomerRequest(message: string) {
+  return SENSITIVE_INTENT.test(message)
+    || Object.values(INTENT_BY_FACT).some((pattern) => pattern.test(message));
 }
 
 export function knowledgeRuntimeGuardMatchesMessage(message: string, guard: KnowledgeRuntimeGuard) {
@@ -67,14 +66,19 @@ export function knowledgeRuntimeGuardMatchesMessage(message: string, guard: Know
               : "OTHER"
     ]
     : undefined;
-  if (!(factPattern?.test(message) || fieldPattern?.test(message))) return false;
-  const identifyingTerms = normalizedTerms(guard.factLabel);
-  return identifyingTerms.length === 0 || identifyingTerms.some((term) => message.toLowerCase().includes(term));
+  // Labels are not entity identifiers: "consult" and "consultation" may mean
+  // the same service. Without a canonical entity, block the relevant category.
+  if (!factPattern && !fieldPattern) return isSensitiveCustomerRequest(message);
+  return Boolean(factPattern?.test(message) || fieldPattern?.test(message));
 }
 
-export async function loadKnowledgeRuntimeGuards(businessId: string): Promise<KnowledgeRuntimeGuard[]> {
+export async function loadKnowledgeRuntimeGuards(
+  businessId: string,
+  scope: Pick<Prisma.KnowledgeGovernanceReviewWhereInput, "canonicalEntityType" | "AND"> = {},
+): Promise<KnowledgeRuntimeGuard[]> {
   const reviews = await prisma.knowledgeGovernanceReview.findMany({
     where: {
+      ...scope,
       businessId,
       reviewStatus: { in: [KnowledgeGovernanceReviewStatus.PENDING_REVIEW, KnowledgeGovernanceReviewStatus.APPLYING] },
       blocksAiUse: true,
@@ -83,7 +87,6 @@ export async function loadKnowledgeRuntimeGuards(businessId: string): Promise<Kn
       version: { isActive: true },
     },
     orderBy: [{ priority: "asc" }, { detectedAt: "asc" }],
-    take: 100,
     select: {
       id: true,
       documentId: true,
@@ -128,28 +131,33 @@ export async function loadKnowledgeRuntimeGuards(businessId: string): Promise<Kn
 }
 
 export const knowledgeRuntimeGovernanceService = {
-  isSensitiveCustomerRequest(message: string) {
-    return SENSITIVE_INTENT.test(message);
-  },
+  isSensitiveCustomerRequest,
 
   async evaluateCustomerRequest(input: { businessId: string; message: string }) {
     const guards = await loadKnowledgeRuntimeGuards(input.businessId);
+    const matchingGuards = guards.filter((guard) => knowledgeRuntimeGuardMatchesMessage(input.message, guard));
     return {
-      blocked: guards.some((guard) => knowledgeRuntimeGuardMatchesMessage(input.message, guard)),
-      matchingGuards: guards.filter((guard) => knowledgeRuntimeGuardMatchesMessage(input.message, guard)),
+      blocked: matchingGuards.length > 0,
+      matchingGuards,
     };
   },
 
   async assertOperationalFieldSafe(input: {
     businessId: string;
-    canonicalEntityType: string;
+    canonicalEntityType: KnowledgeGovernanceCanonicalEntityType;
     canonicalEntityId?: string | null;
     canonicalFields: string[];
   }) {
-    const guards = await loadKnowledgeRuntimeGuards(input.businessId);
-    return guards.filter((guard) => guard.canonicalEntityType === input.canonicalEntityType
-      && (input.canonicalEntityId == null || guard.canonicalEntityId === input.canonicalEntityId)
-      && guard.canonicalField != null
-      && (input.canonicalFields.length === 0 || input.canonicalFields.includes(guard.canonicalField)));
+    return loadKnowledgeRuntimeGuards(input.businessId, {
+      canonicalEntityType: input.canonicalEntityType,
+      AND: [
+        ...(input.canonicalEntityId == null ? [] : [{
+          OR: [{ canonicalEntityId: input.canonicalEntityId }, { canonicalEntityId: null }],
+        }]),
+        ...(input.canonicalFields.length === 0 ? [] : [{
+          OR: [{ canonicalField: { in: input.canonicalFields } }, { canonicalField: null }],
+        }]),
+      ],
+    });
   },
 };
