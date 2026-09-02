@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mockMethod } from "./helpers/mock-method";
 import { prisma } from "../src/config/prisma";
 import type { KnowledgeRuntimeGuard } from "../src/services/knowledge-document/knowledge-runtime-governance.service";
 import { knowledgeRuntimeGuardMatchesMessage, knowledgeRuntimeGovernanceService } from "../src/services/knowledge-document/knowledge-runtime-governance.service";
@@ -40,7 +41,7 @@ test("customer evaluation sees a relevant conflict after 100 other reviews", asy
     existingValue: 400, documentValue: 500, document: { title: "Knowledge" },
     fact: { factType: i === 100 ? "PRICE" : "LOCATION", label: "Consultation", pageNumber: null, sheetName: null, slideNumber: null },
   }));
-  t.mock.method(prisma.knowledgeGovernanceReview, "findMany", async (args: { take?: number }) => reviews.slice(0, args.take));
+  mockMethod(t, prisma.knowledgeGovernanceReview, "findMany", async (args: { take?: number }) => reviews.slice(0, args.take));
   const result = await knowledgeRuntimeGovernanceService.evaluateCustomerRequest({ businessId: "tenant-1", message: "How much is a consult?" });
   assert.equal(result.blocked, true);
   assert.deepEqual(result.matchingGuards.map((item) => item.reviewItemId), ["review-101"]);
@@ -48,7 +49,7 @@ test("customer evaluation sees a relevant conflict after 100 other reviews", asy
 
 test("operational lookup scopes an uncapped query and includes unbound guards", async (t) => {
   let query: Record<string, any> = {};
-  t.mock.method(prisma.knowledgeGovernanceReview, "findMany", async (args: Record<string, any>) => { query = args; return []; });
+  mockMethod(t, prisma.knowledgeGovernanceReview, "findMany", async (args: Record<string, any>) => { query = args; return []; });
   await knowledgeRuntimeGovernanceService.assertOperationalFieldSafe({
     businessId: "tenant-1", canonicalEntityType: "SERVICE", canonicalEntityId: "service-1", canonicalFields: ["basePrice"],
   });

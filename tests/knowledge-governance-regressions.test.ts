@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mockMethod } from "./helpers/mock-method";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../src/config/prisma";
 import { profileComparison } from "../src/services/knowledge-document/knowledge-document-governance.service";
@@ -60,9 +61,9 @@ test("partial documents retain approved facts but exclude archived-service bindi
 });
 
 test("a governance-blocked booking never reserves the message", async (t) => {
-  t.mock.method(prisma.aiInteractionLog, "findUnique", async () => null);
-  const reserve = t.mock.method(prisma.aiInteractionLog, "create", async () => { throw new Error("must not reserve"); });
-  t.mock.method(knowledgeRuntimeGovernanceService, "assertOperationalFieldSafe", async () => [{ reviewItemId: "conflict" }]);
+  mockMethod(t, prisma.aiInteractionLog, "findUnique", async () => null);
+  const reserve = mockMethod(t, prisma.aiInteractionLog, "create", async () => { throw new Error("must not reserve"); });
+  mockMethod(t, knowledgeRuntimeGovernanceService, "assertOperationalFieldSafe", async () => [{ reviewItemId: "conflict" }]);
   const input = {
     context: { business: { id: "business" }, services: [{ id: "service", name: "Consultation", isBookable: true }] },
     businessAccountId: "account", conversationId: "conversation", leadId: "lead", messageId: "message",
@@ -73,19 +74,19 @@ test("a governance-blocked booking never reserves the message", async (t) => {
 });
 
 test("notification delivery rechecks resolution immediately before sending", async (t) => {
-  t.mock.method(prisma.knowledgeGovernanceReview, "updateMany", async () => ({ count: 1 }));
-  t.mock.method(prisma.knowledgeGovernanceReview, "findMany", async () => [{ id: "review", criticalNotificationAttempts: 0, criticalNotificationStatus: "PENDING", updatedAt: new Date() }]);
-  t.mock.method(prisma.knowledgeGovernanceReview, "findUnique", async () => ({
+  mockMethod(t, prisma.knowledgeGovernanceReview, "updateMany", async () => ({ count: 1 }));
+  mockMethod(t, prisma.knowledgeGovernanceReview, "findMany", async () => [{ id: "review", criticalNotificationAttempts: 0, criticalNotificationStatus: "PENDING", updatedAt: new Date() }]);
+  mockMethod(t, prisma.knowledgeGovernanceReview, "findUnique", async () => ({
     id: "review", businessId: "business", documentId: "doc", reviewStatus: "PENDING_REVIEW",
     business: { name: "Business", businessAccountId: "account", members: [{ id: "owner", role: "BUSINESS_OWNER", user: { email: "owner@example.invalid" } }] },
     document: { title: "Doc" }, fact: null,
   }));
-  t.mock.method(prisma.businessNotification, "findMany", async () => [{ recipientMembershipId: "owner" }]);
-  t.mock.method(prisma, "$transaction", async (callback: any) => callback({
+  mockMethod(t, prisma.businessNotification, "findMany", async () => [{ recipientMembershipId: "owner" }]);
+  mockMethod(t, prisma, "$transaction", async (callback: any) => callback({
     $queryRaw: async () => [{ reviewStatus: "RESOLVED", criticalNotificationStatus: "PROCESSING" }],
     knowledgeGovernanceReview: { updateMany: async () => ({ count: 1 }) },
   }));
-  const send = t.mock.method(emailService, "sendKnowledgeConflictReviewEmail", async () => true);
+  const send = mockMethod(t, emailService, "sendKnowledgeConflictReviewEmail", async () => true);
   await knowledgeGovernanceNotificationService.processDue(1);
   assert.equal(send.mock.callCount(), 0);
 });
@@ -95,21 +96,21 @@ test("a settings change during cache write rebuilds the context at the new revis
   const keys: string[] = [];
   const deleted: string[] = [];
   const memory = { memoryRevision: 1, memoryEnabled: true, degraded: false };
-  t.mock.method(prisma.conversation, "findFirst", async () => ({
+  mockMethod(t, prisma.conversation, "findFirst", async () => ({
     id: "conversation", leadId: "lead", lead: { customerMemoryProfile: memory, updatedAt: new Date(), lastContactedAt: null },
   }));
-  t.mock.method(prisma.message, "findFirst", async () => ({ id: "message", content: "Hello", messageType: "TEXT", createdAt: new Date() }));
-  t.mock.method(prisma.business, "findFirst", async () => ({ id: "business", name: revision === 0 ? "Old name" : "New name", knowledgeRuntimeRevision: revision, timezone: "UTC" }));
+  mockMethod(t, prisma.message, "findFirst", async () => ({ id: "message", content: "Hello", messageType: "TEXT", createdAt: new Date() }));
+  mockMethod(t, prisma.business, "findFirst", async () => ({ id: "business", name: revision === 0 ? "Old name" : "New name", knowledgeRuntimeRevision: revision, timezone: "UTC" }));
   for (const model of [prisma.service, prisma.businessAvailability, prisma.businessPolicy, prisma.knowledgeArticle,
     prisma.knowledgeDocumentChunk, prisma.knowledgeDocumentFact, prisma.knowledgeGovernanceReview,
     prisma.message, prisma.customerIssueLog, prisma.followUpJob]) {
-    t.mock.method(model, "findMany", async () => []);
+    mockMethod(t, model, "findMany", async () => []);
   }
-  t.mock.method(customerMemoryResolverService, "resolveRuntimeSafely", async () => memory);
-  t.mock.method(customerMemoryResolverService, "isSnapshotCurrent", async () => true);
-  t.mock.method(cacheService, "get", async () => null);
-  t.mock.method(cacheService, "set", async (key: string) => { keys.push(key); revision = 1; });
-  t.mock.method(cacheService, "del", async (key: string) => { deleted.push(key); });
+  mockMethod(t, customerMemoryResolverService, "resolveRuntimeSafely", async () => memory);
+  mockMethod(t, customerMemoryResolverService, "isSnapshotCurrent", async () => true);
+  mockMethod(t, cacheService, "get", async () => null);
+  mockMethod(t, cacheService, "set", async (key: string) => { keys.push(key); revision = 1; });
+  mockMethod(t, cacheService, "del", async (key: string) => { deleted.push(key); });
   const context = await aiBusinessContextService.buildBusinessContextForAi({
     businessId: "business", conversationId: "conversation", messageId: "message", plan: "BASIC",
   });

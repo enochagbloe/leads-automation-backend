@@ -1,7 +1,5 @@
 name: Knowledge governance checks
 on:
-  push:
-    branches: [working]
   pull_request:
     branches: [main]
 permissions:
