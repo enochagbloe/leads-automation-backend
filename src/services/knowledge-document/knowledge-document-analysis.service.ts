@@ -208,6 +208,7 @@ function deterministicFacts(sections: ExtractedSourceSection[]): KnowledgeDocume
     const seen = new Set<string>();
     const patterns = [
         { factType: client_1.KnowledgeDocumentFactType.PRICE, label: "Price", pattern: /\b(GHS|GH₵|USD|EUR|GBP)\s*([0-9][0-9,]*(?:\.\d{1,2})?)\b/gi },
+        { factType: client_1.KnowledgeDocumentFactType.SERVICE_DURATION, label: "Service duration", pattern: /\b(?:duration|takes?|lasts?)\b[^\n]{0,80}?\b([0-9][0-9,]*)\s*(?:minutes?|mins?)\b/gi },
         { factType: client_1.KnowledgeDocumentFactType.DEPOSIT, label: "Deposit", pattern: /\bdeposit\b[^\n]{0,80}?\b(GHS|GH₵|USD|EUR|GBP)?\s*([0-9][0-9,]*(?:\.\d{1,2})?%?)(?!\w)/gi },
         { factType: client_1.KnowledgeDocumentFactType.DISCOUNT, label: "Discount", pattern: /\bdiscount\b[^\n]{0,80}?\b([0-9]+(?:\.\d+)?%)(?!\w)/gi },
         { factType: client_1.KnowledgeDocumentFactType.LATE_FEE, label: "Late fee", pattern: /\blate fee\b[^\n]{0,80}?\b(GHS|GH₵|USD|EUR|GBP)?\s*([0-9][0-9,]*(?:\.\d{1,2})?%?)(?!\w)/gi },
@@ -216,8 +217,8 @@ function deterministicFacts(sections: ExtractedSourceSection[]): KnowledgeDocume
         for (const definition of patterns) {
             definition.pattern.lastIndex = 0;
             for (const match of source.text.matchAll(definition.pattern)) {
-                const excerpt = match[0].trim();
-                const key = `${definition.factType}:${excerpt.toLowerCase()}:${source.ordinal}`;
+                const matchedValue = match[0].trim();
+                const key = `${definition.factType}:${matchedValue.toLowerCase()}:${source.ordinal}`;
                 if (seen.has(key))
                     continue;
                 seen.add(key);
@@ -226,7 +227,7 @@ function deterministicFacts(sections: ExtractedSourceSection[]): KnowledgeDocume
                 facts.push({
                     factType: definition.factType,
                     label: definition.label,
-                    valueText: excerpt,
+                    valueText: matchedValue,
                     currency: currencyRaw === "GH₵" ? "GHS" : currencyRaw && /^[A-Z]{3}$/.test(currencyRaw) ? currencyRaw : null,
                     numericValue: /^\d+(?:\.\d+)?$/.test(numericRaw) ? numericRaw : null,
                     sourceKind: source.sourceKind,
@@ -236,7 +237,7 @@ function deterministicFacts(sections: ExtractedSourceSection[]): KnowledgeDocume
                     slideNumber: source.slideNumber,
                     paragraphIndex: source.paragraphIndex,
                     rowNumber: source.rowNumber,
-                    sourceExcerpt: excerpt,
+                    sourceExcerpt: matchedValue,
                     confidence: 0.9,
                 });
             }
@@ -366,6 +367,7 @@ function canonicalFactLabel(factType: KnowledgeDocumentFactType) {
 }
 const NUMERIC_FACT_TYPES = new Set([
     client_1.KnowledgeDocumentFactType.PRICE,
+    client_1.KnowledgeDocumentFactType.SERVICE_DURATION,
     client_1.KnowledgeDocumentFactType.FEE,
     client_1.KnowledgeDocumentFactType.DEPOSIT,
     client_1.KnowledgeDocumentFactType.DISCOUNT,

@@ -8,6 +8,7 @@ import {
   KnowledgeDocumentMalwareScanStatus,
   KnowledgeDocumentProcessingStatus,
   KnowledgeDocumentStatus,
+  KnowledgeGovernanceStatus,
 } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
@@ -34,6 +35,11 @@ import { KnowledgeTextExtractionResult } from "./knowledge-document-text-extract
 import { knowledgeDocumentStorageCleanupService } from "./knowledge-document-storage-cleanup.service";
 import { knowledgeStorageMigrationService } from "../knowledge-storage-migration.service";
 import { knowledgeDocumentUploadReconciliationService } from "./knowledge-document-upload-reconciliation.service";
+import { evaluateAndPersistKnowledgeGovernance } from "./knowledge-document-governance.service";
+import { knowledgeGovernanceResolutionService } from "./knowledge-governance-resolution.service";
+import { enqueueKnowledgeRuntimeRefresh, knowledgeRuntimeRefreshService } from "./knowledge-runtime-refresh.service";
+import { knowledgeGovernanceNotificationService } from "./knowledge-governance-notification.service";
+import { backfillKnowledgeGovernance } from "./knowledge-governance-backfill.service";
 import {
   canRetryKnowledgeDocumentJob,
   knowledgeDocumentBusinessIsProcessable,
@@ -143,7 +149,7 @@ async function claimNextJob(excludedBusinessIds: ReadonlySet<string> = new Set()
           businessId: candidate.businessId,
           activeVersionId: candidate.versionId,
           deletedAt: null,
-          status: { not: KnowledgeDocumentStatus.DELETED },
+          status: KnowledgeDocumentStatus.ACTIVE,
           processingStatus: { in: [KnowledgeDocumentProcessingStatus.QUEUED, KnowledgeDocumentProcessingStatus.FAILED] },
         },
         data: {
@@ -927,9 +933,6 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
       });
       throw error;
     }
-    const finalStatus = analysis.requiresHumanReview
-      ? KnowledgeDocumentProcessingStatus.NEEDS_REVIEW
-      : KnowledgeDocumentProcessingStatus.READY;
     const documentChunks = buildKnowledgeDocumentChunks({
       normalizedText: extraction.normalizedText,
       sections: extraction.sections,
@@ -954,38 +957,6 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
         },
       });
       if (claimed.count !== 1) return false;
-      const document = await tx.knowledgeDocument.updateMany({
-        where: {
-          id: current.documentId,
-          businessId: current.businessId,
-          activeVersionId: current.versionId,
-          deletedAt: null,
-          status: { not: KnowledgeDocumentStatus.DELETED },
-          processingStatus: KnowledgeDocumentProcessingStatus.PROCESSING,
-        },
-        data: {
-          processingStatus: finalStatus,
-          processingErrorCode: analysis.requiresHumanReview ? "KNOWLEDGE_DOCUMENT_REVIEW_REQUIRED" : null,
-          processingErrorMessage: analysis.requiresHumanReview ? "Review the extracted document analysis before customer use." : null,
-        },
-      });
-      const version = await tx.knowledgeDocumentVersion.updateMany({
-        where: {
-          id: current.versionId,
-          documentId: current.documentId,
-          businessId: current.businessId,
-          isActive: true,
-          processingStatus: KnowledgeDocumentProcessingStatus.PROCESSING,
-        },
-        data: {
-          processingStatus: finalStatus,
-          processingErrorCode: analysis.requiresHumanReview ? "KNOWLEDGE_DOCUMENT_REVIEW_REQUIRED" : null,
-          processingErrorMessage: analysis.requiresHumanReview ? "Review the extracted document analysis before customer use." : null,
-        },
-      });
-      if (document.count !== 1 || version.count !== 1) {
-        throw new AppError(409, "Knowledge document changed during processing.", "KNOWLEDGE_DOCUMENT_PROCESSING_STATE_CHANGED");
-      }
       await tx.knowledgeDocumentChunk.deleteMany({
         where: { businessId: current.businessId, documentId: current.documentId },
       });
@@ -1037,47 +1008,147 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
           })),
         });
       }
-      return true;
-    });
+      const governance = await evaluateAndPersistKnowledgeGovernance(tx, {
+        businessId: current.businessId,
+        documentId: current.documentId,
+        versionId: current.versionId,
+        versionNumber: current.version.versionNumber,
+        documentTitle: current.document.title,
+        detectedDocumentType: analysis.detectedDocumentType,
+        analysisRequiresHumanReview: analysis.requiresHumanReview,
+      });
+      const processingStatus = governance.governanceStatus === KnowledgeGovernanceStatus.REVIEW_REQUIRED
+        ? KnowledgeDocumentProcessingStatus.NEEDS_REVIEW
+        : KnowledgeDocumentProcessingStatus.READY;
+      const requiresHumanReview = processingStatus === KnowledgeDocumentProcessingStatus.NEEDS_REVIEW;
+      const document = await tx.knowledgeDocument.updateMany({
+        where: {
+          id: current.documentId,
+          businessId: current.businessId,
+          activeVersionId: current.versionId,
+          deletedAt: null,
+          status: KnowledgeDocumentStatus.ACTIVE,
+          processingStatus: KnowledgeDocumentProcessingStatus.PROCESSING,
+        },
+        data: {
+          processingStatus,
+          processingErrorCode: requiresHumanReview ? "KNOWLEDGE_DOCUMENT_GOVERNANCE_REVIEW_REQUIRED" : null,
+          processingErrorMessage: requiresHumanReview ? "Review unresolved document facts before customer use." : null,
+        },
+      });
+      const version = await tx.knowledgeDocumentVersion.updateMany({
+        where: {
+          id: current.versionId,
+          documentId: current.documentId,
+          businessId: current.businessId,
+          isActive: true,
+          processingStatus: KnowledgeDocumentProcessingStatus.PROCESSING,
+        },
+        data: {
+          processingStatus,
+          processingErrorCode: requiresHumanReview ? "KNOWLEDGE_DOCUMENT_GOVERNANCE_REVIEW_REQUIRED" : null,
+          processingErrorMessage: requiresHumanReview ? "Review unresolved document facts before customer use." : null,
+        },
+      });
+      if (document.count !== 1 || version.count !== 1) {
+        throw new AppError(409, "Knowledge document changed during processing.", "KNOWLEDGE_DOCUMENT_PROCESSING_STATE_CHANGED");
+      }
+      await enqueueKnowledgeRuntimeRefresh(tx, {
+        businessId: current.businessId,
+        documentId: current.documentId,
+      });
+      return { governance, processingStatus, requiresHumanReview };
+    }, { maxWait: 5_000, timeout: 20_000 });
     if (!completed) return;
 
-    const runtimeRefresh = await Promise.allSettled([
-      invalidateAiBusinessContext(current.businessId),
-      knowledgeEmbeddingService.syncDocument(current.documentId),
-    ]);
-    for (const result of runtimeRefresh) {
-      if (result.status === "rejected") {
-        console.error("Knowledge runtime refresh failed after document processing", {
-          businessId: current.businessId,
-          documentId: current.documentId,
-          versionId: current.versionId,
-          error: result.reason,
-        });
-      }
-    }
+    // The durable runtime-refresh job owns cache invalidation and embedding sync.
     await recordAudit(AuditAction.KNOWLEDGE_DOCUMENT_ANALYSIS_COMPLETED, processingInput, {
-      processingStatus: finalStatus,
-      requiresHumanReview: analysis.requiresHumanReview,
+      processingStatus: completed.processingStatus,
+      requiresHumanReview: completed.requiresHumanReview,
+      governanceStatus: completed.governance.governanceStatus,
+      governanceReviewCount: completed.governance.reviewCount,
+      unresolvedGovernanceReviewCount: completed.governance.unresolvedReviewCount,
+      governanceConflictCount: completed.governance.conflictCount,
       warningCodes: analysis.warnings,
       factCount: analysis.facts.length,
       chunkCount: documentChunks.length,
       analyzerVersion: analysis.analyzerVersion,
     });
     publishProcessingEvent("business.knowledge.document.analysis_completed", processingInput, {
-      requiresHumanReview: analysis.requiresHumanReview,
+      requiresHumanReview: completed.requiresHumanReview,
+      governanceStatus: completed.governance.governanceStatus,
+      unresolvedGovernanceReviewCount: completed.governance.unresolvedReviewCount,
       factCount: analysis.facts.length,
     });
-    if (analysis.requiresHumanReview) {
+    realtimeService.publish({
+      type: "business.knowledge.document.governance_detected",
+      businessId: current.businessId,
+      roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+      payload: {
+        documentId: current.documentId,
+        versionId: current.versionId,
+        governanceStatus: completed.governance.governanceStatus,
+        reviewCount: completed.governance.reviewCount,
+        unresolvedReviewCount: completed.governance.unresolvedReviewCount,
+        conflictCount: completed.governance.conflictCount,
+        criticalCount: completed.governance.criticalCount,
+      },
+    });
+    const createdReviews = await prisma.knowledgeGovernanceReview.findMany({
+      where: {
+        businessId: current.businessId,
+        documentId: current.documentId,
+        versionId: current.versionId,
+        reviewStatus: "PENDING_REVIEW",
+      },
+      select: { id: true, factId: true, priority: true, comparisonType: true },
+      take: 100,
+    });
+    for (const review of createdReviews) {
+      realtimeService.publish({
+        type: "business.knowledge.review.created",
+        businessId: current.businessId,
+        roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+        payload: {
+          reviewItemId: review.id,
+          documentId: current.documentId,
+          factId: review.factId,
+          priority: review.priority,
+          comparisonType: review.comparisonType,
+        },
+      });
+      if (review.comparisonType === "CONFLICT") {
+        realtimeService.publish({
+          type: "business.knowledge.conflict.detected",
+          businessId: current.businessId,
+          roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+          payload: { reviewItemId: review.id, documentId: current.documentId, factId: review.factId, priority: review.priority },
+        });
+      }
+    }
+    if (createdReviews.some((review) => review.comparisonType === "CONFLICT")) {
+      realtimeService.publish({
+        type: "business.knowledge.runtime_guard.updated",
+        businessId: current.businessId,
+        roles: [BusinessRole.BUSINESS_OWNER, BusinessRole.MANAGER],
+        payload: { documentId: current.documentId, versionId: current.versionId, status: "ACTIVE" },
+      });
+    }
+    if (completed.requiresHumanReview) {
       await recordAudit(AuditAction.KNOWLEDGE_DOCUMENT_NEEDS_REVIEW, processingInput, {
         warningCodes: analysis.warnings,
       });
     }
     publishProcessingEvent(
-      analysis.requiresHumanReview
+      completed.requiresHumanReview
         ? "business.knowledge.document.needs_review"
         : "business.knowledge.document.ready",
       processingInput,
-      { warningCodes: analysis.warnings },
+      {
+        warningCodes: analysis.warnings,
+        governanceStatus: completed.governance.governanceStatus,
+        unresolvedGovernanceReviewCount: completed.governance.unresolvedReviewCount,
+      },
     );
     realtimeService.publish({
       type: "business.knowledge.document.updated",
@@ -1086,10 +1157,12 @@ async function processClaimedJob(job: NonNullable<Awaited<ReturnType<typeof clai
       payload: {
         documentId: current.documentId,
         versionId: current.versionId,
-        processingStatus: finalStatus,
+        processingStatus: completed.processingStatus,
         extractionStatus: KnowledgeDocumentExtractionStatus.COMPLETED,
         analysisStatus: KnowledgeDocumentAnalysisStatus.COMPLETED,
-        requiresHumanReview: analysis.requiresHumanReview,
+        requiresHumanReview: completed.requiresHumanReview,
+        governanceStatus: completed.governance.governanceStatus,
+        unresolvedGovernanceReviewCount: completed.governance.unresolvedReviewCount,
       },
     });
   } catch (error) {
@@ -1146,7 +1219,17 @@ export const knowledgeDocumentWorkerService = {
         env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
       );
       await knowledgeDocumentStorageCleanupService.processDueJobs();
+      await backfillKnowledgeGovernance(env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE);
       await knowledgeStorageMigrationService.tick();
+      await knowledgeGovernanceResolutionService.reconcileStaleOperations(
+        env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
+      );
+      await knowledgeRuntimeRefreshService.processDueJobs(
+        env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
+      );
+      await knowledgeGovernanceNotificationService.processDue(
+        env.KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE,
+      );
       await recoverStaleJobs();
       await queueDocumentsRequiringCurrentExtraction();
       const usageReconciliation = await aiUsageService.reconcileStaleKnowledgeDocumentAnalysisReservations(

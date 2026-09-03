@@ -55,7 +55,7 @@ services:
       - key: CORS_ORIGINS
         sync: false
       - key: WHATSAPP_PROVIDER_MODE
-        value: mock
+        value: live
       - key: ENABLE_DEV_TOOLS
         value: "false"
       - key: MOCK_WHATSAPP_FORCE_FAILURE

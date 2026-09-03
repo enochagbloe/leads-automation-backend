@@ -6,7 +6,8 @@ type EmailContent = {
   subject: string;
   html: string;
   text: string;
-  type: "email_verification" | "password_reset" | "business_invitation" | "welcome" | "customer_attention" | "customer_issue_assigned" | "waitlist_confirmation";
+  type: "email_verification" | "password_reset" | "business_invitation" | "welcome" | "customer_attention" | "customer_issue_assigned" | "waitlist_confirmation" | "knowledge_conflict_review";
+  idempotencyKey?: string;
 };
 
 type ActionTemplateInput = {
@@ -140,7 +141,7 @@ class EmailService {
         subject: content.subject,
         html: content.html,
         text: content.text,
-      });
+      }, content.idempotencyKey ? { idempotencyKey: content.idempotencyKey } : undefined);
 
       if (error) {
         console.error("Email send failed", {
@@ -260,6 +261,32 @@ class EmailService {
       ],
     });
     return this.send({ to, subject: "Customer conversation needs attention", type: "customer_attention", ...template });
+  }
+
+  sendKnowledgeConflictReviewEmail(to: string, input: {
+    reviewItemId: string;
+    businessName: string;
+    affectedCategory: string;
+    documentTitle: string;
+    reviewUrl?: string | null;
+  }) {
+    const template = internalNoticeTemplate({
+      title: "Knowledge Hub information needs review",
+      preview: "Important business information may affect customer replies.",
+      rows: [
+        { label: "Business", value: input.businessName },
+        { label: "Affected information", value: input.affectedCategory },
+        { label: "Document", value: input.documentTitle },
+        { label: "Review", value: input.reviewUrl },
+      ],
+    });
+    return this.send({
+      to,
+      subject: "Important Knowledge Hub conflict needs review",
+      type: "knowledge_conflict_review",
+      idempotencyKey: `knowledge-conflict-${input.reviewItemId}`,
+      ...template,
+    });
   }
 
   sendCustomerIssueAssignedEmail(to: string, input: {

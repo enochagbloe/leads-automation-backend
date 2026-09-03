@@ -15,7 +15,20 @@ export const whatsappController = {
     const mode = queryValue(req.query["hub.mode"]);
     const token = queryValue(req.query["hub.verify_token"]);
     const challenge = queryValue(req.query["hub.challenge"]);
-    if (!challenge || !whatsappService.verifyWebhook(mode, token)) throw new AppError(403, "Webhook verification failed", "WHATSAPP_WEBHOOK_VERIFICATION_FAILED");
+    const verified = Boolean(challenge) && whatsappService.verifyWebhook(mode, token);
+    const diagnostic = {
+      mode: mode ?? null,
+      hasVerifyToken: Boolean(token),
+      hasChallenge: Boolean(challenge),
+      verified,
+      host: req.get("x-forwarded-host") ?? req.get("host") ?? null,
+      protocol: req.protocol,
+    };
+    if (!verified) {
+      console.warn("WHATSAPP_WEBHOOK_VERIFICATION_FAILURE", diagnostic);
+      throw new AppError(403, "Webhook verification failed", "WHATSAPP_WEBHOOK_VERIFICATION_FAILED");
+    }
+    console.info("WHATSAPP_WEBHOOK_VERIFICATION_SUCCESS", diagnostic);
     res.type("text/plain").send(challenge);
   }) satisfies RequestHandler,
 

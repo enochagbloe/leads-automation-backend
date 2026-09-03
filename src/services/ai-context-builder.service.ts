@@ -15,11 +15,13 @@ import {
   KnowledgeAssetVisibility,
   KnowledgeDocumentStatus,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeGovernanceStatus,
   CustomerIssueCategory,
   CustomerIssueSeverity,
   CustomerIssueStatus,
   FollowUpContextType,
   FollowUpJobStatus,
+  KnowledgeFactGovernanceStatus,
 } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -29,6 +31,10 @@ import { getAiPlanPermissions } from "./ai-usage.service";
 import { customerMemoryResolverService } from "./customer-memory/customer-memory-resolver.service";
 import { CUSTOMER_MEMORY_TRUST_CLASSIFICATION } from "./customer-memory/customer-memory-safety.service";
 import { CustomerMemoryRuntimeContext } from "./customer-memory/customer-memory.types";
+import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document/knowledge-document-runtime-policy";
+import { loadKnowledgeRuntimeGuards } from "./knowledge-document/knowledge-runtime-governance.service";
+import { loadCustomerSafeKnowledgeFacts } from "./knowledge-document/knowledge-approved-facts.service";
+import { redactGuardedContextPricing, redactGuardedServicePricing } from "./knowledge-document/knowledge-structured-context-policy";
 
 export type AiBusinessContext = {
   business: {
@@ -112,6 +118,25 @@ export type AiBusinessContext = {
     documentTitle: string;
     chunkText: string;
     pageNumber?: number | null;
+  }>;
+  approvedKnowledgeFacts: Array<{
+    id: string;
+    documentId: string;
+    documentTitle: string;
+    factType: string;
+    label: string;
+    valueText: string;
+    currency?: string | null;
+    numericValue?: number | null;
+    sourceLabel?: string | null;
+    pageNumber?: number | null;
+  }>;
+  runtimeKnowledgeGuards: Array<{
+    reviewItemId: string;
+    canonicalEntityType: string;
+    canonicalEntityId: string | null;
+    canonicalField: string | null;
+    priority: string;
   }>;
   lead: {
     id?: string;
@@ -205,11 +230,21 @@ function cacheKey(input: {
   conversationId: string;
   messageId: string;
   memoryRevision: number;
+  knowledgeRuntimeRevision: number;
   plan: PlanCode;
   maxMessages: number;
   maxContextTokens: number;
 }) {
-  return `business:${input.businessId}:ai-context:conversation:${input.conversationId}:message:${input.messageId}:memory:${input.memoryRevision}:${input.plan}:${input.maxMessages}:${input.maxContextTokens}`;
+  return `business:${input.businessId}:ai-context:conversation:${input.conversationId}:message:${input.messageId}:memory:${input.memoryRevision}:knowledge:${input.knowledgeRuntimeRevision}:${input.plan}:${input.maxMessages}:${input.maxContextTokens}`;
+}
+
+async function knowledgeRuntimeRevision(businessId: string) {
+  const business = await prisma.business.findFirst({
+    where: { id: businessId, deletedAt: null },
+    select: { knowledgeRuntimeRevision: true },
+  });
+  if (!business) throw new AppError(404, "Business not found.", "AI_CONTEXT_BUSINESS_NOT_FOUND");
+  return business.knowledgeRuntimeRevision;
 }
 
 function priceValue(value: unknown) {
@@ -262,6 +297,7 @@ export const aiBusinessContextService = {
     plan: PlanCode;
     maxMessages?: number;
     maxContextTokens?: number;
+    knowledgeRetryCount?: number;
   }): Promise<AiBusinessContext> {
     const maxMessages = input.maxMessages ?? env.AI_MAX_CONTEXT_MESSAGES;
     const maxContextTokens = input.maxContextTokens ?? env.AI_MAX_BUSINESS_CONTEXT_TOKENS;
@@ -302,11 +338,13 @@ export const aiBusinessContextService = {
     if (!triggerMessage) throw new AppError(404, "Trigger message not found while building AI context.", "AI_CONTEXT_TRIGGER_MESSAGE_NOT_FOUND");
 
     const initialMemoryRevision = conversation.lead.customerMemoryProfile?.memoryRevision ?? 0;
+    const initialKnowledgeRevision = await knowledgeRuntimeRevision(input.businessId);
     const initialKey = cacheKey({
       businessId: input.businessId,
       conversationId: input.conversationId,
       messageId: input.messageId,
       memoryRevision: initialMemoryRevision,
+      knowledgeRuntimeRevision: initialKnowledgeRevision,
       plan: input.plan,
       maxMessages,
       maxContextTokens,
@@ -320,7 +358,7 @@ export const aiBusinessContextService = {
         memoryRevision: cached.customerMemory.memoryRevision,
         memoryEnabled: cached.customerMemory.memoryEnabled,
       });
-      if (current) return cached;
+      if (current && await knowledgeRuntimeRevision(input.businessId) === initialKnowledgeRevision) return redactGuardedContextPricing(cached);
       await cacheService.del(initialKey);
     }
 
@@ -360,7 +398,7 @@ export const aiBusinessContextService = {
       },
     };
 
-    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, recentMessages, existingCustomerIssues, pendingFollowUpContexts, customerMemory] = await Promise.all([
+    const [services, availabilityRules, policies, knowledgeArticles, knowledgeDocumentChunks, approvedKnowledgeFacts, runtimeKnowledgeGuards, recentMessages, existingCustomerIssues, pendingFollowUpContexts, customerMemory] = await Promise.all([
       prisma.service.findMany({
         where: { businessId: input.businessId, isActive: true, isArchived: false },
         orderBy: [
@@ -429,7 +467,9 @@ export const aiBusinessContextService = {
           document: {
             status: KnowledgeDocumentStatus.ACTIVE,
             processingStatus: KnowledgeDocumentProcessingStatus.READY,
+            governanceStatus: KnowledgeGovernanceStatus.APPROVED,
             visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+            ...customerSafeKnowledgeDocumentWhere,
           },
         },
         orderBy: [{ createdAt: "desc" }, { id: "asc" }],
@@ -442,6 +482,8 @@ export const aiBusinessContextService = {
           document: { select: { title: true } },
         },
       }),
+      loadCustomerSafeKnowledgeFacts(input.businessId, { limit: 50 }),
+      loadKnowledgeRuntimeGuards(input.businessId),
       prisma.message.findMany({
         where: {
           businessId: input.businessId,
@@ -511,17 +553,24 @@ export const aiBusinessContextService = {
       const bReady = READY_SERVICE_STATUSES.includes(b.readinessStatus) ? 0 : 1;
       return aReady - bReady || a.name.localeCompare(b.name);
     });
-    const mappedServices = sortedServices.slice(0, 20).map((service) => ({
+    const guarded = (entityType: string, entityId: string | null, field: string) => runtimeKnowledgeGuards.some(
+      (guard) => guard.canonicalEntityType === entityType
+        && (entityId === null || guard.canonicalEntityId === null || guard.canonicalEntityId === entityId)
+        && guard.canonicalField === field,
+    );
+    const mappedServices = sortedServices.slice(0, 20).map((service) => redactGuardedServicePricing({
       id: service.id,
       name: service.name,
       category: service.category,
       description: service.description,
       priceType: service.priceType,
-      basePrice: priceValue(service.basePrice),
+      basePrice: guarded("SERVICE", service.id, "basePrice") ? null : priceValue(service.basePrice),
       currency: service.currency,
       priceDescription: service.priceDescription,
-      durationMinutes: service.durationMinutes,
-      isBookable: service.isBookable,
+      durationMinutes: guarded("SERVICE", service.id, "durationMinutes") ? null : service.durationMinutes,
+      isBookable: service.isBookable && !runtimeKnowledgeGuards.some((guard) => guard.canonicalEntityType === "SERVICE"
+        && guard.canonicalEntityId === service.id
+        && ["durationMinutes", "isBookable", "requiresPayment", "requiresDepositBeforeConfirmation"].includes(guard.canonicalField ?? "")),
       allowedLocationTypes: service.allowedLocationTypes,
       defaultLocationType: service.defaultLocationType,
       autoConfirmEligible: service.autoConfirmEligible,
@@ -534,9 +583,10 @@ export const aiBusinessContextService = {
       requiredSkillTags: service.requiredSkillTags,
       allowAiToChooseLocationType: service.allowAiToChooseLocationType,
       readinessStatus: service.readinessStatus,
-    }));
+    }, runtimeKnowledgeGuards));
 
     const weeklyHours = availabilityRules
+      .filter((rule) => !guarded("BUSINESS_AVAILABILITY", null, rule.dayOfWeek))
       .sort((a, b) => DAY_ORDER[a.dayOfWeek] - DAY_ORDER[b.dayOfWeek])
       .map((rule) => ({
         dayOfWeek: DAY_ORDER[rule.dayOfWeek],
@@ -586,14 +636,14 @@ export const aiBusinessContextService = {
         id: business.id,
         name: business.name,
         industry: business.industry,
-        description: business.description,
-        country: business.country,
-        city: business.city,
-        address: business.address,
-        serviceArea: business.serviceArea,
-        phone: business.phone,
-        email: business.email,
-        website: business.website,
+        description: guarded("BUSINESS_PROFILE", null, "description") ? null : business.description,
+        country: guarded("BUSINESS_PROFILE", null, "country") ? null : business.country,
+        city: guarded("BUSINESS_PROFILE", null, "city") ? null : business.city,
+        address: guarded("BUSINESS_PROFILE", null, "address") ? null : business.address,
+        serviceArea: guarded("BUSINESS_PROFILE", null, "serviceArea") ? null : business.serviceArea,
+        phone: guarded("BUSINESS_PROFILE", null, "phone") ? null : business.phone,
+        email: guarded("BUSINESS_PROFILE", null, "email") ? null : business.email,
+        website: guarded("BUSINESS_PROFILE", null, "website") ? null : business.website,
         timezone: business.timezone,
         defaultCurrency: business.defaultCurrency,
       },
@@ -621,6 +671,25 @@ export const aiBusinessContextService = {
         documentTitle: chunk.document.title,
         chunkText: truncate(chunk.chunkText, 900),
         pageNumber: chunk.pageNumber,
+      })),
+      approvedKnowledgeFacts: approvedKnowledgeFacts.map((fact) => ({
+        id: fact.id,
+        documentId: fact.documentId,
+        documentTitle: fact.document.title,
+        factType: fact.factType,
+        label: truncate(fact.label, 180),
+        valueText: truncate(fact.valueText, 700),
+        currency: fact.currency,
+        numericValue: priceValue(fact.numericValue),
+        sourceLabel: fact.sourceLabel,
+        pageNumber: fact.pageNumber,
+      })),
+      runtimeKnowledgeGuards: runtimeKnowledgeGuards.map((guard) => ({
+        reviewItemId: guard.reviewItemId,
+        canonicalEntityType: guard.canonicalEntityType,
+        canonicalEntityId: guard.canonicalEntityId,
+        canonicalField: guard.canonicalField,
+        priority: guard.priority,
       })),
       lead: conversation.lead ? {
         id: conversation.lead.id,
@@ -673,12 +742,14 @@ export const aiBusinessContextService = {
       planCapabilities: {
         plan: input.plan,
         ...getAiPlanPermissions(input.plan),
-        appointmentAutoConfirmMode: business.appointmentConfirmationMode,
+        appointmentAutoConfirmMode: guarded("APPOINTMENT_SETTINGS", null, "appointmentConfirmationMode")
+          ? AppointmentConfirmationMode.MANUAL_CONFIRMATION_REQUIRED
+          : business.appointmentConfirmationMode,
         tone: business.aiTone,
       },
       safetyInstructions: {
         canAnswerServiceQuestions: mappedServices.length > 0,
-        canAnswerPricingQuestions: mappedServices.some((service) => service.priceType !== ServicePriceType.NOT_SET),
+        canAnswerPricingQuestions: mappedServices.some((service) => service.priceType != null && service.priceType !== ServicePriceType.NOT_SET),
         canAnswerAvailabilityQuestions: availability !== null,
         canAnswerPolicyQuestions: policies.length > 0,
         canDetectBookingIntent: true,
@@ -710,17 +781,22 @@ export const aiBusinessContextService = {
       });
     }
 
-    if (memorySnapshotCurrent && context.customerMemory.memoryEnabled && !context.customerMemory.degraded) {
+    if (memorySnapshotCurrent && context.customerMemory.memoryEnabled && !context.customerMemory.degraded
+      && await knowledgeRuntimeRevision(input.businessId) === initialKnowledgeRevision) {
       const finalKey = cacheKey({
         businessId: input.businessId,
         conversationId: input.conversationId,
         messageId: input.messageId,
         memoryRevision: context.customerMemory.memoryRevision,
+        knowledgeRuntimeRevision: initialKnowledgeRevision,
         plan: input.plan,
         maxMessages,
         maxContextTokens,
       });
       await cacheService.set(finalKey, context, CACHE_TTL_SECONDS);
+      if (await knowledgeRuntimeRevision(input.businessId) !== initialKnowledgeRevision) {
+        await cacheService.del(finalKey);
+      }
       const stillCurrent = await customerMemoryResolverService.isSnapshotCurrent({
         businessId: input.businessId,
         leadId: conversation.leadId,
@@ -737,6 +813,12 @@ export const aiBusinessContextService = {
           fallback: memoryFallback,
         });
       }
+    }
+    if (await knowledgeRuntimeRevision(input.businessId) !== initialKnowledgeRevision) {
+      if ((input.knowledgeRetryCount ?? 0) >= 2) {
+        throw new AppError(409, "Business knowledge is changing; retry with current settings.", "AI_CONTEXT_KNOWLEDGE_CHANGED");
+      }
+      return this.buildBusinessContextForAi({ ...input, knowledgeRetryCount: (input.knowledgeRetryCount ?? 0) + 1 });
     }
     return context;
   },
@@ -775,6 +857,7 @@ function untrustedCustomerMemoryData(context: AiBusinessContext) {
 
 export const aiPromptContextFormatter = {
   buildSystemPrompt(context: AiBusinessContext) {
+    context = redactGuardedContextPricing(context);
     return [
       "You are BizReply AI, a business WhatsApp assistant.",
       "Return only valid JSON. Do not wrap it in markdown.",
@@ -819,6 +902,7 @@ export const aiPromptContextFormatter = {
   },
 
   format(context: AiBusinessContext) {
+    context = redactGuardedContextPricing(context);
     const services = context.services.slice(0, 50).map((service) => ({
       id: service.id,
       name: truncate(service.name, 160),
@@ -863,6 +947,12 @@ export const aiPromptContextFormatter = {
       pageNumber: chunk.pageNumber,
       text: truncate(chunk.chunkText, 700),
     }));
+    const approvedKnowledgeFacts = context.approvedKnowledgeFacts.slice(0, 40).map((fact) => ({
+      ...fact,
+      label: truncate(fact.label, 180),
+      valueText: truncate(fact.valueText, 700),
+      documentTitle: truncate(fact.documentTitle, 180),
+    }));
     const recentMessages = context.recentMessages.slice(-12).map((message) => ({
       ...message,
       text: truncate(message.text, 700),
@@ -894,6 +984,15 @@ export const aiPromptContextFormatter = {
         customerFacingPolicies: dataSection("UNTRUSTED_DATA", policies),
         publishedKnowledgeArticles: dataSection("UNTRUSTED_DATA", knowledgeArticles),
         uploadedDocumentChunks: dataSection("UNTRUSTED_DATA", documentChunks),
+        governanceApprovedKnowledgeFacts: dataSection("UNTRUSTED_DATA", approvedKnowledgeFacts),
+        runtimeKnowledgeSafety: dataSection("TRUSTED_BACKEND_STATE", {
+          blockedFields: context.runtimeKnowledgeGuards.map((guard) => ({
+            canonicalEntityType: guard.canonicalEntityType,
+            canonicalEntityId: guard.canonicalEntityId,
+            canonicalField: guard.canonicalField,
+          })),
+          instruction: "Blocked fields are unavailable. Never infer, quote, or use a value for them.",
+        }),
         leadProfile: dataSection("UNTRUSTED_DATA", context.lead),
         exactTriggerMessage: dataSection("UNTRUSTED_DATA", {
           ...context.triggerMessage,

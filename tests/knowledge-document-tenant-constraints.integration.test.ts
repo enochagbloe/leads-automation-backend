@@ -9,6 +9,9 @@ import {
   KnowledgeDocumentProcessingJobStatus,
   KnowledgeDocumentProcessingStatus,
   KnowledgeDocumentSourceKind,
+  KnowledgeGovernanceCanonicalEntityType,
+  KnowledgeGovernanceComparisonType,
+  KnowledgeGovernancePriority,
   KnowledgeStorageProvider,
   Prisma,
 } from "@prisma/client";
@@ -171,6 +174,21 @@ test("database rejects cross-business document, version, job, and active-version
       prisma.knowledgeDocument.update({
         where: { id: documentBId },
         data: { activeVersionId: versionAId },
+      }),
+      isForeignKeyViolation,
+    );
+
+    await assert.rejects(
+      prisma.knowledgeGovernanceReview.create({
+        data: {
+          businessId: businessB.id,
+          documentId: documentAId,
+          versionId: versionAId,
+          comparisonKey: `cross-business:${suffix}`,
+          comparisonType: KnowledgeGovernanceComparisonType.CONFLICT,
+          priority: KnowledgeGovernancePriority.CRITICAL,
+          canonicalEntityType: KnowledgeGovernanceCanonicalEntityType.SERVICE,
+        },
       }),
       isForeignKeyViolation,
     );

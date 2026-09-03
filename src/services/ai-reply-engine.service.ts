@@ -30,6 +30,7 @@ import { appointmentInternalService } from "./appointment.service";
 import { aiHumanReviewService, humanReviewTypeForBlockedAi } from "./ai-human-review.service";
 import { customerIssueService } from "./customer-issue.service";
 import { followUpService } from "./follow-up.service";
+import { knowledgeRuntimeGovernanceService } from "./knowledge-document/knowledge-runtime-governance.service";
 
 export type AiReplyActor = {
   userId: string;
@@ -61,6 +62,7 @@ type AiExecutionStatus =
   | "BLOCKED_UNAVAILABLE_SLOT"
   | "BLOCKED_MISSING_CONTEXT"
   | "BLOCKED_UNSAFE"
+  | "BLOCKED_KNOWLEDGE_CONFLICT"
   | "AI_BUSINESS_NOT_READY"
   | "SKIPPED";
 
@@ -278,7 +280,7 @@ async function waitForExistingBookingAppointment(input: { key: string; businessI
   return null;
 }
 
-async function createAiBookingRequest(input: {
+export async function createAiBookingRequest(input: {
   context: AiBusinessContext;
   businessAccountId: string;
   conversationId: string;
@@ -299,6 +301,56 @@ async function createAiBookingRequest(input: {
     const appointment = await appointmentFromBookingLog(previous.appointmentId, input.context.business.id);
     if (appointment) return appointment;
   }
+
+
+  const intent = input.decision.appointmentIntent;
+  const missing = new Set(intent?.missingFields ?? []);
+  if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
+  if (!validDate(intent?.preferredDate)) missing.add("preferredDate");
+  if (!validTime(intent?.preferredTime)) missing.add("preferredTime");
+  if (missing.size) {
+    throw new AppError(422, "AI booking request is missing required details.", "AI_BOOKING_MISSING_FIELDS", { missingFields: [...missing] });
+  }
+
+  const service = input.context.services.find((item) => item.id === intent?.serviceId)
+    ?? input.context.services.find((item) => normalizeName(item.name) === normalizeName(intent?.serviceName));
+  if (!service) throw new AppError(404, "AI booking service was not found.", "AI_BOOKING_SERVICE_NOT_FOUND");
+  if (!service.isBookable) throw new AppError(422, "AI booking service is not bookable.", "AI_BOOKING_SERVICE_NOT_BOOKABLE");
+  const operationalGuards = await knowledgeRuntimeGovernanceService.assertOperationalFieldSafe({
+    businessId: input.context.business.id,
+    canonicalEntityType: "SERVICE",
+    canonicalEntityId: service.id,
+    canonicalFields: [
+      "durationMinutes",
+      "isBookable",
+      "requiresPayment",
+      "requiresDepositBeforeConfirmation",
+      "requiresManagerApproval",
+      "requiresStaffAssignmentBeforeConfirmation",
+    ],
+  });
+  const appointmentGuards = await knowledgeRuntimeGovernanceService.assertOperationalFieldSafe({
+    businessId: input.context.business.id,
+    canonicalEntityType: "APPOINTMENT_SETTINGS",
+    canonicalFields: ["appointmentConfirmationMode"],
+  });
+  const availabilityGuards = await knowledgeRuntimeGovernanceService.assertOperationalFieldSafe({
+    businessId: input.context.business.id,
+    canonicalEntityType: "BUSINESS_AVAILABILITY",
+    canonicalFields: [],
+  });
+  if (operationalGuards.length > 0 || appointmentGuards.length > 0 || availabilityGuards.length > 0) {
+    throw new AppError(
+      409,
+      "Appointment rules require human review before this booking can continue.",
+      "KNOWLEDGE_CONFLICT",
+    );
+  }
+
+  const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
+  const customerLocation = intent?.customerLocation?.trim() || null;
+  const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
+  const locationType = resolveAiBookingLocationType(service, intent?.locationType);
   try {
     await prisma.aiInteractionLog.create({
       data: {
@@ -325,25 +377,6 @@ async function createAiBookingRequest(input: {
     }
     throw error;
   }
-
-  const intent = input.decision.appointmentIntent;
-  const missing = new Set(intent?.missingFields ?? []);
-  if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
-  if (!validDate(intent?.preferredDate)) missing.add("preferredDate");
-  if (!validTime(intent?.preferredTime)) missing.add("preferredTime");
-  if (missing.size) {
-    throw new AppError(422, "AI booking request is missing required details.", "AI_BOOKING_MISSING_FIELDS", { missingFields: [...missing] });
-  }
-
-  const service = input.context.services.find((item) => item.id === intent?.serviceId)
-    ?? input.context.services.find((item) => normalizeName(item.name) === normalizeName(intent?.serviceName));
-  if (!service) throw new AppError(404, "AI booking service was not found.", "AI_BOOKING_SERVICE_NOT_FOUND");
-  if (!service.isBookable) throw new AppError(422, "AI booking service is not bookable.", "AI_BOOKING_SERVICE_NOT_BOOKABLE");
-
-  const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
-  const customerLocation = intent?.customerLocation?.trim() || null;
-  const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
-  const locationType = resolveAiBookingLocationType(service, intent?.locationType);
   const appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
     leadId: input.leadId,
     conversationId: input.conversationId,
@@ -557,6 +590,84 @@ export const aiReplyEngine = {
       assignedStaffId: conversation.assignedStaffId,
       payload: { conversationId: conversation.id, messageId: message.id, triggeredBy: input.triggeredBy },
     });
+
+    try {
+      const governance = await knowledgeRuntimeGovernanceService.evaluateCustomerRequest({
+        businessId: conversation.businessId,
+        message: message.content,
+      });
+      if (governance.blocked) {
+        const matches = governance.matchingGuards;
+        const decision = fallbackHumanReviewDecision(
+          "Customer requested information with an unresolved Knowledge Hub conflict.",
+        );
+        const notifications = await markConversationNeedsHumanReview({
+          businessId: conversation.businessId,
+          businessAccountId: conversation.business.businessAccountId,
+          conversationId: conversation.id,
+          leadId: conversation.leadId,
+          assignedStaffId: conversation.assignedStaffId,
+          reason: decision.reason,
+          messageId: message.id,
+          reviewType: HumanReviewType.KNOWLEDGE_CONFLICT,
+          source: "KNOWLEDGE_RUNTIME_GUARD",
+          metadata: {
+            knowledgeConflicts: matches.slice(0, 5).map((guard) => ({
+              reviewItemId: guard.reviewItemId,
+              documentId: guard.documentId,
+              factId: guard.factId,
+              affectedInformation: guard.factLabel,
+              factType: guard.factType,
+              currentSettingsValue: guard.currentSettingsValue,
+              documentValue: guard.documentValue,
+              source: guard.source,
+            })),
+          },
+        });
+        await Promise.all([
+          logInteraction({
+            businessId: conversation.businessId,
+            businessAccountId: conversation.business.businessAccountId,
+            conversationId: conversation.id,
+            messageId: message.id,
+            safety: { allowed: false, decision, status: "BLOCKED_POLICY", blockedReason: decision.reason },
+            status: "BLOCKED_KNOWLEDGE_CONFLICT",
+            blockedReason: decision.reason,
+            quotaStatus: "NOT_CHECKED",
+            humanReviewNotificationCreated: notifications.length > 0,
+          }),
+          prisma.auditLog.create({
+            data: {
+              action: "KNOWLEDGE_RUNTIME_CONFLICT_BLOCKED",
+              businessId: conversation.businessId,
+              metadata: json({
+                conversationId: conversation.id,
+                messageId: message.id,
+                reviewItemIds: matches.map((guard) => guard.reviewItemId),
+              }),
+            },
+          }),
+        ]);
+        return { status: "BLOCKED_KNOWLEDGE_CONFLICT", blocked: true, decision };
+      }
+    } catch (error) {
+      if (!knowledgeRuntimeGovernanceService.isSensitiveCustomerRequest(message.content)) throw error;
+      const decision = fallbackHumanReviewDecision(
+        "Business information safety could not be verified. A team member needs to assist.",
+      );
+      await markConversationNeedsHumanReview({
+        businessId: conversation.businessId,
+        businessAccountId: conversation.business.businessAccountId,
+        conversationId: conversation.id,
+        leadId: conversation.leadId,
+        assignedStaffId: conversation.assignedStaffId,
+        reason: decision.reason,
+        messageId: message.id,
+        reviewType: HumanReviewType.KNOWLEDGE_CONFLICT,
+        source: "KNOWLEDGE_RUNTIME_GUARD_FAILURE",
+      });
+      return { status: "BLOCKED_KNOWLEDGE_CONFLICT", blocked: true, decision };
+    }
 
     let usage: Awaited<ReturnType<typeof aiUsageService.assertCanUseAiReplies>>;
     try {

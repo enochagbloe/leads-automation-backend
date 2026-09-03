@@ -102,6 +102,7 @@ const schema = z.object({
   KNOWLEDGE_DOCUMENT_WORKER_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),
   KNOWLEDGE_DOCUMENT_WORKER_STALE_SECONDS: z.coerce.number().int().min(60).max(86_400).default(600),
   KNOWLEDGE_DOCUMENT_WORKER_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+  KNOWLEDGE_GOVERNANCE_OPERATION_LEASE_SECONDS: z.coerce.number().int().min(60).max(3600).default(600),
   KNOWLEDGE_DOCUMENT_STALE_UPLOAD_MINUTES: z.coerce.number().int().min(5).max(1440).default(10),
   KNOWLEDGE_DOCUMENT_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(30),
   KNOWLEDGE_DOCUMENT_CLEANUP_BATCH_SIZE: z.coerce.number().int().positive().max(100).default(10),

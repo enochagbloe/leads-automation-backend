@@ -4,6 +4,7 @@ import {
   BusinessRole,
   PlanCode,
   Prisma,
+  Service,
   ServicePriceType,
   ServiceReadinessStatus,
   ServiceSource,
@@ -23,6 +24,8 @@ import {
   ServiceListQuery,
   UpdateServiceInput,
 } from "../validation/service.schemas";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "./knowledge-document/knowledge-settings-reconciliation.service";
+import { normalizeGovernanceCurrency, normalizeGovernanceNumber } from "./knowledge-document/knowledge-document-governance.service";
 
 export type ServiceActor = {
   userId: string;
@@ -30,6 +33,15 @@ export type ServiceActor = {
   businessId: string;
   membershipId: string;
   role: BusinessRole;
+};
+
+export type ServiceMutationGuard = {
+  assertCurrent(current: Readonly<Service>): void;
+  skipKnowledgeReconciliation?: boolean;
+};
+
+export type ServiceCreationOptions = {
+  governanceResolutionOperationId?: string;
 };
 
 type ReadinessInput = {
@@ -155,12 +167,13 @@ function serviceSlug(name: string) {
   return `${base}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function safeService<T extends object>(service: T): Omit<T, "businessId" | "createdById" | "updatedById"> {
+function safeService<T extends object>(service: T): Omit<T, "businessId" | "createdById" | "updatedById" | "governanceCreationOperationId"> {
   const safe = { ...service } as Record<string, unknown>;
   delete safe.businessId;
   delete safe.createdById;
   delete safe.updatedById;
-  return safe as Omit<T, "businessId" | "createdById" | "updatedById">;
+  delete safe.governanceCreationOperationId;
+  return safe as Omit<T, "businessId" | "createdById" | "updatedById" | "governanceCreationOperationId">;
 }
 
 export function listKey(actor: ServiceActor, query: ServiceListQuery) {
@@ -374,13 +387,43 @@ export const serviceService = {
     return safeService(service);
   },
 
-  async create(actor: ServiceActor, input: CreateServiceInput, context: Omit<AuditInput, "action">) {
+  async create(
+    actor: ServiceActor,
+    input: CreateServiceInput,
+    context: Omit<AuditInput, "action">,
+    options: ServiceCreationOptions = {},
+  ) {
     requireManager(actor);
     if (input.currency && !validCurrency(input.currency)) throw new AppError(422, "Invalid currency code.", "INVALID_CURRENCY");
     if (input.paymentRequiredBeforeBooking && !input.requiresPayment) {
       throw new AppError(422, "Payment required before booking requires requiresPayment to be true", "VALIDATION_ERROR");
     }
-    const service = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      if (options.governanceResolutionOperationId) {
+        const governanceOperation = await tx.knowledgeGovernanceResolutionOperation.findFirst({
+          where: {
+            id: options.governanceResolutionOperationId,
+            businessId: actor.businessId,
+            actorMembershipId: actor.membershipId,
+            status: "APPLYING",
+          },
+          select: { id: true },
+        });
+        if (!governanceOperation) {
+          throw new AppError(
+            409,
+            "The governance service-creation operation is no longer active.",
+            "KNOWLEDGE_REVIEW_OPERATION_STATE_CHANGED",
+          );
+        }
+        const existingForOperation = await tx.service.findFirst({
+          where: {
+            businessId: actor.businessId,
+            governanceCreationOperationId: options.governanceResolutionOperationId,
+          },
+        });
+        if (existingForOperation) return { service: existingForOperation, created: false };
+      }
       const duplicate = await tx.service.findFirst({
         where: {
           businessId: actor.businessId,
@@ -443,7 +486,8 @@ export const serviceService = {
           readinessStatus: readiness.readinessStatus,
           missingFields: readiness.missingFields,
           displayOrder: ((await tx.service.aggregate({ where: { businessId: actor.businessId }, _max: { displayOrder: true } }))._max.displayOrder ?? 0) + 1,
-          source: ServiceSource.MANUAL,
+          source: options.governanceResolutionOperationId ? ServiceSource.AI_APPROVED : ServiceSource.MANUAL,
+          governanceCreationOperationId: options.governanceResolutionOperationId,
           createdById: actor.userId,
           updatedById: actor.userId,
         },
@@ -451,21 +495,29 @@ export const serviceService = {
       await tx.auditLog.create({
         data: { ...context, action: AuditAction.BUSINESS_SERVICE_CREATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId: created.id, actorUserId: actor.userId, actorMembershipId: actor.membershipId, readinessStatus: created.readinessStatus }) },
       });
-      return created;
+      return { service: created, created: true };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
-    await invalidateServiceCaches(actor.businessId, service.id);
-    publish("business.service.created", actor, service, Object.keys(input));
+    if (!result.created) return safeService(result.service);
+    await invalidateServiceCaches(actor.businessId, result.service.id);
+    publish("business.service.created", actor, result.service, Object.keys(input));
     publish("business.services.summary.updated", actor);
-    return safeService(service);
+    return safeService(result.service);
   },
 
-  async update(actor: ServiceActor, serviceId: string, input: UpdateServiceInput, context: Omit<AuditInput, "action">) {
+  async update(
+    actor: ServiceActor,
+    serviceId: string,
+    input: UpdateServiceInput,
+    context: Omit<AuditInput, "action">,
+    guard?: ServiceMutationGuard,
+  ) {
     requireManager(actor);
     if (input.currency && !validCurrency(input.currency)) throw new AppError(422, "Invalid currency code.", "INVALID_CURRENCY");
     const result = await prisma.$transaction(async (tx) => {
       await lockService(tx, actor, serviceId);
       const existing = await tx.service.findFirst({ where: { id: serviceId, businessId: actor.businessId, isArchived: false } });
       if (!existing) throw new AppError(404, "Service not found", "SERVICE_NOT_FOUND");
+      guard?.assertCurrent(existing);
       if (input.paymentRequiredBeforeBooking && input.requiresPayment === undefined && !existing.requiresPayment) {
         throw new AppError(422, "Payment required before booking requires requiresPayment to be true", "VALIDATION_ERROR");
       }
@@ -479,7 +531,7 @@ export const serviceService = {
       assertSafeBookingRules(merged);
       const readiness = calculateServiceReadiness(merged);
       const changedFields = Object.keys(input).filter((field) => String(existing[field as keyof typeof existing] ?? "") !== String(input[field as keyof UpdateServiceInput] ?? ""));
-      if (changedFields.length === 0) return { service: existing, changedFields };
+      if (changedFields.length === 0) return { service: existing, changedFields, reconciliation: null };
       const updated = await tx.service.update({
         where: { id: serviceId },
         data: { ...input, ...readiness, updatedById: actor.userId },
@@ -502,21 +554,50 @@ export const serviceService = {
           }),
         },
       });
-      return { service: updated, changedFields };
+      const reconciliationFields = [...new Set([
+        ...changedFields,
+        ...(changedFields.includes("currency") ? ["basePrice"] : []),
+      ])];
+      const reconciliation = guard?.skipKnowledgeReconciliation ? null : await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE",
+        canonicalEntityId: serviceId,
+        fields: reconciliationFields.map((field) => ({
+          canonicalField: field,
+          value: updated[field as keyof typeof updated],
+          ...(field === "basePrice" ? {
+            normalizedValue: updated.basePrice === null
+              ? ""
+              : `${normalizeGovernanceCurrency(updated.currency)}:${normalizeGovernanceNumber(updated.basePrice)}`,
+          } : field === "durationMinutes" ? {
+            normalizedValue: normalizeGovernanceNumber(updated.durationMinutes),
+          } : {}),
+        })),
+      });
+      return { service: updated, changedFields, reconciliation };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
     if (result.changedFields.length === 0) return safeService(result.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.updated", actor, result.service, result.changedFields);
     publish("business.services.summary.updated", actor);
+    publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
     return safeService(result.service);
   },
 
-  async archive(actor: ServiceActor, serviceId: string, context: Omit<AuditInput, "action">) {
+  async archive(
+    actor: ServiceActor,
+    serviceId: string,
+    context: Omit<AuditInput, "action">,
+    guard?: ServiceMutationGuard,
+  ) {
     requireManager(actor);
     const service = await prisma.$transaction(async (tx) => {
       await lockService(tx, actor, serviceId);
       const existing = await tx.service.findFirst({ where: { id: serviceId, businessId: actor.businessId } });
       if (!existing) throw new AppError(404, "Service not found", "SERVICE_NOT_FOUND");
+      guard?.assertCurrent(existing);
       if (existing.isArchived) return { service: existing, changed: false };
       await mutationContext(tx, actor, existing.isActive ? -1 : 0);
       const updated = await tx.service.update({
@@ -524,11 +605,16 @@ export const serviceService = {
         data: { isArchived: true, isActive: false, readinessStatus: ServiceReadinessStatus.ARCHIVED, missingFields: [], archivedAt: new Date(), updatedById: actor.userId },
       });
       await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_ARCHIVED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
-      return { service: updated, changed: true };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE", canonicalEntityId: serviceId, fields: [], invalidateAllLinkedFacts: true,
+      });
+      return { service: updated, changed: true, reconciliation };
     }, TRANSACTION_OPTIONS);
     if (!service.changed) return safeService(service.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.archived", actor, service.service);
+    publishKnowledgeSettingsReconciliation(actor.businessId, service.reconciliation ?? null);
     publish("business.services.summary.updated", actor);
     return safeService(service.service);
   },
@@ -547,11 +633,16 @@ export const serviceService = {
         data: { isArchived: false, isActive: true, archivedAt: null, ...readiness, updatedById: actor.userId },
       });
       await tx.auditLog.create({ data: { ...context, action: AuditAction.BUSINESS_SERVICE_RESTORED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: asJson({ businessId: actor.businessId, serviceId, actorUserId: actor.userId, actorMembershipId: actor.membershipId }) } });
-      return { service: updated, changed: true };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId, actorUserId: actor.userId, actorMembershipId: actor.membershipId,
+        canonicalEntityType: "SERVICE", canonicalEntityId: serviceId, fields: [], invalidateAllLinkedFacts: true,
+      });
+      return { service: updated, changed: true, reconciliation };
     }, TRANSACTION_OPTIONS).catch(handleMutationError);
     if (!service.changed) return safeService(service.service);
     await invalidateServiceCaches(actor.businessId, serviceId);
     publish("business.service.restored", actor, service.service);
+    publishKnowledgeSettingsReconciliation(actor.businessId, service.reconciliation ?? null);
     publish("business.services.summary.updated", actor);
     return safeService(service.service);
   },

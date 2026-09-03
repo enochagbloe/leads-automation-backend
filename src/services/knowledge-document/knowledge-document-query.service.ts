@@ -4,6 +4,7 @@ import {
   KnowledgeAssetVisibility,
   KnowledgeDocumentProcessingStatus,
   KnowledgeDocumentStatus,
+  KnowledgeGovernanceStatus,
   Prisma,
 } from "@prisma/client";
 import { env } from "../../config/env";
@@ -21,6 +22,8 @@ import {
   resolveKnowledgeDocumentAccess,
   throwKnowledgeDocumentNotFound,
 } from "./knowledge-document.types";
+import { allowedKnowledgeGovernanceActions } from "./knowledge-governance-resolution-policy";
+import { customerSafeKnowledgeDocumentWhere } from "./knowledge-document-runtime-policy";
 
 function accessWhere(actor: KnowledgeDocumentActor, documentId?: string): Prisma.KnowledgeDocumentWhereInput {
   return {
@@ -32,7 +35,9 @@ function accessWhere(actor: KnowledgeDocumentActor, documentId?: string): Prisma
       ? {
         status: KnowledgeDocumentStatus.ACTIVE,
         processingStatus: KnowledgeDocumentProcessingStatus.READY,
+        governanceStatus: KnowledgeGovernanceStatus.APPROVED,
         visibility: KnowledgeAssetVisibility.CLIENT_SENDABLE,
+        ...customerSafeKnowledgeDocumentWhere,
       }
       : {}),
   };
@@ -74,6 +79,7 @@ const publicVersionSummarySelect = {
   fileSize: true,
   mimeType: true,
   processingStatus: true,
+  governanceStatus: true,
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -95,7 +101,11 @@ const publicDocumentFields = {
   status: true,
   visibility: true,
   processingStatus: true,
+  governanceStatus: true,
   archivedAt: true,
+  archiveReason: true,
+  replacesDocumentId: true,
+  supersededByDocumentId: true,
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.KnowledgeDocumentSelect;
@@ -120,6 +130,8 @@ const publicFactSelect = {
   rowNumber: true,
   confidence: true,
   sourceExcerpt: true,
+  governanceStatus: true,
+  governedAt: true,
 } satisfies Prisma.KnowledgeDocumentFactSelect;
 
 const publicActiveVersionDetailSelect = {
@@ -129,6 +141,7 @@ const publicActiveVersionDetailSelect = {
   fileSize: true,
   mimeType: true,
   processingStatus: true,
+  governanceStatus: true,
   isActive: true,
   createdAt: true,
   updatedAt: true,
@@ -255,14 +268,64 @@ export const knowledgeDocumentQueryService = {
       }),
     ]);
     if (!document) return documentNotFound(actor, documentId);
+    const canManage = canManageKnowledgeDocuments(access);
+    const governanceReviews = canManage && document.activeVersion
+      ? await prisma.knowledgeGovernanceReview.findMany({
+        where: {
+          businessId: actor.businessId,
+          documentId,
+          versionId: document.activeVersion.id,
+        },
+        orderBy: [{ reviewStatus: "asc" }, { priority: "asc" }, { detectedAt: "asc" }],
+        select: {
+          id: true,
+          factId: true,
+          comparisonType: true,
+          priority: true,
+          reviewStatus: true,
+          canonicalEntityType: true,
+          canonicalEntityId: true,
+          canonicalField: true,
+          existingValue: true,
+          documentValue: true,
+          normalizedExistingValue: true,
+          normalizedDocumentValue: true,
+          requiresHumanReview: true,
+          blocksAiUse: true,
+          relatedDocumentId: true,
+          relatedVersionId: true,
+          detectedAt: true,
+          reviewedAt: true,
+          resolutionAction: true,
+          resolutionReason: true,
+        },
+      })
+      : [];
+    const unresolvedGovernanceReviews = governanceReviews.filter(
+      (review) => review.requiresHumanReview && review.reviewStatus !== "RESOLVED",
+    );
     const { processingErrorCode, processingErrorMessage, ...publicDocument } = document;
     return {
       ...publicDocument,
+      ...(canManage ? {
+        governance: {
+          status: document.governanceStatus,
+          reviewCount: governanceReviews.length,
+          unresolvedReviewCount: unresolvedGovernanceReviews.length,
+          criticalUnresolvedCount: unresolvedGovernanceReviews.filter((review) => review.priority === "CRITICAL").length,
+          reviews: governanceReviews.map((review) => ({
+            ...review,
+            allowedResolutionActions: review.reviewStatus === "PENDING_REVIEW"
+              ? allowedKnowledgeGovernanceActions(review)
+              : [],
+          })),
+        },
+      } : {}),
       processingError: processingErrorCode
         ? { code: processingErrorCode, message: processingErrorMessage }
         : null,
       availableActions: availableActions(
-        canManageKnowledgeDocuments(access),
+        canManage,
         document.status,
         document.processingStatus,
         document.activeVersion?.extraction?.status === "COMPLETED"

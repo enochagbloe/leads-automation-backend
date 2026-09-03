@@ -1,12 +1,13 @@
 import { AuditAction, BusinessRole, DayOfWeek, Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
-import type { UpsertAvailabilityInput } from "../validation/availability.schemas";
+import { availabilityRuleSchema, type UpsertAvailabilityInput } from "../validation/availability.schemas";
 import type { AuditInput } from "./audit.service";
 import { invalidateBusinessSetupStatus } from "./business-setup.service";
 import { invalidateBusinessKnowledgePreview } from "./business-knowledge-cache.service";
 import { cacheService } from "./cache.service";
 import { realtimeService } from "./realtime.service";
+import { publishKnowledgeSettingsReconciliation, reconcileKnowledgeAfterSettingsMutation } from "./knowledge-document/knowledge-settings-reconciliation.service";
 
 export type AvailabilityActor = {
   userId: string;
@@ -34,6 +35,12 @@ const RULE_SELECT = {
 } satisfies Prisma.BusinessAvailabilitySelect;
 
 type PublicRule = Prisma.BusinessAvailabilityGetPayload<{ select: typeof RULE_SELECT }>;
+export type AvailabilityMutationGuard = {
+  assertCurrent(current: Readonly<PublicRule> | null): void;
+  skipKnowledgeReconciliation?: boolean;
+};
+type AvailabilityRulePatch = Pick<UpsertAvailabilityInput["rules"][number], "dayOfWeek" | "isOpen" | "openTime" | "closeTime">
+  & Partial<Pick<UpsertAvailabilityInput["rules"][number], "breakStartTime" | "breakEndTime" | "appliesToAllServices">>;
 type AvailabilityResponse = {
   businessId: string;
   timezone: string;
@@ -292,7 +299,18 @@ export const availabilityService = {
           },
         });
       }
-      return { rules, changedDays, timezoneChanged };
+      const reconciliation = await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "BUSINESS_AVAILABILITY",
+        fields: rules.filter((rule) => changedDays.includes(rule.dayOfWeek)).map((rule) => ({
+          canonicalField: rule.dayOfWeek,
+          value: normalizedRule(rule),
+          normalizedValue: `${rule.dayOfWeek}:${rule.isOpen}:${rule.openTime}:${rule.closeTime}`,
+        })),
+      });
+      return { rules, changedDays, timezoneChanged, reconciliation };
     }, TRANSACTION_OPTIONS);
 
     if (result.changedDays.length > 0 || result.timezoneChanged) {
@@ -309,6 +327,128 @@ export const availabilityService = {
           payload: { businessId: actor.businessId, updatedAt, changedDays: result.changedDays },
         });
       }
+      publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
+    }
+    return this.get(actor);
+  },
+
+  async updateRule(
+    actor: AvailabilityActor,
+    input: AvailabilityRulePatch,
+    context: Omit<AuditInput, "action">,
+    guard?: AvailabilityMutationGuard,
+  ) {
+    requireManager(actor);
+    const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw(Prisma.sql`
+        SELECT "id" FROM "Business"
+        WHERE "id" = ${actor.businessId}
+          AND "businessAccountId" = ${actor.businessAccountId}
+          AND "deletedAt" IS NULL
+        FOR UPDATE
+      `);
+      const business = await tx.business.findFirst({
+        where: { id: actor.businessId, businessAccountId: actor.businessAccountId, deletedAt: null },
+        select: { id: true, timezone: true },
+      });
+      if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
+
+      const existing = await tx.businessAvailability.findUnique({
+        where: { businessId_dayOfWeek: { businessId: actor.businessId, dayOfWeek: input.dayOfWeek } },
+        select: RULE_SELECT,
+      });
+      guard?.assertCurrent(existing);
+      const previousValue = existing ? normalizedRule(existing) : null;
+      const validated = availabilityRuleSchema.parse({
+        ...input,
+        breakStartTime: input.isOpen
+          ? input.breakStartTime === undefined ? existing?.breakStartTime ?? null : input.breakStartTime
+          : null,
+        breakEndTime: input.isOpen
+          ? input.breakEndTime === undefined ? existing?.breakEndTime ?? null : input.breakEndTime
+          : null,
+        appliesToAllServices: input.appliesToAllServices ?? existing?.appliesToAllServices ?? true,
+      });
+      const nextValue = normalizedRule(validated);
+      const changed = JSON.stringify(previousValue) !== JSON.stringify(nextValue);
+      if (!changed && existing) return { rule: existing, changed: false, reconciliation: null };
+
+      const times = {
+        openTime: validated.isOpen ? validated.openTime ?? null : null,
+        closeTime: validated.isOpen ? validated.closeTime ?? null : null,
+        breakStartTime: validated.isOpen ? validated.breakStartTime ?? null : null,
+        breakEndTime: validated.isOpen ? validated.breakEndTime ?? null : null,
+      };
+      const rule = await tx.businessAvailability.upsert({
+        where: { businessId_dayOfWeek: { businessId: actor.businessId, dayOfWeek: input.dayOfWeek } },
+        create: {
+          businessId: actor.businessId,
+          dayOfWeek: input.dayOfWeek,
+          isOpen: validated.isOpen,
+          ...times,
+          timezone: business.timezone,
+          appliesToAllServices: validated.appliesToAllServices,
+          isActive: true,
+          createdById: actor.userId,
+          updatedById: actor.userId,
+        },
+        update: {
+          isOpen: validated.isOpen,
+          ...times,
+          timezone: business.timezone,
+          appliesToAllServices: validated.appliesToAllServices,
+          isActive: true,
+          updatedById: actor.userId,
+        },
+        select: RULE_SELECT,
+      });
+      await tx.auditLog.create({
+        data: {
+          ...context,
+          action: AuditAction.BUSINESS_AVAILABILITY_UPDATED,
+          businessId: actor.businessId,
+          userId: actor.userId,
+          actorMembershipId: actor.membershipId,
+          metadata: json({
+            businessId: actor.businessId,
+            actorUserId: actor.userId,
+            actorMembershipId: actor.membershipId,
+            changedDays: [input.dayOfWeek],
+            previousValues: { timezone: business.timezone, rules: previousValue ? [previousValue] : [] },
+            newValues: { timezone: business.timezone, rules: [normalizedRule(rule)] },
+          }),
+        },
+      });
+      const reconciliation = guard?.skipKnowledgeReconciliation ? null : await reconcileKnowledgeAfterSettingsMutation(tx, {
+        businessId: actor.businessId,
+        actorUserId: actor.userId,
+        actorMembershipId: actor.membershipId,
+        canonicalEntityType: "BUSINESS_AVAILABILITY",
+        canonicalEntityId: rule.id,
+        fields: [{
+          canonicalField: rule.dayOfWeek,
+          value: normalizedRule(rule),
+          normalizedValue: `${rule.dayOfWeek}:${rule.isOpen}:${rule.openTime}:${rule.closeTime}`,
+        }],
+      });
+      return { rule, changed: true, reconciliation };
+    }, TRANSACTION_OPTIONS);
+
+    if (result.changed) {
+      await Promise.all([
+        invalidateAvailabilityCaches(actor.businessId),
+        cacheService.del(`business:${actor.businessId}:profile`),
+      ]);
+      const updatedAt = result.rule.updatedAt.toISOString();
+      for (const type of ["business.availability.updated", "business.availability.summary.updated"] as const) {
+        realtimeService.publish({
+          type,
+          businessId: actor.businessId,
+          broadcastToStaff: true,
+          payload: { businessId: actor.businessId, updatedAt, changedDays: [input.dayOfWeek] },
+        });
+      }
+      publishKnowledgeSettingsReconciliation(actor.businessId, result.reconciliation);
     }
     return this.get(actor);
   },

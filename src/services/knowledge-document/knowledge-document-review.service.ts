@@ -2,25 +2,33 @@ import {
   AuditAction,
   BusinessRole,
   KnowledgeDocumentProcessingStatus,
+  KnowledgeDocumentArchiveReason,
   KnowledgeDocumentStatus,
+  KnowledgeFactGovernanceStatus,
+  KnowledgeGovernanceResolutionAction,
+  KnowledgeGovernanceReviewStatus,
+  KnowledgeGovernanceStatus,
   Prisma,
 } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
-import { invalidateAiBusinessContext } from "../ai-context-builder.service";
 import { AuditInput } from "../audit.service";
-import { knowledgeEmbeddingService } from "../knowledge-embedding.service";
 import { realtimeService } from "../realtime.service";
 import {
   ApproveKnowledgeDocumentReviewInput,
   RejectKnowledgeDocumentReviewInput,
 } from "../../validation/knowledge.schemas";
 import { evaluateKnowledgeDocumentReviewState } from "./knowledge-document-review-policy";
+import { lockKnowledgeDocumentGovernance } from "./knowledge-document-governance-lock.service";
 import {
   assertCanManageKnowledgeDocuments,
   KnowledgeDocumentActor,
   throwKnowledgeDocumentNotFound,
 } from "./knowledge-document.types";
+import {
+  enqueueKnowledgeRuntimeRefresh,
+  knowledgeRuntimeRefreshService,
+} from "./knowledge-runtime-refresh.service";
 
 type ReviewDecision = "APPROVED" | "REJECTED";
 
@@ -31,23 +39,16 @@ function reviewError(reason: string): AppError {
   if (reason === "KNOWLEDGE_DOCUMENT_REVIEW_NOT_APPROVABLE") {
     return new AppError(409, "This document cannot be approved because extraction and analysis are incomplete.", reason);
   }
-  return new AppError(409, "The document review state changed. Refresh and try again.", "KNOWLEDGE_DOCUMENT_REVIEW_STATE_CHANGED");
-}
-
-async function refreshRuntimeKnowledge(businessId: string, documentId: string) {
-  const results = await Promise.allSettled([
-    invalidateAiBusinessContext(businessId),
-    knowledgeEmbeddingService.syncDocument(documentId),
-  ]);
-  for (const result of results) {
-    if (result.status === "rejected") {
-      console.error("Knowledge runtime refresh failed after review decision", {
-        businessId,
-        documentId,
-        error: result.reason,
-      });
-    }
+  if (reason === "KNOWLEDGE_DOCUMENT_GOVERNANCE_REVIEW_REQUIRED") {
+    return new AppError(409, "Resolve every required fact review before approving this document.", reason);
   }
+  if (reason === "KNOWLEDGE_DOCUMENT_FILTERED_CHUNKS_REQUIRED") {
+    return new AppError(409, "This document contains rejected facts that cannot be exposed to customers.", reason);
+  }
+  if (reason === "KNOWLEDGE_DOCUMENT_REVIEW_IN_PROGRESS") {
+    return new AppError(409, "A fact governance decision is currently being applied.", reason);
+  }
+  return new AppError(409, "The document review state changed. Refresh and try again.", "KNOWLEDGE_DOCUMENT_REVIEW_STATE_CHANGED");
 }
 
 function publishReview(
@@ -90,10 +91,10 @@ async function decide(
 
   const processingStatus = decision === "APPROVED"
     ? KnowledgeDocumentProcessingStatus.READY
-    : KnowledgeDocumentProcessingStatus.FAILED;
+    : KnowledgeDocumentProcessingStatus.NEEDS_REVIEW;
   const now = new Date();
   const result = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('knowledge_document_review'), hashtext(${documentId}))`;
+    await lockKnowledgeDocumentGovernance(tx, documentId);
     const document = await tx.knowledgeDocument.findFirst({
       where: {
         id: documentId,
@@ -106,6 +107,27 @@ async function decide(
           include: {
             extraction: { select: { status: true } },
             analysis: { select: { status: true, requiresHumanReview: true } },
+            _count: {
+              select: {
+                facts: true,
+              },
+            },
+            facts: {
+              where: { governanceStatus: { not: KnowledgeFactGovernanceStatus.APPROVED } },
+              select: { id: true },
+            },
+            governanceReviews: {
+              where: {
+                reviewStatus: {
+                  in: [
+                    KnowledgeGovernanceReviewStatus.PENDING_REVIEW,
+                    KnowledgeGovernanceReviewStatus.APPLYING,
+                  ],
+                },
+                requiresHumanReview: true,
+              },
+              select: { id: true, reviewStatus: true },
+            },
           },
         },
       },
@@ -122,15 +144,18 @@ async function decide(
       extractionStatus: document.activeVersion.extraction?.status ?? null,
       analysisStatus: document.activeVersion.analysis?.status ?? null,
       requiresHumanReview: document.activeVersion.analysis?.requiresHumanReview ?? null,
+      unresolvedGovernanceReviewCount: document.activeVersion.governanceReviews.length,
+      applyingGovernanceReviewCount: document.activeVersion.governanceReviews.filter(
+        (item) => item.reviewStatus === KnowledgeGovernanceReviewStatus.APPLYING,
+      ).length,
+      governanceFactCount: document.activeVersion._count.facts,
+      nonApprovedGovernanceFactCount: document.activeVersion.facts.length,
     });
     if (!reviewState.reviewable || (decision === "APPROVED" && !reviewState.approvable)) {
       throw reviewError(reviewState.reason ?? "KNOWLEDGE_DOCUMENT_REVIEW_STATE_CHANGED");
     }
-
-    const errorCode = decision === "REJECTED" ? "KNOWLEDGE_DOCUMENT_REVIEW_REJECTED" : null;
-    const errorMessage = decision === "REJECTED"
-      ? "The document analysis was rejected. Replace the document or retry processing after correcting the source."
-      : null;
+    const errorCode = decision === "REJECTED" ? "KNOWLEDGE_DOCUMENT_REVIEW_NOT_APPLIED" : null;
+    const errorMessage = decision === "REJECTED" ? "The document was archived and will not be used." : null;
     const documentChanged = await tx.knowledgeDocument.updateMany({
       where: {
         id: documentId,
@@ -140,7 +165,17 @@ async function decide(
         activeVersionId: input.versionId,
         processingStatus: KnowledgeDocumentProcessingStatus.NEEDS_REVIEW,
       },
-      data: { processingStatus, processingErrorCode: errorCode, processingErrorMessage: errorMessage },
+      data: {
+        processingStatus,
+        processingErrorCode: errorCode,
+        processingErrorMessage: errorMessage,
+        governanceStatus: decision === "APPROVED" ? KnowledgeGovernanceStatus.APPROVED : KnowledgeGovernanceStatus.ARCHIVED,
+        ...(decision === "REJECTED" ? {
+          status: KnowledgeDocumentStatus.ARCHIVED,
+          archivedAt: now,
+          archiveReason: KnowledgeDocumentArchiveReason.REVIEW_NOT_APPLIED,
+        } : {}),
+      },
     });
     const versionChanged = await tx.knowledgeDocumentVersion.updateMany({
       where: {
@@ -150,7 +185,12 @@ async function decide(
         isActive: true,
         processingStatus: KnowledgeDocumentProcessingStatus.NEEDS_REVIEW,
       },
-      data: { processingStatus, processingErrorCode: errorCode, processingErrorMessage: errorMessage },
+      data: {
+        processingStatus,
+        processingErrorCode: errorCode,
+        processingErrorMessage: errorMessage,
+        governanceStatus: decision === "APPROVED" ? KnowledgeGovernanceStatus.APPROVED : KnowledgeGovernanceStatus.ARCHIVED,
+      },
     });
     if (documentChanged.count !== 1 || versionChanged.count !== 1) {
       throw reviewError("KNOWLEDGE_DOCUMENT_REVIEW_STATE_CHANGED");
@@ -162,13 +202,36 @@ async function decide(
           documentId,
           businessId: actor.businessId,
           status: "COMPLETED",
-          requiresHumanReview: true,
         },
         data: { requiresHumanReview: false },
       });
       if (analysisChanged.count !== 1) {
         throw reviewError("KNOWLEDGE_DOCUMENT_REVIEW_STATE_CHANGED");
       }
+    } else {
+      await Promise.all([
+        tx.knowledgeDocumentFact.updateMany({
+          where: { businessId: actor.businessId, documentId, versionId: input.versionId },
+          data: { governanceStatus: KnowledgeFactGovernanceStatus.ARCHIVED, governedAt: now },
+        }),
+        tx.knowledgeGovernanceReview.updateMany({
+          where: {
+            businessId: actor.businessId,
+            documentId,
+            versionId: input.versionId,
+            reviewStatus: KnowledgeGovernanceReviewStatus.PENDING_REVIEW,
+          },
+          data: {
+            reviewStatus: KnowledgeGovernanceReviewStatus.RESOLVED,
+            requiresHumanReview: false,
+            blocksAiUse: true,
+            reviewedAt: now,
+            reviewedByMembershipId: actor.membershipId,
+            resolutionAction: KnowledgeGovernanceResolutionAction.REVIEW_NOT_APPLIED,
+            resolutionReason: input.reason ?? "Document review was not applied.",
+          },
+        }),
+      ]);
     }
 
     const metadata: Prisma.InputJsonObject = {
@@ -193,10 +256,21 @@ async function decide(
         metadata,
       },
     });
-    return { id: documentId, versionId: input.versionId, reviewDecision: decision, processingStatus };
+    await enqueueKnowledgeRuntimeRefresh(tx, {
+      businessId: actor.businessId,
+      documentId,
+    });
+    return {
+      id: documentId,
+      versionId: input.versionId,
+      reviewDecision: decision,
+      processingStatus,
+      governanceStatus: decision === "APPROVED" ? KnowledgeGovernanceStatus.APPROVED : KnowledgeGovernanceStatus.ARCHIVED,
+      documentStatus: decision === "REJECTED" ? KnowledgeDocumentStatus.ARCHIVED : KnowledgeDocumentStatus.ACTIVE,
+    };
   });
 
-  await refreshRuntimeKnowledge(actor.businessId, documentId);
+  await knowledgeRuntimeRefreshService.processDocuments([documentId]);
   publishReview(actor, documentId, input.versionId, decision, processingStatus);
   return result;
 }

@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
+import { lockKnowledgeDocumentLifecycleChange } from "./knowledge-document-governance-lock.service";
 
 export const KNOWLEDGE_DOCUMENT_VERSION_TRANSACTION_OPTIONS = {
   maxWait: 5_000,
@@ -171,6 +172,7 @@ export async function activateKnowledgeDocumentReplacement(
     storageObjectKey: string;
   },
 ) {
+  await lockKnowledgeDocumentLifecycleChange(tx, input.businessId, input.documentId);
   await lockKnowledgeDocumentVersion(tx, input.documentId);
   const version = await tx.knowledgeDocumentVersion.findFirst({
     where: {
