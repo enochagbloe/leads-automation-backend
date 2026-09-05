@@ -3504,7 +3504,21 @@ enum DemoSessionStatus {
   DESTROYED
 }
 
+enum DemoSetupStatus {
+  WAITING_FOR_BUSINESS
+  PROCESSING_WEBSITE
+  READY
+  READY_PARTIAL
+  FAILED
+}
+
 model DemoSession {
+  setupStatus DemoSetupStatus @default(WAITING_FOR_BUSINESS)
+  setupAttemptId String?
+  setupStartedAt DateTime?
+  setupCompletedAt DateTime?
+  demoContext Json?
+
   id String @id @default(cuid())
   tokenHash String @unique
   ipHash String

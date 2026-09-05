@@ -27,6 +27,8 @@ export type AiCompletionInput = {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: { type: "json_object" };
+  signal?: AbortSignal;
+  maxAttempts?: number;
   metadata?: Record<string, unknown>;
 };
 
@@ -155,17 +157,18 @@ export class OpenRouterProvider implements AiProvider {
     if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
 
     const startedAt = Date.now();
-    const models = attemptModels(primaryModel);
+    const models = attemptModels(primaryModel).slice(0, input.maxAttempts ?? Infinity);
     const fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }> = [];
 
     for (const model of models) {
+      if (input.signal?.aborted) break;
       const attemptStartedAt = Date.now();
       try {
         const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: openRouterHeaders(),
           body: openRouterCompletionBody(input, model),
-          signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+          signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS)]) : AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
         });
         const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
         const rawText = raw?.choices?.[0]?.message?.content;

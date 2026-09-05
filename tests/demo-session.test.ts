@@ -1,3 +1,4 @@
+import { demoSetupService } from "../src/services/demo-setup.service";
 import express from "express";
 import { demoRouter } from "../src/routes/demo.routes";
 import { errorHandler } from "../src/middleware/error";
@@ -116,8 +117,9 @@ test("HTTP demo contract authenticates GET/DELETE and returns creation credentia
   mockMethod(t, demoService, "create", async () => ({ success: true, token, demo: { sessionId: "session" } }));
   mockMethod(t, demoService, "authenticate", async value => { if (value !== token) throw new AppError(401, "Invalid demo session", "DEMO_SESSION_INVALID"); return actor; });
   mockMethod(t, demoService, "get", async value => { assert.deepEqual(value, actor); return { success: true, demo: { sessionId: "session" } }; });
+  mockMethod(t, demoSetupService, "setup", async (value, body) => { assert.deepEqual(value, actor); assert.equal(body.businessName, "Acme"); return { success: true }; });
   const destroy = mockMethod(t, demoService, "destroy", async id => { assert.equal(id, "session"); });
-  const app = express(); app.use("/api/demo", demoRouter); app.use(errorHandler);
+  const app = express(); app.use(express.json()); app.use("/api/demo", demoRouter); app.use(errorHandler);
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -136,4 +138,6 @@ test("HTTP demo contract authenticates GET/DELETE and returns creation credentia
   }
   assert.equal((await fetch(url, { method: "DELETE", headers })).status, 200);
   assert.equal(destroy.mock.callCount(), 1);
+  assert.equal((await fetch(`${url}/setup`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ businessName: "Acme" }) })).status, 200);
+  assert.equal((await fetch(`${url}/setup`, { method: "POST" })).status, 401);
 });

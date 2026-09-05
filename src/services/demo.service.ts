@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
+import { demoContextSummary } from "./demo-context.service";
 import { realtimeService } from "./realtime.service";
 import { AppError } from "../utils/errors";
 
@@ -17,13 +18,13 @@ async function read(tx: Prisma.TransactionClient, id: string) {
   const session = await tx.demoSession.findUnique({ where: { id } });
   if (!session || session.status !== "ACTIVE") throw invalid();
   if (session.expiresAt <= new Date()) throw new AppError(401, "Demo session expired", "DEMO_SESSION_EXPIRED");
-  const business = await tx.business.findUnique({ where: { demoSessionId: id }, select: { id: true, name: true, timezone: true, defaultCurrency: true } });
+  const business = await tx.business.findUnique({ where: { demoSessionId: id }, select: { id: true, name: true, industry: true, timezone: true, defaultCurrency: true } });
   if (!business) throw invalid();
   const conversation = await tx.conversation.findFirst({ where: { businessId: business.id, channel: "DEMO", deletedAt: null }, select: { id: true, displayId: true, status: true, channel: true, unreadCount: true, leadId: true } });
   if (!conversation) throw invalid();
   const customer = await tx.lead.findFirst({ where: { id: conversation.leadId, businessId: business.id }, select: { id: true, fullName: true } });
   if (!customer) throw invalid();
-  return { sessionId: id, expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, limits: { conversations: 1, messages: 0, leads: 1, appointments: 0 } };
+  return { sessionId: id, setupStatus: session.setupStatus ?? "WAITING_FOR_BUSINESS", ...demoContextSummary(session.demoContext), expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, limits: { conversations: 1, messages: 0, leads: 1, appointments: 0 } };
 }
 
 export const demoService = {
@@ -94,7 +95,7 @@ export const demoService = {
       await tx.business.delete({ where: { id: business.id, demoSessionId: id } });
       await tx.businessAccount.delete({ where: { id: account.id, demoSessionId: id } });
       await tx.user.delete({ where: { id: owner.id, demoSessionId: id } });
-      await tx.demoSession.update({ where: { id }, data: { status: "DESTROYED", destroyedAt: new Date() } });
+      await tx.demoSession.update({ where: { id }, data: { status: "DESTROYED", destroyedAt: new Date(), demoContext: Prisma.DbNull, setupAttemptId: null, setupStartedAt: null, setupCompletedAt: null, setupStatus: "WAITING_FOR_BUSINESS" } });
     }, { timeout: 30_000 });
     realtimeService.disconnectDemo(id);
   },

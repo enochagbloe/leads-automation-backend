@@ -1,3 +1,5 @@
+import { demoSetupService } from "../src/services/demo-setup.service";
+import { demoContextService } from "../src/services/demo-context.service";
 import { app } from "../src/app";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -73,6 +75,8 @@ run("demo A cannot read or mutate demo B or a production tenant through HTTP", a
         assert.equal(response.status, 403);
         assert.equal((await response.json() as any).error.code, "DEMO_RESOURCE_FORBIDDEN");
       }
+      const setup = await fetch(`${base}/api/demo/session/setup`, { method: "POST", headers, body: JSON.stringify({ businessName: "Unauthorized" }) });
+      assert.equal(setup.status, 403); await setup.arrayBuffer();
       for (const path of [`/api/conversations/${target.conversationId}`, `/api/leads/${target.leadId}`]) {
         for (const method of ["GET", "PATCH", "DELETE"]) {
           const response = await fetch(`${base}${path}`, { method, headers, ...(method === "PATCH" ? { body: JSON.stringify({ subject: "unauthorized change", fullName: "unauthorized change" }) } : {}) });
@@ -120,6 +124,32 @@ run("concurrent stale-key retries create one fresh session and never revive old 
       assert.equal((await demoService.authenticate(fresh.token)).demoSessionId, fresh.demo.sessionId);
       previous = fresh;
     }
+  } finally {
+    for (const id of ids) { await demoService.destroy(id); await prisma.demoSession.delete({ where: { id } }); }
+    env.DEMO_ENABLED = old;
+  }
+});
+
+run("demo setup persists and restores only its tenant context; cleanup erases website data", async () => {
+  const old = env.DEMO_ENABLED; env.DEMO_ENABLED = true;
+  const ids: string[] = [];
+  try {
+    const a = await demoService.create(randomUUID()); ids.push(a.demo.sessionId);
+    const b = await demoService.create(randomUUID()); ids.push(b.demo.sessionId);
+    const actor = await demoService.authenticate(a.token);
+    await demoSetupService.setup(actor, { businessName: "Demo Acme" });
+    const restored = await demoService.get(actor);
+    assert.equal(restored.demo.setupStatus, "READY_PARTIAL"); assert.equal(restored.demo.business.name, "Demo Acme");
+    assert.equal((await demoContextService.getBusinessContext(actor)).businessName, "Demo Acme");
+    await assert.rejects(demoSetupService.setup({ ...actor, businessId: b.demo.business.id }, { businessName: "Cross tenant" }), { code: "DEMO_RESOURCE_FORBIDDEN" });
+    await assert.rejects(demoContextService.getBusinessContext({ ...actor, businessId: b.demo.business.id }), { code: "DEMO_RESOURCE_FORBIDDEN" });
+    assert.equal((await prisma.business.findUniqueOrThrow({ where: { id: b.demo.business.id } })).name, "Demo Business");
+    await demoSetupService.setup(actor, { businessName: "Replacement" });
+    assert.equal((await demoContextService.getBusinessContext(actor)).businessName, "Replacement");
+    assert.equal(await prisma.business.count({ where: { demoSessionId: actor.demoSessionId } }), 1);
+    await demoService.destroy(actor.demoSessionId);
+    const destroyed = await prisma.demoSession.findUniqueOrThrow({ where: { id: actor.demoSessionId } });
+    assert.equal(destroyed.demoContext, null); assert.equal(destroyed.setupStartedAt, null); assert.equal(destroyed.setupAttemptId, null);
   } finally {
     for (const id of ids) { await demoService.destroy(id); await prisma.demoSession.delete({ where: { id } }); }
     env.DEMO_ENABLED = old;

@@ -38,3 +38,10 @@ export const aiPromptAutosaveLimiter = rateLimit({
 });
 
 export const demoCreationLimiter = buildLimiter(20, 60 * 60 * 1000);
+
+export const demoSetupIpLimiter = buildLimiter(10, 15 * 60 * 1000);
+export const demoSetupSessionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: "draft-7", legacyHeaders: false,
+  keyGenerator: req => req.demo!.demoSessionId,
+  message: { error: { code: "DEMO_LIMIT_REACHED", message: "Too many demo setup requests. Try again later." } },
+});
