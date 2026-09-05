@@ -60,16 +60,17 @@ test("creation reuses a retry and creates only isolated domain records without s
     demoSession: {
       findUnique: async () => session ?? null,
       count: async () => 0,
+      update: async ({ data }: any) => { Object.assign(session, data); },
       create: async ({ data }: any) => { session = { id: "session", status: "ACTIVE", ...data }; return session; },
     },
-    user: { create: async ({ data }: any) => { assert.equal(data.status, "DISABLED"); assert.equal(data.canCreateBusiness, false); assert.equal(data.demoSessionId, "session"); return { id: "owner" }; } },
-    businessAccount: { create: async ({ data }: any) => { assert.equal(data.demoSessionId, "session"); return { id: "account" }; } },
+    user: { create: async ({ data }: any) => { assert.equal(data.status, "DISABLED"); assert.equal(data.canCreateBusiness, false); assert.equal(data.demoSessionId, session.id); return { id: "owner" }; } },
+    businessAccount: { create: async ({ data }: any) => { assert.equal(data.demoSessionId, session.id); return { id: "account" }; } },
     business: {
-      create: async ({ data }: any) => { businesses++; assert.equal(data.demoSessionId, "session"); assert.equal(data.aiRepliesEnabled, false); return { id: "business" }; },
+      create: async ({ data }: any) => { businesses++; assert.equal(data.demoSessionId, session.id); assert.equal(data.aiRepliesEnabled, false); return { id: "business" }; },
       findUnique: async () => ({ id: "business", name: "Demo Business" }),
     },
     lead: {
-      create: async ({ data }: any) => { assert.equal(data.phone, "demo_customer_session"); assert.equal(data.businessId, "business"); return { id: "customer" }; },
+      create: async ({ data }: any) => { assert.equal(data.phone, `demo_customer_${session.id}`); assert.equal(data.businessId, "business"); return { id: "customer" }; },
       findFirst: async () => ({ id: "customer", fullName: "Demo Customer" }),
     },
     conversation: {
@@ -84,6 +85,18 @@ test("creation reuses a retry and creates only isolated domain records without s
   assert.equal(businesses, 1); assert.equal(a.token, b.token);
   assert.equal(session.tokenHash, hashDemoToken(a.token));
   assert.equal(a.demo.customer.name, "Demo Customer");
+  assert.equal("messages" in a.demo, false);
+  for (const status of ["ACTIVE", "EXPIRED", "DESTROYED"]) {
+    const oldSession = session;
+    oldSession.status = status;
+    oldSession.expiresAt = new Date(0);
+    const fresh = await demoService.create("ip", "random-retry-key-12345");
+    assert.notEqual(fresh.token, a.token);
+    assert.notEqual(fresh.demo.sessionId, oldSession.id);
+    assert.equal(oldSession.idempotencyHash, null);
+    assert.equal(oldSession.status, status);
+    assert.equal((await demoService.create("ip", "random-retry-key-12345")).token, fresh.token);
+  }
 });
 test("cleanup refuses a mismatched production parent before deleting anything", async t => {
   let deleted = false;
@@ -116,7 +129,11 @@ test("HTTP demo contract authenticates GET/DELETE and returns creation credentia
   assert.equal((await fetch(url)).status, 401);
   assert.equal((await fetch(url, { method: "DELETE" })).status, 401);
   const headers = { Authorization: `Bearer ${token}` };
-  assert.equal((await fetch(url, { headers })).status, 200);
+  for (let i = 0; i < 125; i++) {
+    const restored = await fetch(url, { headers });
+    assert.equal(restored.status, 200);
+    await restored.arrayBuffer();
+  }
   assert.equal((await fetch(url, { method: "DELETE", headers })).status, 200);
   assert.equal(destroy.mock.callCount(), 1);
 });

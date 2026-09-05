@@ -54,6 +54,7 @@ app.get("/api", (_req, res) => res.json({
   status: "ok",
   endpoints: {
     health: "/api/health",
+    demo: env.DEMO_ENABLED ? "/api/demo/session" : undefined,
     auth: "/api/auth",
     me: "/api/me/business-memberships",
     invites: "/api/invites/:token",

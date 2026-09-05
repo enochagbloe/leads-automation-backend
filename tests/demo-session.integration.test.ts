@@ -1,3 +1,4 @@
+import { app } from "../src/app";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
@@ -34,6 +35,91 @@ run("demo lifecycle: atomic creation, concurrent dedupe, no billing, isolation, 
     await assert.rejects(demoService.authenticate(c.token), { code: "DEMO_SESSION_EXPIRED" });
     await demoService.destroy(c.demo.sessionId, true);
     assert.equal((await prisma.demoSession.findUniqueOrThrow({ where: { id: c.demo.sessionId } })).status, "DESTROYED");
+  } finally {
+    for (const id of ids) { await demoService.destroy(id); await prisma.demoSession.delete({ where: { id } }); }
+    env.DEMO_ENABLED = old;
+  }
+});
+
+run("demo A cannot read or mutate demo B or a production tenant through HTTP", async () => {
+  const old = env.DEMO_ENABLED; env.DEMO_ENABLED = true;
+  const ids: string[] = [];
+  let fixture: { ownerId: string; accountId: string; businessId: string; conversationId: string; leadId: string } | undefined;
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const address = server.address() as import("node:net").AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const a = await demoService.create(randomUUID()); ids.push(a.demo.sessionId);
+    const b = await demoService.create(randomUUID()); ids.push(b.demo.sessionId);
+    fixture = await prisma.$transaction(async tx => {
+      const owner = await tx.user.create({ data: { firstName: "Integration", lastName: "Fixture", email: `${randomUUID()}@example.invalid`, passwordHash: "!test-only" } });
+      const account = await tx.businessAccount.create({ data: { name: "Integration Workspace", ownerId: owner.id } });
+      const business = await tx.business.create({ data: { name: "Production-shaped fixture", industry: "Test", slug: randomUUID(), ownerId: owner.id, businessAccountId: account.id } });
+      const lead = await tx.lead.create({ data: { businessId: business.id, fullName: "Protected Contact", phone: `test_${randomUUID()}`, source: "OTHER" } });
+      const conversation = await tx.conversation.create({ data: { businessId: business.id, leadId: lead.id, channel: "MANUAL" } });
+      return { ownerId: owner.id, accountId: account.id, businessId: business.id, leadId: lead.id, conversationId: conversation.id };
+    });
+    assert.equal((await prisma.business.findUniqueOrThrow({ where: { id: fixture.businessId } })).demoSessionId, null);
+    for (const target of [
+      { businessId: b.demo.business.id, conversationId: b.demo.conversation.id, leadId: b.demo.customer.id },
+      fixture,
+    ]) {
+      const before = await prisma.conversation.findUniqueOrThrow({ where: { id: target.conversationId } });
+      const leadBefore = await prisma.lead.findUniqueOrThrow({ where: { id: target.leadId } });
+      const headers = { Authorization: `Bearer ${a.token}`, "X-Business-Id": target.businessId, "Content-Type": "application/json" };
+      for (const method of ["GET", "DELETE"]) {
+        const response = await fetch(`${base}/api/demo/session`, { method, headers });
+        assert.equal(response.status, 403);
+        assert.equal((await response.json() as any).error.code, "DEMO_RESOURCE_FORBIDDEN");
+      }
+      for (const path of [`/api/conversations/${target.conversationId}`, `/api/leads/${target.leadId}`]) {
+        for (const method of ["GET", "PATCH", "DELETE"]) {
+          const response = await fetch(`${base}${path}`, { method, headers, ...(method === "PATCH" ? { body: JSON.stringify({ subject: "unauthorized change", fullName: "unauthorized change" }) } : {}) });
+          assert.equal(response.status, 401);
+          await response.arrayBuffer();
+        }
+      }
+      assert.deepEqual(await prisma.conversation.findUniqueOrThrow({ where: { id: target.conversationId } }), before);
+      assert.deepEqual(await prisma.lead.findUniqueOrThrow({ where: { id: target.leadId } }), leadBefore);
+    }
+    assert.equal((await demoService.authenticate(b.token)).demoSessionId, b.demo.sessionId);
+    assert.equal((await demoService.authenticate(a.token)).demoSessionId, a.demo.sessionId);
+  } finally {
+    server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    for (const id of ids) { await demoService.destroy(id); await prisma.demoSession.delete({ where: { id } }); }
+    if (fixture) {
+      await prisma.business.delete({ where: { id: fixture.businessId } });
+      await prisma.businessAccount.delete({ where: { id: fixture.accountId } });
+      await prisma.user.delete({ where: { id: fixture.ownerId } });
+    }
+    env.DEMO_ENABLED = old;
+  }
+});
+
+run("concurrent stale-key retries create one fresh session and never revive old credentials", async () => {
+  const old = env.DEMO_ENABLED; env.DEMO_ENABLED = true;
+  const ids: string[] = [];
+  const ip = randomUUID(); const key = randomUUID();
+  try {
+    let previous = await demoService.create(ip, key); ids.push(previous.demo.sessionId);
+    for (const destroyed of [false, true]) {
+      if (destroyed) await demoService.destroy(previous.demo.sessionId);
+      else await prisma.demoSession.update({ where: { id: previous.demo.sessionId }, data: { expiresAt: new Date(0) } });
+      const results = await Promise.all([demoService.create(ip, key), demoService.create(ip, key)]);
+      for (const result of results) if (!ids.includes(result.demo.sessionId)) ids.push(result.demo.sessionId);
+      const [fresh, retry] = results;
+      assert.equal(fresh.demo.sessionId, retry.demo.sessionId);
+      assert.equal(fresh.token, retry.token);
+      assert.notEqual(fresh.demo.sessionId, previous.demo.sessionId);
+      assert.notEqual(fresh.token, previous.token);
+      await assert.rejects(demoService.authenticate(previous.token));
+      const expired = await prisma.demoSession.findUniqueOrThrow({ where: { id: previous.demo.sessionId } });
+      assert.equal(expired.idempotencyHash, null);
+      assert.equal(expired.status, destroyed ? "DESTROYED" : "ACTIVE");
+      assert.equal((await demoService.authenticate(fresh.token)).demoSessionId, fresh.demo.sessionId);
+      previous = fresh;
+    }
   } finally {
     for (const id of ids) { await demoService.destroy(id); await prisma.demoSession.delete({ where: { id } }); }
     env.DEMO_ENABLED = old;

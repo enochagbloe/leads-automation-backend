@@ -23,7 +23,7 @@ async function read(tx: Prisma.TransactionClient, id: string) {
   if (!conversation) throw invalid();
   const customer = await tx.lead.findFirst({ where: { id: conversation.leadId, businessId: business.id }, select: { id: true, fullName: true } });
   if (!customer) throw invalid();
-  return { sessionId: id, expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, messages: [], limits: { conversations: 1, messages: 0, leads: 1, appointments: 0 } };
+  return { sessionId: id, expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, limits: { conversations: 1, messages: 0, leads: 1, appointments: 0 } };
 }
 
 export const demoService = {
@@ -32,19 +32,29 @@ export const demoService = {
     if (key !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(key)) throw new AppError(400, "Use a random 16-128 character Idempotency-Key", "INVALID_IDEMPOTENCY_KEY");
     const ipHash = privateHash(`ip:${ip}`);
     const idempotencyHash = key ? privateHash(`key:${ipHash}:${key}`) : null;
-    // Deterministic credentials allow a lost creation response to be retried without storing plaintext tokens.
-    const token = `demo_${idempotencyHash ? privateHash(`credential:${idempotencyHash}`) : randomBytes(32).toString("hex")}`;
+    // Include the new session ID so a stale key never reissues an old credential.
+    const id = randomUUID();
+    const token = `demo_${idempotencyHash ? privateHash(`credential:${idempotencyHash}:${id}`) : randomBytes(32).toString("hex")}`;
     return prisma.$transaction(async tx => {
       // Cross-process admission/deduplication lock, held only for this IP and transaction.
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${ipHash}, 0))::text`;
       if (idempotencyHash) {
         const existing = await tx.demoSession.findUnique({ where: { idempotencyHash } });
-        if (existing) return { success: true, demo: await read(tx, existing.id), token };
+        if (existing?.status === "ACTIVE" && existing.expiresAt > new Date()) {
+          let retryToken = `demo_${privateHash(`credential:${idempotencyHash}:${existing.id}`)}`;
+          // Preserve retries for sessions issued before session-specific derivation.
+          if (hashDemoToken(retryToken) !== existing.tokenHash) retryToken = `demo_${privateHash(`credential:${idempotencyHash}`)}`;
+          if (hashDemoToken(retryToken) !== existing.tokenHash) throw invalid();
+          return { success: true, demo: await read(tx, existing.id), token: retryToken };
+        }
+        if (existing) {
+          await tx.demoSession.update({ where: { id: existing.id }, data: { idempotencyHash: null } });
+        }
       }
       const now = new Date();
       const count = await tx.demoSession.count({ where: { ipHash, status: "ACTIVE", expiresAt: { gt: now } } });
       if (count >= env.DEMO_MAX_ACTIVE_SESSIONS_PER_IP) throw new AppError(429, "Too many active demo sessions", "DEMO_LIMIT_REACHED");
-      const session = await tx.demoSession.create({ data: { tokenHash: hashDemoToken(token), ipHash, idempotencyHash, expiresAt: new Date(now.getTime() + env.DEMO_SESSION_TTL_MINUTES * 60_000) } });
+      const session = await tx.demoSession.create({ data: { id, tokenHash: hashDemoToken(token), ipHash, idempotencyHash, expiresAt: new Date(now.getTime() + env.DEMO_SESSION_TTL_MINUTES * 60_000) } });
       const owner = await tx.user.create({ data: { demoSessionId: session.id, firstName: "Demo", lastName: "System", email: `${randomUUID()}@demo.invalid`, passwordHash: "!disabled-demo-identity", status: "DISABLED", canCreateBusiness: false, accountType: "STAFF_ONLY" } });
       const account = await tx.businessAccount.create({ data: { demoSessionId: session.id, name: "Demo Workspace", ownerId: owner.id } });
       const business = await tx.business.create({ data: { demoSessionId: session.id, name: "Demo Business", industry: "Unspecified", slug: `demo-${session.id}`, ownerId: owner.id, businessAccountId: account.id, aiRepliesEnabled: false, aiAutoReplyEnabled: false } });

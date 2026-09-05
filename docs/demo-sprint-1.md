@@ -23,16 +23,16 @@ Migration was created but is not automatically deployed. Deploy with the existin
 ## API
 
 - POST `/api/demo/session`: public, returns 201 `{success, demo, token}`. Optional random `Idempotency-Key` (16?128 letters/digits/underscore/hyphen) deduplicates retries for the same IP. Request bodies never select resources.
-- GET `/api/demo/session`: `Authorization: Bearer <token>` returns session, expiry, business, conversation, customer, empty messages and limits.
+- GET `/api/demo/session`: `Authorization: Bearer <token>` returns session, expiry, business, conversation, customer and limits (message history belongs to the future conversation/realtime transport).
 - DELETE `/api/demo/session`: same authentication; invalidates the session and transactionally removes its temporary domain records. Returns `{success:true}`.
 
 The explicit `req.demo` actor has no production role. Unknown credentials, expired sessions and destroyed sessions return 401. Cross-business `X-Business-Id` returns 403. No arbitrary resource read/mutation endpoints exist. Responses use `Cache-Control: no-store`; CORS explicitly includes https://app.bizreplyhq.com.
 
-Frontend should retain the token for refresh on `/conversations` and GET the existing session. Entering `/demo` starts a new session. Retrying a POST should reuse its idempotency key; do not reuse a key after expiry/destroy. A destroyed-key tombstone remains for one day, after which reuse creates a new session. Tokens are opaque 256-bit credentials stored only as SHA-256 hashes; keyed derivation permits returning the same credential for retries without plaintext storage. Rotating JWT_ACCESS_SECRET changes IP/dedupe derivation, but existing opaque tokens remain valid until expiry.
+Frontend should retain the token for refresh on `/conversations` and GET the existing session. Entering `/demo` starts a new session. Retrying a POST should reuse its idempotency key; a key associated with an expired/destroyed session is atomically released and associated with a fresh session, with a fresh credential. Valid active retries preserve the session and credential. Old sessions are never revived. Tokens are opaque 256-bit credentials stored only as SHA-256 hashes; keyed derivation permits returning the same credential for retries without plaintext storage. Rotating JWT_ACCESS_SECRET changes IP/dedupe derivation, but existing opaque tokens remain valid until expiry.
 
 ## Limits and cleanup
 
-Creation: 20 requests per IP/hour using existing express-rate-limit infrastructure. Database advisory locks enforce dedupe and the active-per-IP cap across processes. GET/DELETE use existing mutation rate limits. The request-rate store remains per process, matching the existing infrastructure; deployments must keep trusted proxy configuration accurate.
+Creation: 20 requests per IP/hour using existing express-rate-limit infrastructure. Database advisory locks enforce dedupe and the active-per-IP cap across processes. GET uses demo authentication only; DELETE uses the existing mutation rate limiter. The request-rate store remains per process, matching the existing infrastructure; deployments must keep trusted proxy configuration accurate.
 
 Sprint 1 permits exactly one conversation and one contact, zero messages/appointments or additional leads. No quota bypass is added to production services. Future message endpoints must explicitly enforce tighter demo limits before calling shared domain logic.
 
@@ -47,7 +47,7 @@ TTL is absolute, never extended by reads. Auth updates lastActivityAt. Cleanup p
 
 ## Verification and limits
 
-Run `npm run test:demo`. The database lifecycle suite is opt-in with RUN_DATABASE_INTEGRATION_TESTS=true and requires a migrated disposable PostgreSQL database. It verifies concurrent dedupe, creation, absence of membership/subscription/usage records, expiry, invalidation and cascading deletion. Never target a production database for these tests.
+Run `npm run test:demo`. The database lifecycle suite is opt-in with RUN_DATABASE_INTEGRATION_TESTS=true and requires a migrated disposable PostgreSQL database. It verifies HTTP read/mutation rejection for demo A against demo B and a production-shaped database fixture, unchanged protected records, concurrent stale-key replacement with fresh credentials, concurrent dedupe, creation, absence of membership/subscription/usage records, expiry, invalidation and cascading deletion. Never target a production database for these tests.
 
 Unit/HTTP tests cover disabled mode, production auth rejection, tenant isolation, expiry, provider suppression, retry reuse, cleanup ownership protection and response contracts. Database migration and real PostgreSQL concurrency/cascade execution still require the integration environment. Realtime remains process-local, as in production SSE. Future global reporting must filter demoSessionId when including all businesses/accounts/users.
 
