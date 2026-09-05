@@ -140,9 +140,10 @@ const DISCOVERY_MESSAGE_SELECT = {
   createdAt: true,
 } satisfies Prisma.MessageSelect;
 
-function eligibleDiscoveryWhere(businessId: string): Prisma.MessageWhereInput {
+export function eligibleDiscoveryWhere(businessId: string): Prisma.MessageWhereInput {
   return {
     businessId,
+    business: { demoSessionId: null },
     customerMemoryExtractionJob: { is: null },
     deletedAt: null,
     messageType: { in: [MessageType.TEXT, MessageType.SYSTEM] },
@@ -161,7 +162,7 @@ function eligibleDiscoveryWhere(businessId: string): Prisma.MessageWhereInput {
 
 async function ensureDiscoveryCursors() {
   const businesses = await prisma.business.findMany({
-    where: { deletedAt: null, customerMemoryDiscoveryCursor: { is: null } },
+    where: { deletedAt: null, demoSessionId: null, customerMemoryDiscoveryCursor: { is: null } },
     orderBy: { createdAt: "desc" },
     take: env.CUSTOMER_MEMORY_DISCOVERY_BUSINESS_BATCH_SIZE,
     select: { id: true },
@@ -262,7 +263,7 @@ async function discoverBusinessMessages(businessId: string) {
 async function discoverMessages() {
   await ensureDiscoveryCursors();
   const cursors = await prisma.customerMemoryDiscoveryCursor.findMany({
-    where: { business: { deletedAt: null } },
+    where: { business: { deletedAt: null, demoSessionId: null } },
     orderBy: [{ lastScannedAt: "asc" }, { businessId: "asc" }],
     take: env.CUSTOMER_MEMORY_DISCOVERY_BUSINESS_BATCH_SIZE,
     select: { businessId: true },
@@ -285,6 +286,7 @@ async function discoverMessages() {
 function dueJobWhere(now: Date, businessId?: string): Prisma.CustomerMemoryExtractionJobWhereInput {
   return {
     ...(businessId ? { businessId } : {}),
+    business: { demoSessionId: null },
     attemptCount: { lt: MAX_ATTEMPTS },
     nextAttemptAt: { lte: now },
     status: { in: [CustomerMemoryExtractionStatus.PENDING, CustomerMemoryExtractionStatus.FAILED] },

@@ -45,3 +45,9 @@ export const demoSetupSessionLimiter = rateLimit({
   keyGenerator: req => req.demo!.demoSessionId,
   message: { error: { code: "DEMO_LIMIT_REACHED", message: "Too many demo setup requests. Try again later." } },
 });
+
+export const demoMessageLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 30, standardHeaders: "draft-7", legacyHeaders: false,
+  keyGenerator: req => req.demo!.demoSessionId,
+  message: { error: { code: "DEMO_MESSAGE_RATE_LIMITED", message: "Too many demo messages. Please wait briefly." } },
+});

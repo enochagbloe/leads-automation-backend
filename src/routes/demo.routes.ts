@@ -1,7 +1,8 @@
+import { demoMessageService } from "../services/demo-message.service";
 import { Router } from "express";
 import { authenticateDemo } from "../middleware/demo-auth";
 import { demoSetupService } from "../services/demo-setup.service";
-import { demoCreationLimiter, demoSetupIpLimiter, demoSetupSessionLimiter, mutationLimiter } from "../middleware/rate-limit";
+import { demoCreationLimiter, demoSetupIpLimiter, demoSetupSessionLimiter, demoMessageLimiter, mutationLimiter } from "../middleware/rate-limit";
 import { assertDemoEnabled, demoService } from "../services/demo.service";
 export const demoRouter = Router();
 demoRouter.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
@@ -16,4 +17,11 @@ demoRouter.delete("/session", authenticateDemo, mutationLimiter, async (req, res
 
 demoRouter.post("/session/setup", authenticateDemo, demoSetupIpLimiter, demoSetupSessionLimiter, async (req, res) => {
   res.json(await demoSetupService.setup(req.demo!, req.body));
+});
+
+demoRouter.post("/session/messages", authenticateDemo, demoMessageLimiter, async (req, res) => {
+  res.json(await demoMessageService.create(req.demo!, req.body));
+});
+demoRouter.get("/session/messages", authenticateDemo, async (req, res) => {
+  res.json(await demoMessageService.list(req.demo!));
 });

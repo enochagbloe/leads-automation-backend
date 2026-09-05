@@ -24,7 +24,7 @@ async function read(tx: Prisma.TransactionClient, id: string) {
   if (!conversation) throw invalid();
   const customer = await tx.lead.findFirst({ where: { id: conversation.leadId, businessId: business.id }, select: { id: true, fullName: true } });
   if (!customer) throw invalid();
-  return { sessionId: id, setupStatus: session.setupStatus ?? "WAITING_FOR_BUSINESS", ...demoContextSummary(session.demoContext), expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, limits: { conversations: 1, messages: 0, leads: 1, appointments: 0 } };
+  return { sessionId: id, setupStatus: session.setupStatus ?? "WAITING_FOR_BUSINESS", ...demoContextSummary(session.demoContext), expiresAt: session.expiresAt, redirectPath: "/conversations", isDemo: true, business, conversation, customer: { id: customer.id, name: customer.fullName }, limits: { conversations: 1, messages: 50, leads: 1, appointments: 0 } };
 }
 
 export const demoService = {

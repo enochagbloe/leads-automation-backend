@@ -1,3 +1,4 @@
+import { storeInboundCustomerMessage } from "./inbound-message-store.service";
 import crypto from "node:crypto";
 import {
   AuditAction,
@@ -384,64 +385,23 @@ async function persistInbound(
         });
       }
 
-      const message = await tx.message.create({
-        data: {
-          businessId: business.id,
-          conversationId: conversation.id,
-          leadId: lead.id,
-          senderType: MessageSenderType.CUSTOMER,
-          content: input.text,
-          messageType: MessageType.TEXT,
-          direction: MessageDirection.INBOUND,
-          deliveryStatus: MessageDeliveryStatus.DELIVERED,
-          provider: PROVIDER_NAME,
-          providerMessageId: input.providerMessageId,
-          metadata: {
-            provider: PROVIDER_NAME,
-            providerMessageId: input.providerMessageId,
-            customerPhone,
-            customerName: input.customerName ?? null,
-            rawWebhookEventId: input.rawWebhookEventId ?? null,
-            reopenedConversation: didReopen,
-            ...blockedMetadata,
-            integrationStatus: business.integrationStatus,
-            automationSkipped: business.integrationStatus === WhatsAppIntegrationStatus.DEACTIVATED
-              || business.integrationStatus === WhatsAppIntegrationStatus.DISCONNECTED,
-          },
-          createdAt: input.timestamp,
+      const { message, conversation: updatedConversation } = await storeInboundCustomerMessage(tx, {
+        businessId: business.id, conversationId: conversation.id, leadId: lead.id,
+        content: input.text, provider: PROVIDER_NAME, providerMessageId: input.providerMessageId,
+        createdAt: input.timestamp,
+        lastMessagePreview: didBlock ? blockedConversationPreview : undefined,
+        metadata: {
+          provider: PROVIDER_NAME, providerMessageId: input.providerMessageId, customerPhone,
+          customerName: input.customerName ?? null, rawWebhookEventId: input.rawWebhookEventId ?? null,
+          reopenedConversation: didReopen, ...blockedMetadata, integrationStatus: business.integrationStatus,
+          automationSkipped: business.integrationStatus === WhatsAppIntegrationStatus.DEACTIVATED
+            || business.integrationStatus === WhatsAppIntegrationStatus.DISCONNECTED,
         },
+        activityMetadata: { source: LeadSource.WHATSAPP, direction: MessageDirection.INBOUND, providerMessageId: input.providerMessageId, ...blockedMetadata },
       });
       await persistCustomerWhatsAppConsentSignal(tx, {
-        businessId: business.id,
-        leadId: lead.id,
-        conversationId: conversation.id,
-        messageId: message.id,
-        messageText: message.content,
-        messageCreatedAt: message.createdAt,
-      });
-      const updatedConversation = await tx.conversation.update({
-        where: { id: conversation.id },
-        data: {
-          lastMessagePreview: didBlock ? blockedConversationPreview : input.text.slice(0, 240),
-          lastMessageAt: message.createdAt,
-          unreadCount: { increment: 1 },
-        },
-      });
-      await tx.leadActivity.create({
-        data: {
-          businessId: business.id,
-          leadId: lead.id,
-          action: LeadActivityAction.MESSAGE_CREATED,
-          metadata: {
-            source: LeadSource.WHATSAPP,
-            conversationId: conversation.id,
-            messageId: message.id,
-            senderType: MessageSenderType.CUSTOMER,
-            direction: MessageDirection.INBOUND,
-            providerMessageId: input.providerMessageId,
-            ...blockedMetadata,
-          },
-        },
+        businessId: business.id, leadId: lead.id, conversationId: conversation.id,
+        messageId: message.id, messageText: message.content, messageCreatedAt: message.createdAt,
       });
       const shouldIncrementConversationUsage = !existingConversation || didReopen;
       if (!didBlock && shouldIncrementConversationUsage) {

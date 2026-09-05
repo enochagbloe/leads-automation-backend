@@ -1,3 +1,4 @@
+import { storeInboundCustomerMessage } from "./inbound-message-store.service";
 import {
   AuditAction,
   BusinessRole,
@@ -268,18 +269,8 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
       metadata: input.metadata,
       reopenAs: input.reopenAs,
     });
-    const created = await tx.message.create({
-      data: {
-        businessId: input.businessId,
-        leadId: input.leadId,
-        conversationId: input.conversationId,
-        content: input.content,
-        metadata: input.metadata,
-        senderType: MessageSenderType.CUSTOMER,
-        messageType: MessageType.TEXT,
-        direction: MessageDirection.INBOUND,
-        deliveryStatus: MessageDeliveryStatus.DELIVERED,
-      },
+    const { message: created } = await storeInboundCustomerMessage(tx, {
+      ...input, conversationChanges: reopen.changes,
     });
     if (conversation.channel === ConversationChannel.WHATSAPP) {
       await persistCustomerWhatsAppConsentSignal(tx, {
@@ -291,23 +282,6 @@ export async function createInboundCustomerMessage(input: SystemMessageInput) {
         messageCreatedAt: created.createdAt,
       });
     }
-    await tx.conversation.update({
-      where: { id: input.conversationId },
-      data: {
-        lastMessagePreview: input.content.slice(0, 240),
-        lastMessageAt: created.createdAt,
-        unreadCount: { increment: 1 },
-        ...(reopen.changes ?? {}),
-      },
-    });
-    await tx.leadActivity.create({
-      data: {
-        businessId: input.businessId,
-        leadId: input.leadId,
-        action: LeadActivityAction.MESSAGE_CREATED,
-        metadata: { conversationId: input.conversationId, messageId: created.id, senderType: MessageSenderType.CUSTOMER },
-      },
-    });
     return created;
   });
   await invalidateMessageCaches(input.businessId, input.conversationId);
