@@ -15,16 +15,53 @@ export const whatsappController = {
     const mode = queryValue(req.query["hub.mode"]);
     const token = queryValue(req.query["hub.verify_token"]);
     const challenge = queryValue(req.query["hub.challenge"]);
-    if (!challenge || !whatsappService.verifyWebhook(mode, token)) throw new AppError(403, "Webhook verification failed", "WHATSAPP_WEBHOOK_VERIFICATION_FAILED");
+    const verified = Boolean(challenge) && whatsappService.verifyWebhook(mode, token);
+    const diagnostic = {
+      mode: mode ?? null,
+      hasVerifyToken: Boolean(token),
+      hasChallenge: Boolean(challenge),
+      verified,
+      host: req.get("x-forwarded-host") ?? req.get("host") ?? null,
+      protocol: req.protocol,
+    };
+    if (!verified) {
+      console.warn("WHATSAPP_WEBHOOK_VERIFICATION_FAILURE", diagnostic);
+      throw new AppError(403, "Webhook verification failed", "WHATSAPP_WEBHOOK_VERIFICATION_FAILED");
+    }
+    console.info("WHATSAPP_WEBHOOK_VERIFICATION_SUCCESS", diagnostic);
     res.type("text/plain").send(challenge);
   }) satisfies RequestHandler,
 
   receive: (async (req, res) => {
-    if (!whatsappService.verifySignature(req.rawBody, req.get("x-hub-signature-256"))) {
+    const signature = req.get("x-hub-signature-256");
+    console.info("WHATSAPP_WEBHOOK_POST_RECEIVED", {
+      hasSignature: Boolean(signature),
+      hasRawBody: Boolean(req.rawBody),
+      object: typeof req.body === "object" && req.body !== null && "object" in req.body
+        ? (req.body as { object?: unknown }).object ?? null
+        : null,
+      entryCount: typeof req.body === "object" && req.body !== null && "entry" in req.body && Array.isArray((req.body as { entry?: unknown }).entry)
+        ? ((req.body as { entry: unknown[] }).entry).length
+        : 0,
+      host: req.get("x-forwarded-host") ?? req.get("host") ?? null,
+      protocol: req.protocol,
+    });
+
+    if (!whatsappService.verifySignature(req.rawBody, signature)) {
+      console.warn("WHATSAPP_WEBHOOK_SIGNATURE_FAILURE", {
+        hasSignature: Boolean(signature),
+        hasRawBody: Boolean(req.rawBody),
+      });
       throw new AppError(403, "Invalid webhook signature", "INVALID_WEBHOOK_SIGNATURE");
     }
+
     const inboundEvents = parseMetaWebhook(req.body);
     const statusEvents = parseMetaStatusWebhook(req.body);
+    console.info("WHATSAPP_WEBHOOK_EVENTS_PARSED", {
+      inboundCount: inboundEvents.length,
+      statusCount: statusEvents.length,
+    });
+
     if (inboundEvents.length === 0 && statusEvents.length === 0) await whatsappService.logIgnoredWebhook(req.body as Prisma.InputJsonValue);
     const results = await Promise.allSettled([
       ...inboundEvents.map((event) => whatsappService.processInbound(event)),
@@ -33,6 +70,24 @@ export const whatsappController = {
     const rejected = results.filter((result) => result.status === "rejected");
     const limitBlocked = rejected.filter((result) => result.reason instanceof AppError && result.reason.code === "PLAN_LIMIT_REACHED").length;
     const failed = rejected.length - limitBlocked;
+
+    if (rejected.length > 0) {
+      console.warn("WHATSAPP_WEBHOOK_PROCESSING_FAILURES", {
+        rejected: rejected.map((result) => {
+          const reason = result.reason;
+          if (reason instanceof AppError) return { code: reason.code, statusCode: reason.statusCode, message: reason.message };
+          if (reason instanceof Error) return { name: reason.name, message: reason.message };
+          return { message: String(reason) };
+        }),
+      });
+    }
+
+    console.info("WHATSAPP_WEBHOOK_POST_PROCESSED", {
+      received: true,
+      processed: results.length - rejected.length,
+      limitBlocked,
+      failed,
+    });
     res.json({ received: true, processed: results.length - rejected.length, limitBlocked, failed });
   }) satisfies RequestHandler,
 
