@@ -13,7 +13,7 @@ export function parseDemoMessage(input: unknown) {
   return parsed.data;
 }
 const forbidden = () => new AppError(403, "Demo resource forbidden", "DEMO_RESOURCE_FORBIDDEN");
-async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor) {
+export async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor) {
   const session = await tx.demoSession.findFirst({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId, deletedAt: null } }, select: { setupStatus: true } });
   if (!session) throw forbidden();
   if (session.setupStatus !== "READY" && session.setupStatus !== "READY_PARTIAL") throw new AppError(409, "Demo setup is not ready", "DEMO_SETUP_NOT_READY");
@@ -24,7 +24,7 @@ async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor) 
   if (!lead) throw forbidden();
   return { conversation, lead };
 }
-function canonical(message: Message) {
+export function canonical(message: Message) {
   return { id: message.id, text: message.content, senderType: message.senderType, direction: message.direction, messageType: message.messageType, createdAt: message.createdAt };
 }
 export const demoMessageService = {
@@ -59,8 +59,8 @@ export const demoMessageService = {
     assertDemoEnabled();
     return prisma.$transaction(async tx => {
       const { conversation, lead } = await resolveResources(tx, actor);
-      const messages = await tx.message.findMany({ where: { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: DEMO_CUSTOMER_MESSAGE_LIMIT });
-      return { success: true, conversation: { id: conversation.id }, messages: messages.map(canonical) };
+      const messages = await tx.message.findMany({ where: { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 });
+      return { success: true, conversation: { id: conversation.id }, messages: messages.reverse().map(canonical) };
     });
   },
 };

@@ -1,3 +1,5 @@
+import { generateContextReply } from "./ai-reply-runtime.service";
+import { storeAiReply } from "./ai-message-store.service";
 import {
   BusinessRole,
   ConversationChannel,
@@ -723,15 +725,13 @@ export const aiReplyEngine = {
         businessId: conversation.businessId,
         conversationId: conversation.id,
         messageId: message.id,
-        systemPrompt: aiPromptContextFormatter.buildSystemPrompt(context),
-        userPrompt: aiPromptContextFormatter.buildUserPrompt(context),
         metadata: {
           plan: usage.subscription.plan.code,
           channel: conversation.channel === ConversationChannel.WHATSAPP ? "WHATSAPP" as const : "MANUAL" as const,
           source: "INBOUND_MESSAGE" as const,
         },
       };
-      providerResult = await aiProvider.generateReply(providerInput);
+      providerResult = await generateContextReply(context, providerInput);
       await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens });
       if (providerResult.fallbackExhausted) {
         const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
@@ -959,9 +959,7 @@ export const aiReplyEngine = {
       let providerMessageId: string | null = null;
       let sendError: string | null = null;
 
-      const aiMessage = await prisma.$transaction(async (tx) => {
-        const created = await tx.message.create({
-          data: {
+      const aiMessage = await prisma.$transaction(tx => storeAiReply(tx, {
             businessId: conversation.businessId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
@@ -987,36 +985,7 @@ export const aiReplyEngine = {
               bookingBlockedReason,
               appointmentId: bookingAppointment?.id ?? null,
             }),
-          },
-        });
-        await tx.conversation.update({
-          where: { id: conversation.id },
-          data: {
-            lastMessagePreview: replyText.slice(0, 240),
-            lastMessageAt: created.createdAt,
-            status: conversation.status === ConversationStatus.OPEN ? ConversationStatus.AI_HANDLING : conversation.status,
-          },
-        });
-        await tx.leadActivity.create({
-          data: {
-            businessId: conversation.businessId,
-            leadId: conversation.leadId,
-            action: LeadActivityAction.MESSAGE_CREATED,
-            metadata: {
-              source: "AI_REPLY_ENGINE",
-              conversationId: conversation.id,
-              messageId: created.id,
-              senderType: MessageSenderType.AI,
-              direction: MessageDirection.OUTBOUND,
-              intent: safety.decision.intent,
-              confidence: safety.decision.confidence,
-              bookingRequestCreated,
-              appointmentId: bookingAppointment?.id ?? null,
-            },
-          },
-        });
-        return created;
-      });
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }));
 
       if (conversation.channel === ConversationChannel.WHATSAPP) {
         try {

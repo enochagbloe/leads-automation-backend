@@ -33,7 +33,7 @@ function fixture(t: import("node:test").TestContext) {
       findFirst: async ({ where }: any) => rows.find(row => row.businessId === where.businessId && row.provider === where.provider && row.providerMessageId === where.providerMessageId) ?? null,
       count: async ({ where }: any) => { assert.deepEqual(where, { businessId: actor.businessId, conversationId: "conversation", senderType: "CUSTOMER" }); return state.count; },
       create: async ({ data }: any) => { const row = { ...data, id: randomUUID(), createdAt: data.createdAt ?? new Date(), deletedAt: null }; rows.push(row); state.count++; return row; },
-      findMany: async ({ where, orderBy }: any) => { assert.deepEqual(where, { businessId: actor.businessId, conversationId: "conversation", leadId: "customer", deletedAt: null }); assert.deepEqual(orderBy, [{ createdAt: "asc" }, { id: "asc" }]); return rows; },
+      findMany: async ({ where, orderBy, take }: any) => { assert.deepEqual(where, { businessId: actor.businessId, conversationId: "conversation", leadId: "customer", deletedAt: null }); assert.deepEqual(orderBy, [{ createdAt: "desc" }, { id: "desc" }]); assert.equal(take, 100); return [...rows].reverse(); },
     },
     leadActivity: { create: async ({ data }: any) => { activities.push(data); } },
   };

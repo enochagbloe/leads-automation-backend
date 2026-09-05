@@ -12,9 +12,13 @@ export type AiGenerateReplyInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  maxAttempts?: number;
+  signal?: AbortSignal;
   metadata?: {
-    plan: PlanCode;
-    channel: "WHATSAPP" | "MANUAL";
+    plan?: PlanCode;
+    isDemo?: boolean;
+    demoSessionId?: string;
+    channel: "WHATSAPP" | "MANUAL" | "DEMO";
     source: "INBOUND_MESSAGE" | "SYSTEM_RETRY";
   };
 };
@@ -305,7 +309,7 @@ export class OpenRouterProvider implements AiProvider {
     if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
 
     const startedAt = Date.now();
-    const models = attemptModels(primaryModel);
+    const models = attemptModels(primaryModel).slice(0, input.maxAttempts ?? Infinity);
     const fallbackFailureReasons: Array<{ model: string; reason: string }> = [];
 
     for (const model of models) {
@@ -335,7 +339,7 @@ export class OpenRouterProvider implements AiProvider {
             ...input.metadata,
           } : undefined,
         }),
-        signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+        signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS)]) : AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
       });
       const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
       const rawText = raw?.choices?.[0]?.message?.content;
