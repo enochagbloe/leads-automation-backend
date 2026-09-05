@@ -18,10 +18,30 @@ export function parseDemoSetup(input: unknown) {
 export const demoSetupService = {
   async recoverStalled() {
     const cutoff = new Date(Date.now() - 60_000);
-    const stalled = await prisma.demoSession.findMany({ where: { status: "ACTIVE", setupStatus: "PROCESSING_WEBSITE", setupStartedAt: { lt: cutoff } }, select: { id: true, setupAttemptId: true, demoContext: true }, take: 100 });
+    const stalled = await prisma.demoSession.findMany({ where: { status: "ACTIVE", setupStatus: "PROCESSING_WEBSITE", setupStartedAt: { lt: cutoff } }, select: { id: true, setupAttemptId: true, setupStartedAt: true, demoContext: true, business: { select: { name: true } } }, take: 100 });
     for (const session of stalled) {
       const parsed = demoContextSchema.safeParse(session.demoContext);
-      await prisma.demoSession.updateMany({ where: { id: session.id, status: "ACTIVE", setupStatus: "PROCESSING_WEBSITE", setupAttemptId: session.setupAttemptId, setupStartedAt: { lt: cutoff } }, data: { setupStatus: "READY_PARTIAL", setupCompletedAt: new Date(), demoContext: parsed.success ? { ...parsed.data, crawlStatus: "FAILED", errorCode: "DEMO_SETUP_INTERRUPTED", completedAt: new Date().toISOString() } : Prisma.DbNull } });
+      const completedAt = new Date();
+      const businessName = inputSchema.shape.businessName.safeParse(session.business?.name);
+      const recovered: DemoContext | null = parsed.success
+        ? { ...parsed.data, crawlStatus: "FAILED", extractionStatus: "FALLBACK", errorCode: "DEMO_SETUP_INTERRUPTED", completedAt: completedAt.toISOString() }
+        : businessName.success
+          ? {
+            businessName: businessName.data, facts: emptyDemoFacts(), sourceWebsite: null,
+            crawlStatus: "FAILED", extractionStatus: "FALLBACK",
+            startedAt: (session.setupStartedAt ?? completedAt).toISOString(), completedAt: completedAt.toISOString(),
+            pagesAttempted: 0, pagesFetched: 0, errorCode: "DEMO_SETUP_INTERRUPTED",
+            sources: [], bookingLinks: [], contactLinks: [], unknowns: ["website facts", "live availability"],
+          }
+          : null;
+      await prisma.demoSession.updateMany({
+        where: { id: session.id, status: "ACTIVE", setupStatus: "PROCESSING_WEBSITE", setupAttemptId: session.setupAttemptId, setupStartedAt: { lt: cutoff } },
+        data: {
+          setupStatus: recovered ? "READY_PARTIAL" : "WAITING_FOR_BUSINESS",
+          setupCompletedAt: recovered ? completedAt : null,
+          demoContext: recovered ? demoContextSchema.parse(recovered) as Prisma.InputJsonValue : Prisma.DbNull,
+        },
+      });
     }
   },
   async setup(actor: DemoActor, input: unknown) {
@@ -54,7 +74,7 @@ export const demoSetupService = {
     if (JSON.stringify(context).length > 40_000) {
       context = { ...context, facts: emptyDemoFacts(), extractionStatus: "FALLBACK", sources: context.sources.slice(0, 1), bookingLinks: [], contactLinks: [], errorCode: "DEMO_CONTEXT_TOO_LARGE", unknowns: ["website facts"] };
     }
-    const ready = context.crawlStatus === "COMPLETE" && context.extractionStatus === "COMPLETE" && (facts.services.length > 0 || Boolean(facts.description));
+    const ready = context.crawlStatus === "COMPLETE" && context.extractionStatus === "COMPLETE" && (context.facts.services.length > 0 || Boolean(context.facts.description));
     await prisma.$transaction(async tx => {
       // Re-check scope, expiry and attempt ownership after all external work. Never resurrect a destroyed session.
       const saved = await tx.demoSession.updateMany({ where: { ...scope, expiresAt: { gt: new Date() }, setupStatus: "PROCESSING_WEBSITE", setupAttemptId: attemptId }, data: { setupStatus: ready ? "READY" : "READY_PARTIAL", setupCompletedAt: new Date(), demoContext: context as Prisma.InputJsonValue } });
