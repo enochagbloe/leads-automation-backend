@@ -174,6 +174,7 @@ type Client = {
 };
 
 const clients = new Map<string, Client>();
+const demoClients = new Map<string, { demoSessionId: string; conversationId: string; expiresAt: number; response: Response }>();
 
 function writeEvent(response: Response, event: RealtimeEvent) {
   response.write(`id: ${event.id}\n`);
@@ -183,6 +184,32 @@ function writeEvent(response: Response, event: RealtimeEvent) {
 
 export const realtimeService = {
   // TODO: Replace in-memory pub/sub with Redis Pub/Sub when running multiple backend instances.
+  publishDemo(input: { demoSessionId: string; conversationId: string; type: RealtimeEventType; payload: Record<string, unknown> }) {
+    const event = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...input, isDemo: true };
+    for (const [id, client] of demoClients) {
+      if (client.expiresAt <= Date.now()) { client.response.end(); demoClients.delete(id); continue; }
+      if (client.demoSessionId !== input.demoSessionId || client.conversationId !== input.conversationId) continue;
+      try { client.response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
+      catch { demoClients.delete(id); }
+    }
+    return event;
+  },
+
+  // Internal adapter only. Future routes must derive scope and expiry from authenticateDemo.
+  subscribeDemo(input: { demoSessionId: string; conversationId: string; expiresAt: number; response: Response }) {
+    const id = crypto.randomUUID();
+    demoClients.set(id, input);
+    const close = () => { demoClients.delete(id); clearTimeout(timer); };
+    const timer = setTimeout(() => { input.response.end(); close(); }, Math.max(0, input.expiresAt - Date.now()));
+    timer.unref();
+    input.response.once("close", close);
+    return id;
+  },
+  disconnectDemo(demoSessionId: string) {
+    for (const [id, client] of demoClients) {
+      if (client.demoSessionId === demoSessionId) { client.response.end(); demoClients.delete(id); }
+    }
+  },
   publish(input: PublishInput) {
     const { assignedStaffId, staffMembershipIds = [], roles, broadcastToStaff = false, ...publicInput } = input;
     const event: RealtimeEvent = {

@@ -7,13 +7,17 @@ import { followUpWorkerService } from "./services/follow-up/follow-up-worker.ser
 import { customerMemoryWorkerService } from "./services/customer-memory/customer-memory-worker.service";
 import { knowledgeDocumentWorkerService } from "./services/knowledge-document/knowledge-document-worker.service";
 
+import { demoWorkerService } from "./services/demo-worker.service";
+
 const server = app.listen(env.PORT, () => console.info(`BizReply AI API listening on port ${env.PORT}`));
+demoWorkerService.start();
 followUpWorkerService.start();
 customerMemoryWorkerService.start();
 knowledgeDocumentWorkerService.start();
 
 async function shutdown(signal: string) {
   console.info(`${signal} received. Shutting down.`);
+  await demoWorkerService.stop();
   followUpWorkerService.stop();
   customerMemoryWorkerService.stop();
   knowledgeDocumentWorkerService.stop();

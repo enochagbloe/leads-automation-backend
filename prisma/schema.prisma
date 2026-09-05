@@ -104,6 +104,7 @@ enum LeadActivityAction {
 }
 
 enum ConversationChannel {
+  DEMO
   MANUAL
   WHATSAPP
   OTHER
@@ -1192,6 +1193,8 @@ enum DayOfWeek {
 }
 
 model User {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id                String          @id @default(cuid())
   firstName         String
   lastName          String
@@ -1236,6 +1239,8 @@ model User {
 }
 
 model BusinessAccount {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id        String   @id @default(cuid())
   name      String
   ownerId   String
@@ -1255,6 +1260,8 @@ model BusinessAccount {
 }
 
 model Business {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id                               String                      @id @default(cuid())
   businessAccountId                String
   name                             String
@@ -3488,4 +3495,28 @@ model BusinessNotification {
   @@index([businessId, type, createdAt])
   @@index([businessId, entityType, entityId])
   @@index([businessAccountId, createdAt])
+}
+
+
+enum DemoSessionStatus {
+  ACTIVE
+  EXPIRED
+  DESTROYED
+}
+
+model DemoSession {
+  id String @id @default(cuid())
+  tokenHash String @unique
+  ipHash String
+  idempotencyHash String? @unique
+  status DemoSessionStatus @default(ACTIVE)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  lastActivityAt DateTime @default(now())
+  destroyedAt DateTime?
+  business Business?
+  account BusinessAccount?
+  owner User?
+  @@index([status, expiresAt])
+  @@index([ipHash, status, expiresAt])
 }

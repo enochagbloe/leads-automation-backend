@@ -36,3 +36,5 @@ export const aiPromptAutosaveLimiter = rateLimit({
     },
   },
 });
+
+export const demoCreationLimiter = buildLimiter(20, 60 * 60 * 1000);

@@ -32,11 +32,14 @@ import { aiPromptRouter } from "./routes/ai-prompt.routes";
 import { customerMemoryRouter } from "./routes/customer-memory.routes";
 import { waitlistRouter } from "./routes/waitlist.routes";
 
+import { demoRouter } from "./routes/demo.routes";
+
 export const app = express();
 
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors({ origin: corsOrigins, credentials: true }));
+app.use("/api/demo", express.json({ limit: "2kb" }), demoRouter);
 app.use("/api/waitlist", express.json({ limit: "16kb" }), waitlistRouter);
 app.use(express.json({
   limit: Math.ceil(env.KNOWLEDGE_UPLOAD_MAX_BYTES * 1.4),

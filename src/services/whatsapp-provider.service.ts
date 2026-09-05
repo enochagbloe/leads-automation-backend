@@ -1,3 +1,4 @@
+import { assertProductionWhatsApp } from "./demo-transport.service";
 import { WhatsAppIntegration, WhatsAppIntegrationStatus, WhatsAppProvider } from "@prisma/client";
 import { env } from "../config/env";
 import { prisma } from "../config/prisma";
@@ -26,6 +27,7 @@ export interface WhatsAppProviderClient {
 }
 
 export async function getWhatsAppIntegration(businessId: string) {
+  await assertProductionWhatsApp(businessId);
   let existing = await prisma.whatsAppIntegration.findFirst({
     where: { businessId },
     orderBy: [{ createdAt: "desc" }, { updatedAt: "desc" }],
@@ -68,6 +70,7 @@ export async function getWhatsAppIntegration(businessId: string) {
 
 export class MockWhatsAppProvider implements WhatsAppProviderClient {
   async sendTextMessage(params: SendWhatsAppTextParams): Promise<WhatsAppSendResult> {
+    await assertProductionWhatsApp(params.businessId, params.conversationId);
     if (env.MOCK_WHATSAPP_FORCE_FAILURE) {
       return { success: false, provider: "MOCK_WHATSAPP", error: "Mock WhatsApp provider failure" };
     }
@@ -84,6 +87,7 @@ export class MetaWhatsAppProvider implements WhatsAppProviderClient {
   constructor(private readonly accessToken: string) {}
 
   async sendTextMessage(params: SendWhatsAppTextParams): Promise<WhatsAppSendResult> {
+    await assertProductionWhatsApp(params.businessId, params.conversationId);
     try {
       const response = await fetch(`https://graph.facebook.com/${env.META_API_VERSION}/${params.phoneNumberId}/messages`, {
         method: "POST",
@@ -114,6 +118,8 @@ export class MetaWhatsAppProvider implements WhatsAppProviderClient {
 }
 
 export async function sendWhatsAppText(integration: WhatsAppIntegration, params: SendWhatsAppTextParams): Promise<WhatsAppSendResult> {
+  await assertProductionWhatsApp(params.businessId, params.conversationId);
+  if (integration.businessId !== params.businessId) throw new AppError(403, "Integration scope mismatch", "FORBIDDEN");
   if (integration.provider === WhatsAppProvider.MOCK_WHATSAPP || integration.status === WhatsAppIntegrationStatus.MOCK_CONNECTED) {
     if (env.WHATSAPP_PROVIDER_MODE === "live") {
       throw new AppError(409, "Mock WhatsApp connections are disabled in live provider mode.", "WHATSAPP_NOT_CONNECTED");
