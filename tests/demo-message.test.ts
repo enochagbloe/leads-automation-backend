@@ -1,3 +1,4 @@
+import { demoConversationService } from "../src/services/demo-conversation.service";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -114,6 +115,8 @@ test("memory discovery excludes demo businesses even though their customer text 
 });
 test("HTTP message adapter accepts 2000 multibyte characters, restores history and requires auth", async t => {
   fixture(t);
+  // Storage adapter coverage; the complete automatic AI HTTP path is in demo-ai.test.ts.
+  mockMethod(t, demoConversationService, "send", (actor, input) => demoMessageService.create(actor, input));
   mockMethod(t, demoService, "authenticate", async value => { if (value !== "token") throw Object.assign(new Error("Authentication required"), { statusCode: 401 }); return actor; });
   const app = express(); app.use(express.json({ limit: "16kb" })); app.use("/api/demo", demoRouter); app.use(errorHandler);
   const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));

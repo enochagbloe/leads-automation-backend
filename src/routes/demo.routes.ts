@@ -1,4 +1,5 @@
 import { demoMessageService } from "../services/demo-message.service";
+import { demoConversationService } from "../services/demo-conversation.service";
 import { processLatestDemoReply } from "../services/demo-ai-processing.service";
 import { AppError } from "../utils/errors";
 import { Router } from "express";
@@ -23,7 +24,7 @@ demoRouter.post("/session/setup", authenticateDemo, demoSetupIpLimiter, demoSetu
 });
 
 demoRouter.post("/session/messages", authenticateDemo, demoMessageLimiter, async (req, res) => {
-  res.json(await demoMessageService.create(req.demo!, req.body));
+  res.json(await demoConversationService.send(req.demo!, req.body));
 });
 demoRouter.get("/session/messages", authenticateDemo, async (req, res) => {
   res.json(await demoMessageService.list(req.demo!));

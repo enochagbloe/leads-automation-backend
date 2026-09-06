@@ -1,3 +1,4 @@
+import { demoConversationService } from "../src/services/demo-conversation.service";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
@@ -7,7 +8,7 @@ import { prisma } from "../src/config/prisma";
 import { demoService, DemoActor } from "../src/services/demo.service";
 import { demoRouter } from "../src/routes/demo.routes";
 import { errorHandler } from "../src/middleware/error";
-import { processLatestDemoReply } from "../src/services/demo-ai-processing.service";
+import { processLatestDemoReply, processDemoReplyForMessage } from "../src/services/demo-ai-processing.service";
 import { demoMessageService } from "../src/services/demo-message.service";
 import { emptyDemoFacts } from "../src/services/demo-extraction.service";
 import { buildDemoBusinessContext } from "../src/services/demo-business-context.provider";
@@ -18,6 +19,8 @@ import { realtimeService } from "../src/services/realtime.service";
 import { customerMemoryResolverService } from "../src/services/customer-memory/customer-memory-resolver.service";
 import { MetaWhatsAppProvider, MockWhatsAppProvider } from "../src/services/whatsapp-provider.service";
 import { mockMethod } from "./helpers/mock-method";
+import { emailService } from "../src/services/email.service";
+import { followUpJobSchedulerService } from "../src/services/follow-up/follow-up-scheduler.service";
 
 const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "session-a", businessId: "business-a" };
 const decision = { intent: "PRICING_INQUIRY" as const, replyText: "Roof inspection costs GHS 300.", confidence: 1, shouldReply: true, requiresHumanReview: false, reason: "Confirmed fact", suggestedAction: "SEND_REPLY" as const, usedKnowledge: { profile: false, services: true, availability: false, policies: false, conversationHistory: true } };
@@ -28,7 +31,7 @@ function fixture(t: TestContext) {
   t.after(() => Object.assign(env, saved));
   const facts = emptyDemoFacts();
   facts.services = [{ name: "Roof inspection", description: null, price: "GHS 300", duration: null }, { name: "Roof replacement", description: null, price: null, duration: null }];
-  const state = { active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, beforeResponse: undefined as (() => Promise<void>) | undefined };
+  const state = { unread: 0, preview: "", active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, beforeResponse: undefined as (() => Promise<void>) | undefined };
   const context = { businessName: "Acme Roofing", facts, sourceWebsite: null, crawlStatus: "COMPLETE", extractionStatus: "COMPLETE", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), pagesAttempted: 1, pagesFetched: 1, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: ["Replacement price", "Hours", "Duration", "Policies"] };
   const rows: any[] = []; const activities: any[] = []; const requests: any[] = [];
   function add(overrides: Record<string, unknown> = {}) {
@@ -60,14 +63,14 @@ function fixture(t: TestContext) {
   };
   const tx = {
     demoSession: { updateMany: async (args: any) => ({ count: await sessionLookup(args) ? 1 : 0 }), findFirst: sessionLookup, findUniqueOrThrow: async () => ({ setupAttemptId: state.setupAttemptId }) },
-    conversation: { findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel }], update: async ({ where }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); return {}; } },
+    conversation: { findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel }], update: async ({ where, data }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); state.unread += data.unreadCount?.increment ?? 0; state.preview = data.lastMessagePreview; return {}; } },
     lead: { findFirst: async ({ where }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.phone, "demo_customer_session-a"); return state.validLead ? { id: "customer-a" } : null; } },
     message: {
       findFirst: async (args: any) => select(args)[0] ?? null,
       findMany: async (args: any) => select(args),
       count: async (args: any) => select(args).length,
       update: async ({ where, data }: any) => { const row = rows.find(r => matches(r, where)); assert.ok(row); Object.assign(row, data); return { ...row }; },
-      create: async ({ data }: any) => add(data),
+      create: async ({ data }: any) => { const { createdAt, ...fields } = data; return add({ ...fields, ...(createdAt ? { createdAt } : {}) }); },
     },
     leadActivity: { create: async ({ data }: any) => { activities.push(data); return data; } },
   };
@@ -81,6 +84,8 @@ function fixture(t: TestContext) {
   });
   const forbidden = () => { throw new Error("Forbidden side effect"); };
   const spies = [
+    mockMethod(t, emailService, "send", forbidden),
+    mockMethod(t, followUpJobSchedulerService, "scheduleFollowUpJob", forbidden),
     mockMethod(t, MetaWhatsAppProvider.prototype, "sendTextMessage", forbidden), mockMethod(t, MockWhatsAppProvider.prototype, "sendTextMessage", forbidden),
     mockMethod(t, prisma.whatsAppIntegration, "findFirst", forbidden),
     mockMethod(t, aiUsageService, "assertCanUseAiReplies", forbidden), mockMethod(t, aiUsageService, "trackRequest", forbidden),
@@ -116,7 +121,7 @@ for (const status of ["READY", "READY_PARTIAL"]) test(`${status}: real prompt/pr
   assert.equal(result.aiMessage.senderType, "AI"); assert.equal(result.aiMessage.direction, "OUTBOUND"); assert.equal(result.aiMessage.messageType, "TEXT");
   const stored = f.rows.find(row => row.id === result.aiMessage.id);
   assert.equal(stored.businessId, actor.businessId); assert.equal(stored.leadId, customer.leadId); assert.equal(stored.conversationId, customer.conversationId);
-  assert.equal(stored.deliveryStatus, "INTERNAL"); assert.equal(stored.provider, "DEMO_AI"); assert.equal(stored.metadata.sourceCustomerMessageId, customer.id);
+  assert.equal(stored.deliveryStatus, "INTERNAL"); assert.equal(stored.provider, "DEMO"); assert.equal(stored.metadata.sourceCustomerMessageId, customer.id);
   const prompt = f.requests[0].messages[1].content;
   for (const value of ["Acme Roofing", "Roof inspection", "GHS 300", "Earlier customer message", "Earlier AI reply"]) assert.ok(prompt.includes(value));
   assert.ok(!prompt.includes("Other tenant secret")); assert.ok(!prompt.includes("Other conversation secret"));
@@ -171,7 +176,7 @@ test("50 replies enforce demo allowance, replay succeeds at cap, and GET retains
   const history = await demoMessageService.list(actor);
   assert.equal(history.messages.length, 100); assert.equal(history.messages.at(-1)!.id, newest.id);
   assert.ok(!history.messages.some(m => m.id === f.rows[0].id));
-  for (let i = f.rows.length - 1; i >= 0; i--) if (f.rows[i].provider === "DEMO_AI") f.rows.splice(i, 1);
+  for (let i = f.rows.length - 1; i >= 0; i--) if (f.rows[i].senderType === "AI") f.rows.splice(i, 1);
   await assert.rejects(processLatestDemoReply(actor), { code: "DEMO_AI_LIMIT_REACHED" }); assert.equal(f.requests.length, 50);
 });
 
@@ -234,4 +239,88 @@ for (const intent of ["BOOKING_INTENT", "COMPLAINT", "HUMAN_REQUEST"]) test(`${i
   assert.doesNotMatch(prompt, /CREATE_BOOKING_REQUEST|REQUEST_HUMAN_REVIEW|Complaint case matching/);
   assert.match(prompt, /Booking intent: ask conversationally/); assert.match(prompt, /Complaint: acknowledge/); assert.match(prompt, /Human request: explain/);
   if (intent === "HUMAN_REQUEST") assert.equal(aiSafetyService.evaluate({ decision: f.state.nextDecision, businessReady: true, humanTakeover: false }).allowed, false);
+});
+
+for (const status of ["READY", "READY_PARTIAL"]) test(`automatic send in ${status} runs shared AI and replays the exact canonical input`, async t => {
+  const f = fixture(t); f.state.setupStatus = status;
+  const input = { text: "Do you offer roofing?", clientMessageId: randomUUID() };
+  const result = await demoConversationService.send(actor, input);
+  assert.equal(result.message.id, result.customerMessage.id);
+  assert.equal(f.requests[0].metadata.messageId, result.message.id);
+  assert.deepEqual((await demoMessageService.list(actor)).messages.map(m => m.senderType), ["CUSTOMER", "AI"]);
+  assert.equal(f.state.unread, 1); assert.equal(f.state.preview, result.aiMessage.text);
+  const stored = f.rows.find(m => m.id === result.aiMessage.id);
+  assert.equal(stored.provider, "DEMO"); assert.equal(stored.metadata.sourceInboundMessageId, result.message.id);
+  // Retrying an old client ID must not process the newer message instead.
+  const newer = await demoMessageService.create(actor, { text: "A newer question", clientMessageId: randomUUID() });
+  assert.deepEqual(await demoConversationService.send(actor, input), result);
+  assert.equal(f.requests.length, 1); assert.equal(f.activities.length, 3); assert.equal(f.state.unread, 2);
+  assert.equal(f.rows.find(m => m.id === newer.message.id).metadata.demoAiAttempted, undefined);
+});
+
+test("concurrent duplicate sends commit one inbound and claim one completion", async t => {
+  const f = fixture(t); const input = { text: "Roofing?", clientMessageId: randomUUID() };
+  const outcomes = await Promise.allSettled([demoConversationService.send(actor, input), demoConversationService.send(actor, input)]);
+  assert.ok(outcomes.some(o => o.status === "fulfilled"));
+  for (const outcome of outcomes) if (outcome.status === "rejected") assert.equal(outcome.reason.code, "DEMO_AI_UNAVAILABLE");
+  const replay = await demoConversationService.send(actor, input);
+  assert.equal(f.rows.length, 2); assert.equal(f.requests.length, 1); assert.equal(f.activities.length, 2); assert.equal(f.state.unread, 1);
+  assert.equal(replay.aiMessage.id, f.rows.find(m => m.senderType === "AI").id);
+});
+
+test("automatic send failure keeps inbound and identical client retry cannot spend again", async t => {
+  const f = fixture(t); f.state.fail = true;
+  const input = { text: "Roofing?", clientMessageId: randomUUID() };
+  await assert.rejects(demoConversationService.send(actor, input), { code: "DEMO_AI_UNAVAILABLE" });
+  await assert.rejects(demoConversationService.send(actor, input), { code: "DEMO_AI_UNAVAILABLE" });
+  assert.equal(f.rows.length, 1); assert.equal(f.rows[0].content, input.text); assert.equal(f.requests.length, 1); assert.equal(f.state.unread, 1);
+});
+
+test("50 customer sends allow 50 AI replies and only the 51st customer is rejected", async t => {
+  const f = fixture(t); let lastInput!: { text: string; clientMessageId: string };
+  for (let i = 0; i < 50; i++) {
+    lastInput = { text: `Roofing question ${i}`, clientMessageId: randomUUID() };
+    await demoConversationService.send(actor, lastInput);
+  }
+  assert.equal(f.rows.length, 100); assert.equal(f.state.unread, 50);
+  await demoConversationService.send(actor, lastInput); assert.equal(f.rows.length, 100);
+  await assert.rejects(demoConversationService.send(actor, { text: "One more", clientMessageId: randomUUID() }), { code: "DEMO_MESSAGE_LIMIT_REACHED" });
+  assert.equal(f.requests.length, 50); assert.equal((await demoMessageService.list(actor)).messages.length, 100);
+});
+
+test("exact inbound selector cannot process another tenant or a noncustomer row", async t => {
+  const f = fixture(t);
+  for (const fields of [{ businessId: "business-b" }, { conversationId: "conversation-b" }, { leadId: "customer-b" }, { senderType: "AI" }, { direction: "OUTBOUND" }, { messageType: "IMAGE" }, { deletedAt: new Date() }]) {
+    const row = f.add(fields);
+    await assert.rejects(processDemoReplyForMessage(actor, row.id), { code: "DEMO_CUSTOMER_MESSAGE_NOT_FOUND" });
+  }
+  await assert.rejects(demoConversationService.send({ ...actor, businessId: "business-b" }, { text: "forged", clientMessageId: randomUUID() }), { code: "DEMO_RESOURCE_FORBIDDEN" });
+  await assert.rejects(demoMessageService.list({ ...actor, businessId: "business-b" }), { code: "DEMO_RESOURCE_FORBIDDEN" });
+  assert.equal(f.requests.length, 0);
+});
+
+test("legacy DEMO_AI reply replays without a new completion or migration", async t => {
+  const f = fixture(t);
+  const customer = f.add({ metadata: { demoAiAttempted: true } });
+  const legacy = f.add({ senderType: "AI", direction: "OUTBOUND", provider: "DEMO_AI", providerMessageId: customer.id });
+  const result = await processDemoReplyForMessage(actor, customer.id);
+  assert.equal(result.aiMessage.id, legacy.id); assert.equal(f.requests.length, 0);
+});
+
+test("POST messages itself generates AI; GET restores both and retry is idempotent", async t => {
+  const httpFetch = globalThis.fetch; const f = fixture(t);
+  mockMethod(t, demoService, "authenticate", async token => {
+    assert.equal(token, "demo-a"); return actor;
+  });
+  const app = express(); app.use(express.json()); app.use("/api/demo", demoRouter); app.use(errorHandler);
+  const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}/api/demo/session/messages`;
+  const headers = { Authorization: "Bearer demo-a", "Content-Type": "application/json" };
+  const request = { method: "POST", headers, body: JSON.stringify({ text: "Do you offer roofing?", clientMessageId: randomUUID() }) };
+  const first = await httpFetch(url, request); assert.equal(first.status, 200); const result = await first.json() as any;
+  assert.equal(result.message.id, result.customerMessage.id); assert.equal(result.aiMessage.senderType, "AI");
+  assert.deepEqual(await (await httpFetch(url, request)).json(), result);
+  assert.deepEqual((await (await httpFetch(url, { headers })).json() as any).messages.map((m: any) => m.senderType), ["CUSTOMER", "AI"]);
+  assert.equal(f.requests.length, 1); assert.equal(f.state.unread, 1);
 });

@@ -1,8 +1,8 @@
 # Demo replies — Sprint 3B
 
-`POST /api/demo/session/ai/process-latest` requires the opaque demo bearer token. It accepts no body fields or query parameters. Scope comes from `authenticateDemo`; session, business, customer and DEMO conversation are checked before claiming an input and again before storing the reply. Setup must be `READY` or `READY_PARTIAL`.
+`POST /api/demo/session/messages` requires the opaque demo bearer token and `{ "text": "Do you offer roofing?", "clientMessageId": "<uuid>" }`. It stores or restores the canonical inbound message, commits that transaction, then synchronously generates or restores the AI reply for that exact stored message ID. No separate AI request is needed. The low-level `demoMessageService.create` remains storage-only; `demoConversationService.send` composes storage and the shared runtime. Scope comes from `authenticateDemo`; session, business, customer and DEMO conversation are checked before claiming an input and again before storing the reply. Setup must be `READY` or `READY_PARTIAL`.
 
-The latest nondeleted CUSTOMER / INBOUND / TEXT message in that conversation is the input. A successful retry returns its existing reply. Older messages remain history; this endpoint is not a backlog-draining worker.
+The input must be a nondeleted CUSTOMER / INBOUND / TEXT message in that conversation. Retrying a clientMessageId processes its original canonical ID even when newer messages exist. The compatibility `POST /api/demo/session/ai/process-latest` still accepts no body/query parameters and processes the latest eligible customer message through the same internal function. It is not a backlog-draining worker.
 
 ## Shared runtime
 
@@ -16,13 +16,15 @@ When `context.demoFacts` exists, the shared formatter omits production booking, 
 
 ## Persistence, retries and limits
 
-Demo replies use AI / OUTBOUND / TEXT, INTERNAL delivery status, `provider: "DEMO_AI"`, and `providerMessageId` equal to the source customer message ID. Metadata includes `isDemo`, `demoSessionId` and `sourceCustomerMessageId`.
+Demo replies use AI / OUTBOUND / TEXT, INTERNAL delivery status, `provider: "DEMO"`, and `providerMessageId` equal to the source customer message ID. Metadata includes `isDemo`, `demoSessionId` and `sourceInboundMessageId` (plus the legacy `sourceCustomerMessageId` alias). Existing DEMO_AI replies are still recognized for replay. The provider correlation is an internal source-message ID, never a WhatsApp ID.
 
 A transaction locks the session and sets `demoAiAttempted` on the source message before provider execution. Each customer message gets at most one provider attempt; failed or interrupted attempts remain consumed. There are at most 50 attempts and 50 stored replies per session. Replaying an existing successful reply works at the cap. The provider call has one model attempt and a 30-second abort budget. No migration is needed.
 
 Failure leaves the inbound message intact and creates no fabricated reply. A failed or currently claimed input returns `503 DEMO_AI_UNAVAILABLE`; sending a new customer message allows another attempt while allowance remains. Other errors include `409 DEMO_SETUP_NOT_READY`, `404 DEMO_CUSTOMER_MESSAGE_NOT_FOUND`, `403 DEMO_RESOURCE_FORBIDDEN`, `400 DEMO_AI_INPUT_INVALID` and `429 DEMO_AI_LIMIT_REACHED`.
 
 ## Frontend contract
+
+Create a session, set up the business, then POST a customer message. The send response contains the following fields plus `message`, an alias of `customerMessage` retained for Sprint 3A clients. The compatibility process-latest endpoint returns the following shape without the alias.
 
 ```json
 {
@@ -55,4 +57,13 @@ Failure leaves the inbound message intact and creates no fabricated reply. A fai
 
 Forbidden-call spies cover WhatsApp providers/integration lookup, realtime publishing, subscription/usage accounting, memory resolution/jobs, appointments, complaints, notifications, follow-ups and production knowledge. The fetch mock permits only the configured AI completion URL. Successful paths assert zero forbidden calls. This is deterministic runtime coverage, not proof of live model behavior or real database locking.
 
+Additional automatic-send tests verify exact-input correlation after newer sends, concurrent duplicate client IDs, legacy reply replay, failure retries, 50 customer sends producing 100 total rows, and unread increments only for inbound messages. Email delivery and follow-up scheduling are also explicitly spied on. This repository has no payment or quotation service/model wired to this path; the restricted transaction fixture and provider-only fetch mock reject additional database/network work.
+
+`tests/demo-ai.integration.test.ts` covers the full HTTP create/setup/send/retry/history sequence and concurrent dedupe against a real database, with the AI provider mocked. It is opt-in: set `NODE_ENV=test`, `RUN_DEMO_AI_DATABASE_TESTS=true`, and point both `DATABASE_URL` and `DEMO_TEST_DATABASE_URL` to the same dedicated test database before running that file. It refuses to silently use the default application database. This test was not run against the configured application database.
+
 Run with `npm run test:demo`; the suite includes the new tests. Database integration tests remain separately opt-in using `RUN_DATABASE_INTEGRATION_TESTS=true` and should run against a dedicated test database. No realtime delivery, booking, memory, follow-up or notification wiring is added by Sprint 3B.
+
+
+## Sprint 3C handoff
+
+Still missing: a public session-scoped realtime transport, AI processing/typing state, live customer messages on the business side, live AI replies, and live customer preview updates. Reuse the existing isolated realtime adapter to avoid a polling-only UX. This sprint adds no frontend, QR/mobile customer mode, RAG, WhatsApp onboarding, or demo-to-production conversion.

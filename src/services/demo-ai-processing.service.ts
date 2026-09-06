@@ -20,19 +20,29 @@ const response = (customer: Message, ai: Message) => ({ success: true, conversat
 
 /** Reply-only orchestration using the same context runtime, safety and persistence as production. */
 export async function processLatestDemoReply(actor: DemoActor) {
+  return processDemoReply(actor);
+}
+
+/** Internal input ID comes from canonical storage, never a frontend resource selector. */
+export async function processDemoReplyForMessage(actor: DemoActor, inboundMessageId: string) {
+  return processDemoReply(actor, inboundMessageId);
+}
+
+async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
   assertDemoEnabled();
   const claim = await prisma.$transaction(async tx => {
     const { conversation, lead } = await lock(tx, actor);
     const scope = { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id };
-    const customer = await tx.message.findFirst({ where: { ...scope, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT", deletedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+    const customer = await tx.message.findFirst({ where: { ...scope, ...(inboundMessageId ? { id: inboundMessageId } : {}), senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT", deletedAt: null }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
     if (!customer) throw new AppError(404, "No demo customer message found", "DEMO_CUSTOMER_MESSAGE_NOT_FOUND");
-    const existing = await tx.message.findFirst({ where: { ...scope, provider: "DEMO_AI", providerMessageId: customer.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deletedAt: null } });
+    // Read legacy DEMO_AI replies as well so deployment cannot break prior retries.
+    const existing = await tx.message.findFirst({ where: { ...scope, provider: { in: ["DEMO", "DEMO_AI"] }, providerMessageId: customer.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deletedAt: null } });
     if (existing) return { customer, existing };
     // Claims survive crashes and count failed calls. Never regenerate a claimed input.
     if (metadata(customer).demoAiAttempted === true) throw unavailable();
     const attempts = await tx.message.count({ where: { ...scope, senderType: "CUSTOMER", metadata: { path: ["demoAiAttempted"], equals: true } } });
     // Successful replies and failed attempts both have separate hard bounds.
-    const replyCount = await tx.message.count({ where: { ...scope, provider: "DEMO_AI" } });
+    const replyCount = await tx.message.count({ where: { ...scope, senderType: "AI" } });
     if (attempts >= DEMO_AI_LIMIT || replyCount >= DEMO_AI_LIMIT) throw new AppError(429, "Demo AI limit reached", "DEMO_AI_LIMIT_REACHED");
     await tx.message.update({ where: { id: customer.id, ...scope }, data: { metadata: { ...metadata(customer), demoAiAttempted: true } } });
     const session = await tx.demoSession.findUniqueOrThrow({ where: { id: actor.demoSessionId }, select: { setupAttemptId: true } });
@@ -53,7 +63,7 @@ export async function processLatestDemoReply(actor: DemoActor) {
     if (conversation.id !== customer.conversationId || lead.id !== customer.leadId || session.setupAttemptId !== claim.setupAttemptId) throw unavailable();
     const stillPresent = await tx.message.findFirst({ where: { id: customer.id, businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT" } });
     if (!stillPresent) throw unavailable();
-    return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO_AI", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId });
+    return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId });
   });
   return response(customer, ai);
 }
