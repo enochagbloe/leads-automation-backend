@@ -45,7 +45,7 @@ export async function processLatestDemoReply(actor: DemoActor) {
     const context = await buildDemoBusinessContext(actor, customer);
     result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(30_000), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
   } catch { throw unavailable(); }
-  const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false });
+  const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true });
   if (result.fallbackExhausted || !safety.allowed || safety.decision.suggestedAction !== "SEND_REPLY" || safety.decision.requiresHumanReview || !safety.decision.shouldReply || !safety.decision.replyText?.trim()) throw unavailable();
   const ai = await prisma.$transaction(async tx => {
     const { conversation, lead } = await lock(tx, actor);
