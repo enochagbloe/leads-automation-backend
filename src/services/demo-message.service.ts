@@ -1,3 +1,4 @@
+import { demoRealtimeService } from "./demo-realtime.service";
 import { Message, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../config/prisma";
@@ -13,16 +14,16 @@ export function parseDemoMessage(input: unknown) {
   return parsed.data;
 }
 const forbidden = () => new AppError(403, "Demo resource forbidden", "DEMO_RESOURCE_FORBIDDEN");
-export async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor) {
-  const session = await tx.demoSession.findFirst({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId, deletedAt: null } }, select: { setupStatus: true } });
+export async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor, requireReady = true) {
+  const session = await tx.demoSession.findFirst({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId, deletedAt: null } }, select: { setupStatus: true, expiresAt: true } });
   if (!session) throw forbidden();
-  if (session.setupStatus !== "READY" && session.setupStatus !== "READY_PARTIAL") throw new AppError(409, "Demo setup is not ready", "DEMO_SETUP_NOT_READY");
-  const conversations = await tx.conversation.findMany({ where: { businessId: actor.businessId, deletedAt: null }, take: 2, select: { id: true, businessId: true, leadId: true, channel: true } });
+  if (requireReady && session.setupStatus !== "READY" && session.setupStatus !== "READY_PARTIAL") throw new AppError(409, "Demo setup is not ready", "DEMO_SETUP_NOT_READY");
+  const conversations = await tx.conversation.findMany({ where: { businessId: actor.businessId, deletedAt: null }, take: 2, select: { id: true, businessId: true, leadId: true, channel: true, lastMessagePreview: true, lastMessageAt: true, unreadCount: true, status: true, updatedAt: true } });
   const conversation = conversations[0];
   if (conversations.length !== 1 || !conversation || conversation.channel !== "DEMO" || conversation.businessId !== actor.businessId) throw forbidden();
   const lead = await tx.lead.findFirst({ where: { id: conversation.leadId, businessId: actor.businessId, deletedAt: null, phone: `demo_customer_${actor.demoSessionId}` }, select: { id: true } });
   if (!lead) throw forbidden();
-  return { conversation, lead };
+  return { conversation, lead, session };
 }
 export function canonical(message: Message) {
   return { id: message.id, text: message.content, senderType: message.senderType, direction: message.direction, messageType: message.messageType, createdAt: message.createdAt };
@@ -31,7 +32,7 @@ export const demoMessageService = {
   async create(actor: DemoActor, input: unknown) {
     assertDemoEnabled();
     const data = parseDemoMessage(input);
-    return prisma.$transaction(async tx => {
+    const outcome = await prisma.$transaction(async tx => {
       // Serialize sends with each other, setup and destruction, across backend instances.
       const locked = await tx.demoSession.updateMany({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId } }, data: { lastActivityAt: new Date() } });
       if (!locked.count) throw forbidden();
@@ -41,7 +42,7 @@ export const demoMessageService = {
       if (existing) {
         if (existing.conversationId !== conversation.id || existing.leadId !== lead.id || existing.senderType !== "CUSTOMER" || existing.direction !== "INBOUND" || existing.messageType !== "TEXT" || existing.deletedAt) throw forbidden();
         if (existing.content !== data.text) throw new AppError(409, "clientMessageId was already used for different text", "DEMO_MESSAGE_CONFLICT");
-        return { success: true, conversation: { id: conversation.id }, message: canonical(existing) };
+        return { created: false, result: { success: true, conversation: { id: conversation.id }, message: canonical(existing) } };
       }
       // Include deleted customer rows so a retry/deletion cannot reset the allowance.
       const count = await tx.message.count({ where: { businessId: actor.businessId, conversationId: conversation.id, senderType: "CUSTOMER" } });
@@ -52,8 +53,10 @@ export const demoMessageService = {
         metadata: { isDemo: true, demoSessionId: actor.demoSessionId, clientMessageId: data.clientMessageId },
         activityMetadata: { isDemo: true, demoSessionId: actor.demoSessionId },
       });
-      return { success: true, conversation: { id: conversation.id }, message: canonical(message) };
+      return { created: true, result: { success: true, conversation: { id: conversation.id }, message: canonical(message) } };
     }, { maxWait: 15_000, timeout: 15_000 });
+    if (outcome.created) await demoRealtimeService.message(actor, outcome.result.conversation.id, outcome.result.message);
+    return outcome.result;
   },
   async list(actor: DemoActor) {
     assertDemoEnabled();

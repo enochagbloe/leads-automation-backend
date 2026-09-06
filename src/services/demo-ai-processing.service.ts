@@ -1,3 +1,4 @@
+import { demoRealtimeService } from "./demo-realtime.service";
 import { Message, Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
@@ -50,20 +51,28 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
   });
   if (claim.existing) return response(claim.customer, claim.existing);
   const customer = claim.customer;
-  let result;
+  await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "STARTED");
   try {
-    const context = await buildDemoBusinessContext(actor, customer);
-    result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(30_000), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
-  } catch { throw unavailable(); }
-  const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true });
-  if (result.fallbackExhausted || !safety.allowed || safety.decision.suggestedAction !== "SEND_REPLY" || safety.decision.requiresHumanReview || !safety.decision.shouldReply || !safety.decision.replyText?.trim()) throw unavailable();
-  const ai = await prisma.$transaction(async tx => {
-    const { conversation, lead } = await lock(tx, actor);
-    const session = await tx.demoSession.findUniqueOrThrow({ where: { id: actor.demoSessionId }, select: { setupAttemptId: true } });
-    if (conversation.id !== customer.conversationId || lead.id !== customer.leadId || session.setupAttemptId !== claim.setupAttemptId) throw unavailable();
-    const stillPresent = await tx.message.findFirst({ where: { id: customer.id, businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT" } });
-    if (!stillPresent) throw unavailable();
-    return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId });
-  });
-  return response(customer, ai);
+    let result;
+    try {
+      const context = await buildDemoBusinessContext(actor, customer);
+      result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(30_000), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
+    } catch { throw unavailable(); }
+    const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true });
+    if (result.fallbackExhausted || !safety.allowed || safety.decision.suggestedAction !== "SEND_REPLY" || safety.decision.requiresHumanReview || !safety.decision.shouldReply || !safety.decision.replyText?.trim()) throw unavailable();
+    const ai = await prisma.$transaction(async tx => {
+      const { conversation, lead } = await lock(tx, actor);
+      const session = await tx.demoSession.findUniqueOrThrow({ where: { id: actor.demoSessionId }, select: { setupAttemptId: true } });
+      if (conversation.id !== customer.conversationId || lead.id !== customer.leadId || session.setupAttemptId !== claim.setupAttemptId) throw unavailable();
+      const stillPresent = await tx.message.findFirst({ where: { id: customer.id, businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT" } });
+      if (!stillPresent) throw unavailable();
+      return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId });
+    });
+    await demoRealtimeService.message(actor, customer.conversationId, canonical(ai));
+    await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "COMPLETED");
+    return response(customer, ai);
+  } catch (error) {
+    await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "FAILED");
+    throw error;
+  }
 }

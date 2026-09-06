@@ -1,3 +1,4 @@
+import { demoRealtimeService } from "../src/services/demo-realtime.service";
 import { demoConversationService } from "../src/services/demo-conversation.service";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -17,6 +18,7 @@ import { errorHandler } from "../src/middleware/error";
 import { mockMethod } from "./helpers/mock-method";
 const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "session", businessId: "business" };
 function fixture(t: import("node:test").TestContext) {
+  mockMethod(t, demoRealtimeService, "message", async () => {});
   const old = env.DEMO_ENABLED; env.DEMO_ENABLED = true; t.after(() => { env.DEMO_ENABLED = old; });
   const state = { status: "READY", active: true, channel: "DEMO", validLead: true, unread: 0, preview: "", lastMessageAt: null as Date | null, count: 0 };
   const rows: any[] = []; const activities: any[] = [];

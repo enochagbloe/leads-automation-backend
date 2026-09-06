@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { demoConversationService } from "../src/services/demo-conversation.service";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
@@ -25,15 +26,15 @@ import { followUpJobSchedulerService } from "../src/services/follow-up/follow-up
 const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "session-a", businessId: "business-a" };
 const decision = { intent: "PRICING_INQUIRY" as const, replyText: "Roof inspection costs GHS 300.", confidence: 1, shouldReply: true, requiresHumanReview: false, reason: "Confirmed fact", suggestedAction: "SEND_REPLY" as const, usedKnowledge: { profile: false, services: true, availability: false, policies: false, conversationHistory: true } };
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, liveRealtime = false) {
   const saved = { DEMO_ENABLED: env.DEMO_ENABLED, OPENROUTER_API_KEY: env.OPENROUTER_API_KEY, OPENROUTER_DEFAULT_MODEL: env.OPENROUTER_DEFAULT_MODEL };
   Object.assign(env, { DEMO_ENABLED: true, OPENROUTER_API_KEY: "test-only", OPENROUTER_DEFAULT_MODEL: "test-model" });
   t.after(() => Object.assign(env, saved));
   const facts = emptyDemoFacts();
   facts.services = [{ name: "Roof inspection", description: null, price: "GHS 300", duration: null }, { name: "Roof replacement", description: null, price: null, duration: null }];
-  const state = { unread: 0, preview: "", active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, beforeResponse: undefined as (() => Promise<void>) | undefined };
+  const state = { expiresAt: new Date(Date.now() + 60_000), unread: 0, preview: "", persistenceFail: false, active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, beforeResponse: undefined as (() => Promise<void>) | undefined };
   const context = { businessName: "Acme Roofing", facts, sourceWebsite: null, crawlStatus: "COMPLETE", extractionStatus: "COMPLETE", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), pagesAttempted: 1, pagesFetched: 1, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: ["Replacement price", "Hours", "Duration", "Policies"] };
-  const rows: any[] = []; const activities: any[] = []; const requests: any[] = [];
+  const rows: any[] = []; const activities: any[] = []; const requests: any[] = []; const events: any[] = [];
   function add(overrides: Record<string, unknown> = {}) {
     const row = { id: randomUUID(), businessId: actor.businessId, conversationId: "conversation-a", leadId: "customer-a", senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT", provider: "DEMO", providerMessageId: randomUUID(), metadata: { isDemo: true }, content: "How much is roof inspection?", createdAt: new Date(Date.now() + rows.length * 1000), deletedAt: null, ...overrides };
     rows.push(row); return row;
@@ -63,25 +64,30 @@ function fixture(t: TestContext) {
   };
   const tx = {
     demoSession: { updateMany: async (args: any) => ({ count: await sessionLookup(args) ? 1 : 0 }), findFirst: sessionLookup, findUniqueOrThrow: async () => ({ setupAttemptId: state.setupAttemptId }) },
-    conversation: { findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel }], update: async ({ where, data }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); state.unread += data.unreadCount?.increment ?? 0; state.preview = data.lastMessagePreview; return {}; } },
+    conversation: { findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel, lastMessagePreview: state.preview, lastMessageAt: new Date(), unreadCount: state.unread, status: "AI_HANDLING", updatedAt: new Date() }], update: async ({ where, data }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); state.unread += data.unreadCount?.increment ?? 0; state.preview = data.lastMessagePreview; return {}; } },
     lead: { findFirst: async ({ where }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.phone, "demo_customer_session-a"); return state.validLead ? { id: "customer-a" } : null; } },
     message: {
       findFirst: async (args: any) => select(args)[0] ?? null,
       findMany: async (args: any) => select(args),
       count: async (args: any) => select(args).length,
       update: async ({ where, data }: any) => { const row = rows.find(r => matches(r, where)); assert.ok(row); Object.assign(row, data); return { ...row }; },
-      create: async ({ data }: any) => { const { createdAt, ...fields } = data; return add({ ...fields, ...(createdAt ? { createdAt } : {}) }); },
+      create: async ({ data }: any) => { if (state.persistenceFail) throw new Error("Database failure"); const { createdAt, ...fields } = data; return add({ ...fields, ...(createdAt ? { createdAt } : {}) }); },
     },
     leadActivity: { create: async ({ data }: any) => { activities.push(data); return data; } },
   };
   // Model the session row lock; provider execution happens outside this queue.
   let queue = Promise.resolve();
-  mockMethod(t, prisma, "$transaction", callback => { const result = queue.then(() => callback(tx)); queue = result.then(() => undefined, () => undefined); return result; });
+  const transactionContext = new AsyncLocalStorage<boolean>();
+  mockMethod(t, prisma, "$transaction", callback => { const result = queue.then(() => transactionContext.run(true, () => callback(tx))); queue = result.then(() => undefined, () => undefined); return result; });
   mockMethod(t, prisma.demoSession, "findFirst", sessionLookup);
   mockMethod(t, prisma.message, "findMany", async args => {
     assert.equal(args.where.businessId, actor.businessId); assert.equal(args.where.conversationId, "conversation-a");
     assert.ok(args.take <= env.AI_MAX_CONTEXT_MESSAGES); return select(args);
   });
+  mockMethod(t, prisma.conversation, "findMany", tx.conversation.findMany);
+  mockMethod(t, prisma.lead, "findFirst", tx.lead.findFirst);
+  const publishDemo = realtimeService.publishDemo;
+  mockMethod(t, realtimeService, "publishDemo", input => { assert.notEqual(transactionContext.getStore(), true, "events must publish after their own transaction commits"); events.push(input); if (liveRealtime) return publishDemo.call(realtimeService, input); });
   const forbidden = () => { throw new Error("Forbidden side effect"); };
   const spies = [
     mockMethod(t, emailService, "send", forbidden),
@@ -90,7 +96,7 @@ function fixture(t: TestContext) {
     mockMethod(t, prisma.whatsAppIntegration, "findFirst", forbidden),
     mockMethod(t, aiUsageService, "assertCanUseAiReplies", forbidden), mockMethod(t, aiUsageService, "trackRequest", forbidden),
     mockMethod(t, prisma.subscription, "findFirst", forbidden), mockMethod(t, prisma.accountUsageRecord, "update", forbidden), mockMethod(t, prisma.businessUsageRecord, "update", forbidden),
-    mockMethod(t, realtimeService, "publish", forbidden), mockMethod(t, realtimeService, "publishDemo", forbidden),
+    mockMethod(t, realtimeService, "publish", forbidden),
     mockMethod(t, customerMemoryResolverService, "resolveRuntimeSafely", forbidden),
   ];
   for (const delegate of [prisma.appointment, prisma.customerIssueLog, prisma.followUpJob, prisma.customerMemoryExtractionJob, prisma.businessNotification, prisma.knowledgeArticle, prisma.knowledgeDocument]) {
@@ -105,7 +111,7 @@ function fixture(t: TestContext) {
     if (state.fail) return new Response("{}", { status: 503 });
     return Response.json({ choices: [{ message: { content: state.malformed ? "invalid json" : JSON.stringify(state.nextDecision) } }], model: "test-model" });
   });
-  return { state, context, rows, add, activities, requests, fetchSpy };
+  return { state, context, rows, add, activities, requests, fetchSpy, events };
 }
 
 for (const status of ["READY", "READY_PARTIAL"]) test(`${status}: real prompt/provider/parser/safety/store path returns canonical reply and history`, async t => {
@@ -165,6 +171,8 @@ for (const failure of ["provider", "malformed", "unsafe"]) test(`${failure} fail
   await assert.rejects(processLatestDemoReply(actor), { code: "DEMO_AI_UNAVAILABLE" });
   await assert.rejects(processLatestDemoReply(actor), { code: "DEMO_AI_UNAVAILABLE" });
   assert.equal(f.rows.length, 1); assert.equal(f.rows[0].content, customer.content); assert.equal(f.requests.length, 1); assert.equal(f.activities.length, 0);
+  assert.deepEqual(f.events.filter(e => e.type === "demo.ai.processing").map(e => e.payload.status), ["STARTED", "FAILED"]);
+  assert.equal(f.events.filter(e => e.type === "message.created").length, 0);
 });
 
 test("50 replies enforce demo allowance, replay succeeds at cap, and GET retains latest 100", async t => {
@@ -266,6 +274,8 @@ test("concurrent duplicate sends commit one inbound and claim one completion", a
   const replay = await demoConversationService.send(actor, input);
   assert.equal(f.rows.length, 2); assert.equal(f.requests.length, 1); assert.equal(f.activities.length, 2); assert.equal(f.state.unread, 1);
   assert.equal(replay.aiMessage.id, f.rows.find(m => m.senderType === "AI").id);
+  assert.equal(f.events.filter(e => e.type === "message.created").length, 2);
+  assert.deepEqual(f.events.filter(e => e.type === "demo.ai.processing").map(e => e.payload.status), ["STARTED", "COMPLETED"]);
 });
 
 test("automatic send failure keeps inbound and identical client retry cannot spend again", async t => {
@@ -323,4 +333,70 @@ test("POST messages itself generates AI; GET restores both and retry is idempote
   assert.deepEqual(await (await httpFetch(url, request)).json(), result);
   assert.deepEqual((await (await httpFetch(url, { headers })).json() as any).messages.map((m: any) => m.senderType), ["CUSTOMER", "AI"]);
   assert.equal(f.requests.length, 1); assert.equal(f.state.unread, 1);
+});
+
+test("realtime lifecycle publishes committed customer, STARTED, committed AI, conversation, COMPLETED once", async t => {
+  const f = fixture(t); const input = { text: "Roofing?", clientMessageId: randomUUID() };
+  f.state.beforeResponse = async () => {
+    assert.equal(f.rows.length, 1);
+    assert.deepEqual(f.events.map(e => [e.type, e.payload.status ?? e.payload.senderType]), [
+      ["message.created", "CUSTOMER"], ["conversation.updated", "AI_HANDLING"], ["demo.ai.processing", "STARTED"],
+    ]);
+  };
+  const result = await demoConversationService.send(actor, input);
+  assert.deepEqual(f.events.map(e => e.type), ["message.created", "conversation.updated", "demo.ai.processing", "message.created", "conversation.updated", "demo.ai.processing"]);
+  assert.equal(f.events[3].payload.id, result.aiMessage.id); assert.equal(f.events[4].payload.unreadCount, 1);
+  assert.equal(f.events[4].payload.lastMessagePreview, result.aiMessage.text); assert.equal(f.events[5].payload.status, "COMPLETED");
+  for (const event of f.events) {
+    assert.equal(event.businessId, actor.businessId); assert.equal(event.demoSessionId, actor.demoSessionId); assert.equal(event.conversationId, result.conversation.id);
+    for (const key of ["metadata", "token", "demoContext", "model", "provider"]) assert.equal(key in event.payload, false);
+  }
+  await demoConversationService.send(actor, input); assert.equal(f.events.length, 6);
+});
+
+test("provider or final-save failure publishes FAILED, preserves customer and emits no AI creation", async t => {
+  const f = fixture(t); const input = { text: "Roofing?", clientMessageId: randomUUID() };
+  f.state.beforeResponse = async () => { f.state.persistenceFail = true; };
+  await assert.rejects(demoConversationService.send(actor, input));
+  assert.equal(f.rows.length, 1);
+  assert.deepEqual(f.events.filter(e => e.type === "demo.ai.processing").map(e => e.payload.status), ["STARTED", "FAILED"]);
+  assert.equal(f.events.filter(e => e.type === "message.created").length, 1);
+  await assert.rejects(demoConversationService.send(actor, input)); assert.equal(f.events.length, 4);
+});
+
+test("invalidated session receives no late FAILED and failed inbound persistence publishes nothing", async t => {
+  const f = fixture(t); const input = { text: "Roofing?", clientMessageId: randomUUID() };
+  f.state.persistenceFail = true; await assert.rejects(demoConversationService.send(actor, input)); assert.equal(f.events.length, 0);
+  f.state.persistenceFail = false; f.state.beforeResponse = async () => { f.state.active = false; };
+  await assert.rejects(demoConversationService.send(actor, input));
+  assert.deepEqual(f.events.filter(e => e.type === "demo.ai.processing").map(e => e.payload.status), ["STARTED"]);
+});
+
+test("real HTTP SSE observes the customer before provider completion and the committed AI lifecycle", async t => {
+  const httpFetch = globalThis.fetch; const f = fixture(t, true);
+  mockMethod(t, demoService, "authenticate", async () => actor);
+  const app = express(); app.use(express.json()); app.use("/api/demo", demoRouter); app.use(errorHandler);
+  const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));
+  const controller = new AbortController();
+  t.after(() => { controller.abort(); realtimeService.disconnectAllDemo(); server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}/api/demo/session`;
+  const headers = { Authorization: "Bearer demo-a", "Content-Type": "application/json" };
+  const stream = await httpFetch(`${base}/events`, { headers, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]) });
+  assert.equal(stream.status, 200); const reader = stream.body!.getReader(); const decoder = new TextDecoder(); let received = "";
+  async function through(value: string) { while (!received.includes(value)) { const chunk = await reader.read(); assert.equal(chunk.done, false); received += decoder.decode(chunk.value, { stream: true }); } }
+  await through("demo.connected");
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  f.state.beforeResponse = async () => { await gate; };
+  const request = { method: "POST", headers, body: JSON.stringify({ text: "Do you offer roofing?", clientMessageId: randomUUID() }) };
+  const sending = httpFetch(`${base}/messages`, request);
+  try {
+    await through('"status":"STARTED"'); assert.match(received, /"senderType":"CUSTOMER"/); assert.equal(f.rows.length, 1);
+  } finally { release(); }
+  const response = await sending; assert.equal(response.status, 200);
+  await through('"status":"COMPLETED"');
+  const frames = received.split("\n\n").filter(Boolean).map(frame => JSON.parse(frame.split("\n").find(line => line.startsWith("data: "))!.slice(6)));
+  assert.deepEqual(frames.map(frame => frame.type), ["demo.connected", "message.created", "conversation.updated", "demo.ai.processing", "message.created", "conversation.updated", "demo.ai.processing"]);
+  assert.equal(frames[4].payload.senderType, "AI"); assert.equal(frames[5].payload.unreadCount, 1);
+  const count = f.events.length; assert.equal((await httpFetch(`${base}/messages`, request)).status, 200); assert.equal(f.events.length, count);
+  controller.abort(); await reader.cancel().catch(() => {});
 });

@@ -1,5 +1,6 @@
 import { demoMessageService } from "../services/demo-message.service";
 import { demoConversationService } from "../services/demo-conversation.service";
+import { demoRealtimeService } from "../services/demo-realtime.service";
 import { processLatestDemoReply } from "../services/demo-ai-processing.service";
 import { AppError } from "../utils/errors";
 import { Router } from "express";
@@ -14,6 +15,10 @@ demoRouter.post("/session", (_req, _res, next) => { try { assertDemoEnabled(); n
   res.status(201).json(await demoService.create(req.ip ?? "unknown", req.get("idempotency-key")));
 });
 demoRouter.get("/session", authenticateDemo, async (req, res) => { res.json(await demoService.get(req.demo!)); });
+demoRouter.get("/session/events", authenticateDemo, async (req, res) => {
+  if (Object.keys(req.query).length) throw new AppError(400, "Demo events accept no query parameters", "DEMO_STREAM_INPUT_INVALID");
+  await demoRealtimeService.connect(req.demo!, res);
+});
 demoRouter.delete("/session", authenticateDemo, mutationLimiter, async (req, res) => {
   await demoService.destroy(req.demo!.demoSessionId);
   res.json({ success: true });

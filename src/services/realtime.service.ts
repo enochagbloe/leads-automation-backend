@@ -1,8 +1,11 @@
+import { AppError } from "../utils/errors";
 import crypto from "node:crypto";
 import { BusinessRole } from "@prisma/client";
 import { Response } from "express";
 
 export type RealtimeEventType =
+  | "demo.connected"
+  | "demo.ai.processing"
   | "message.created"
   | "message.status.updated"
   | "conversation.created"
@@ -174,42 +177,63 @@ type Client = {
 };
 
 const clients = new Map<string, Client>();
-const demoClients = new Map<string, { demoSessionId: string; conversationId: string; expiresAt: number; response: Response }>();
+type DemoClientInput = { demoSessionId: string; businessId: string; conversationId: string; expiresAt: number; response: Response; isValid: () => Promise<boolean> };
+const demoClients = new Map<string, DemoClientInput & { close: () => void; checking: boolean }>();
+export const DEMO_SSE_CONNECTION_LIMIT = 5;
+const MAX_DEMO_CONNECTIONS = 1000;
+let demoShuttingDown = false;
 
 function writeEvent(response: Response, event: RealtimeEvent) {
-  response.write(`id: ${event.id}\n`);
-  response.write(`event: ${event.type}\n`);
-  response.write(`data: ${JSON.stringify(event)}\n\n`);
+  return response.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
 }
 
 export const realtimeService = {
   // TODO: Replace in-memory pub/sub with Redis Pub/Sub when running multiple backend instances.
-  publishDemo(input: { demoSessionId: string; conversationId: string; type: RealtimeEventType; payload: Record<string, unknown> }) {
+  publishDemo(input: { demoSessionId: string; businessId: string; conversationId: string; type: RealtimeEventType; payload: Record<string, unknown> }) {
     const event = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...input, isDemo: true };
-    for (const [id, client] of demoClients) {
-      if (client.expiresAt <= Date.now()) { client.response.end(); demoClients.delete(id); continue; }
-      if (client.demoSessionId !== input.demoSessionId || client.conversationId !== input.conversationId) continue;
-      try { client.response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
-      catch { demoClients.delete(id); }
+    for (const client of demoClients.values()) {
+      if (client.expiresAt <= Date.now()) { client.close(); continue; }
+      if (client.demoSessionId !== input.demoSessionId || client.businessId !== input.businessId || client.conversationId !== input.conversationId) continue;
+      try { if (!writeEvent(client.response, event)) client.close(); }
+      catch { client.close(); }
     }
     return event;
   },
 
-  // Internal adapter only. Future routes must derive scope and expiry from authenticateDemo.
-  subscribeDemo(input: { demoSessionId: string; conversationId: string; expiresAt: number; response: Response }) {
+  subscribeDemo(input: DemoClientInput) {
+    if (demoShuttingDown) throw new AppError(503, "Server is shutting down", "DEMO_STREAM_UNAVAILABLE");
+    if (input.expiresAt <= Date.now()) throw new AppError(401, "Demo session expired", "DEMO_SESSION_EXPIRED");
+    if (demoClients.size >= MAX_DEMO_CONNECTIONS || [...demoClients.values()].filter(c => c.demoSessionId === input.demoSessionId).length >= DEMO_SSE_CONNECTION_LIMIT) throw new AppError(429, "Demo stream connection limit reached", "DEMO_STREAM_LIMIT_REACHED");
     const id = crypto.randomUUID();
-    demoClients.set(id, input);
-    const close = () => { demoClients.delete(id); clearTimeout(timer); };
-    const timer = setTimeout(() => { input.response.end(); close(); }, Math.max(0, input.expiresAt - Date.now()));
-    timer.unref();
-    input.response.once("close", close);
+    let timer: NodeJS.Timeout | undefined;
+    const close = () => {
+      demoClients.delete(id);
+      if (timer) clearTimeout(timer);
+      input.response.removeListener("close", close);
+      input.response.removeListener("error", close);
+      if (!input.response.writableEnded) input.response.end();
+    };
+    demoClients.set(id, { ...input, close, checking: false });
+    timer = setTimeout(close, Math.max(0, input.expiresAt - Date.now())); timer.unref();
+    input.response.once("close", close); input.response.once("error", close);
+    try {
+      input.response.set({ "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+      input.response.flushHeaders();
+      if (!writeEvent(input.response, { id: crypto.randomUUID(), type: "demo.connected", businessId: input.businessId, conversationId: input.conversationId, createdAt: new Date().toISOString(), payload: { conversationId: input.conversationId } })) close();
+    } catch { close(); }
     return id;
   },
   disconnectDemo(demoSessionId: string) {
-    for (const [id, client] of demoClients) {
-      if (client.demoSessionId === demoSessionId) { client.response.end(); demoClients.delete(id); }
-    }
+    for (const client of demoClients.values()) if (client.demoSessionId === demoSessionId) client.close();
   },
+  disconnectAllDemo() {
+    for (const client of demoClients.values()) client.close();
+  },
+  shutdownDemo() {
+    demoShuttingDown = true;
+    this.disconnectAllDemo();
+  },
+  demoClientCount() { return demoClients.size; },
   publish(input: PublishInput) {
     const { assignedStaffId, staffMembershipIds = [], roles, broadcastToStaff = false, ...publicInput } = input;
     const event: RealtimeEvent = {
@@ -264,6 +288,15 @@ export const realtimeService = {
 
   heartbeat() {
     const data = JSON.stringify({ ts: new Date().toISOString() });
+    for (const client of demoClients.values()) {
+      if (client.expiresAt <= Date.now()) { client.close(); continue; }
+      if (client.checking) continue;
+      client.checking = true;
+      void client.isValid().then(valid => {
+        if (!valid || client.expiresAt <= Date.now()) { client.close(); return; }
+        if (!client.response.writableEnded && !client.response.write(`event: ping\ndata: ${data}\n\n`)) client.close();
+      }).catch(() => client.close()).finally(() => { client.checking = false; });
+    }
     for (const client of clients.values()) {
       try {
         client.response.write(`event: ping\ndata: ${data}\n\n`);
