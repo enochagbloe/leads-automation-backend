@@ -58,7 +58,9 @@ export const demoService = {
       const session = await tx.demoSession.create({ data: { id, tokenHash: hashDemoToken(token), ipHash, idempotencyHash, expiresAt: new Date(now.getTime() + env.DEMO_SESSION_TTL_MINUTES * 60_000) } });
       const owner = await tx.user.create({ data: { demoSessionId: session.id, firstName: "Demo", lastName: "System", email: `${randomUUID()}@demo.invalid`, passwordHash: "!disabled-demo-identity", status: "DISABLED", canCreateBusiness: false, accountType: "STAFF_ONLY" } });
       const account = await tx.businessAccount.create({ data: { demoSessionId: session.id, name: "Demo Workspace", ownerId: owner.id } });
-      const business = await tx.business.create({ data: { demoSessionId: session.id, name: "Demo Business", industry: "Unspecified", slug: `demo-${session.id}`, ownerId: owner.id, businessAccountId: account.id, aiRepliesEnabled: false, aiAutoReplyEnabled: false } });
+      // Satisfy Business_contact_required without inventing a real business contact.
+      // This internal placeholder is excluded from demo responses and DemoContext.
+      const business = await tx.business.create({ data: { demoSessionId: session.id, email: `business-${session.id}@demo.invalid`, name: "Demo Business", industry: "Unspecified", slug: `demo-${session.id}`, ownerId: owner.id, businessAccountId: account.id, aiRepliesEnabled: false, aiAutoReplyEnabled: false } });
       // Lead is the existing contact model; no generated sales lead or quota writes.
       const customer = await tx.lead.create({ data: { businessId: business.id, fullName: "Demo Customer", phone: `demo_customer_${session.id}`, source: "OTHER", whatsAppOptedOut: true } });
       await tx.conversation.create({ data: { businessId: business.id, leadId: customer.id, channel: "DEMO", aiEnabled: false } });

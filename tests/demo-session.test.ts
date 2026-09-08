@@ -67,7 +67,7 @@ test("creation reuses a retry and creates only isolated domain records without s
     user: { create: async ({ data }: any) => { assert.equal(data.status, "DISABLED"); assert.equal(data.canCreateBusiness, false); assert.equal(data.demoSessionId, session.id); return { id: "owner" }; } },
     businessAccount: { create: async ({ data }: any) => { assert.equal(data.demoSessionId, session.id); return { id: "account" }; } },
     business: {
-      create: async ({ data }: any) => { businesses++; assert.equal(data.demoSessionId, session.id); assert.equal(data.aiRepliesEnabled, false); return { id: "business" }; },
+      create: async ({ data }: any) => { businesses++; assert.equal(data.email, `business-${session.id}@demo.invalid`); assert.ok(data.email.trim() || data.phone?.trim(), "Business_contact_required must hold"); assert.equal(data.demoSessionId, session.id); assert.equal(data.aiRepliesEnabled, false); return { id: "business" }; },
       findUnique: async () => ({ id: "business", name: "Demo Business" }),
     },
     lead: {
@@ -87,6 +87,7 @@ test("creation reuses a retry and creates only isolated domain records without s
   assert.equal(session.tokenHash, hashDemoToken(a.token));
   assert.equal(a.demo.customer.name, "Demo Customer");
   assert.equal("messages" in a.demo, false);
+  assert.equal("email" in a.demo.business, false);
   for (const status of ["ACTIVE", "EXPIRED", "DESTROYED"]) {
     const oldSession = session;
     oldSession.status = status;

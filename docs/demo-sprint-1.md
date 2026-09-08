@@ -52,3 +52,5 @@ Run `npm run test:demo`. The database lifecycle suite is opt-in with RUN_DATABAS
 Unit/HTTP tests cover disabled mode, production auth rejection, tenant isolation, expiry, provider suppression, retry reuse, cleanup ownership protection and response contracts. Database migration and real PostgreSQL concurrency/cascade execution still require the integration environment. Realtime remains process-local, as in production SSE. Future global reporting must filter demoSessionId when including all businesses/accounts/users.
 
 Sprint 2 should implement website intake/crawling and extraction, then an explicit internal message ingestion adapter with demo limits and scoped realtime authorization. No crawler, RAG, simulator, message-send endpoint, lead/appointment generation or workspace conversion is implemented here.
+
+The temporary Business also receives a session-specific `business-<sessionId>@demo.invalid` email to satisfy the existing `Business_contact_required` constraint. It is an internal placeholder, excluded from the public session response and AI DemoContext; production contact validation is unchanged.
