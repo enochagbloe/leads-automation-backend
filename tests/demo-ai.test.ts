@@ -1,3 +1,4 @@
+import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import { conversationStateService } from "../src/services/conversation-state.service";
 import { conversationContextService } from "../src/services/conversation-context.service";
 import { emptyState } from "../src/services/conversation-state.schema";
@@ -37,6 +38,7 @@ function fixture(t: TestContext, liveRealtime = false) {
   const facts = emptyDemoFacts();
   facts.services = [{ name: "Roof inspection", description: null, price: "GHS 300", duration: null }, { name: "Roof replacement", description: null, price: null, duration: null }];
   const state = { expiresAt: new Date(Date.now() + 60_000), unread: 0, preview: "", persistenceFail: false, active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, conversationState: emptyState(), beforeResponse: undefined as (() => Promise<void>) | undefined };
+  mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: { intent: state.nextDecision.intent, confidence: 1, resolvedEntities: [], needsClarification: false }, commands: [], appliedRevision: 7, replayed: false }));
   const context = { businessName: "Acme Roofing", facts, sourceWebsite: null, crawlStatus: "COMPLETE", extractionStatus: "COMPLETE", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), pagesAttempted: 1, pagesFetched: 1, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: ["Replacement price", "Hours", "Duration", "Policies"] };
   const rows: any[] = []; const activities: any[] = []; const requests: any[] = []; const events: any[] = [];
   function add(overrides: Record<string, unknown> = {}) {

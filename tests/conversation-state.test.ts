@@ -1,3 +1,4 @@
+import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
 import { Prisma } from "@prisma/client";
@@ -12,50 +13,7 @@ import { generateContextReply } from "../src/services/ai-reply-runtime.service";
 import { aiProvider } from "../src/services/ai-provider.service";
 import type { AiBusinessContext } from "../src/services/ai-context-builder.service";
 
-const scope = { businessId: "business-a", conversationId: "conversation-a" };
-function fixture(t: TestContext) {
-  let state: any = null;
-  let effects: any[] = [];
-  let messages: any[] = [];
-  let demoId: string | null = null;
-  let active = true;
-  let failAudit = false;
-  let status = "AI_HANDLING";
-  const match = (row: any, where: any): boolean => Object.entries(where).every(([k, v]: [string, any]) => k === "OR" ? v.some((w: any) => match(row, w)) : v && typeof v === "object" && !(v instanceof Date) ? v.in ? v.in.includes(row[k]) : v.lt !== undefined ? row[k] < v.lt : v.lte !== undefined ? row[k] <= v.lte : true : v instanceof Date ? +row[k] === +v : row[k] === v);
-  const tx: any = {
-    $queryRaw: async () => [],
-    conversation: {
-      findFirst: async ({ where }: any) => where.id === scope.conversationId && where.businessId === scope.businessId ? { id: scope.conversationId, channel: demoId ? "DEMO" : "WHATSAPP", business: { demoSessionId: demoId } } : null,
-      update: async () => ({ id: scope.conversationId, status }),
-    },
-    demoSession: { findFirst: async ({ where }: any) => active && where.id === demoId && where.business.id === scope.businessId ? { id: demoId } : null },
-    conversationState: {
-      createMany: async ({ data }: any) => { state ??= { ...emptyState(), ...data[0], id: "state", revision: 0, lastActivityAt: new Date(), createdAt: new Date(), updatedAt: new Date() }; return { count: 1 }; },
-      findFirst: async ({ where }: any) => state && match(state, where) ? structuredClone(state) : null,
-      findFirstOrThrow: async ({ where }: any) => { assert.ok(state && match(state, where)); return structuredClone(state); },
-      updateMany: async ({ where, data }: any) => { if (!match(state, where)) return { count: 0 }; state = { ...state, ...data, awaiting: data.awaiting === Prisma.DbNull ? null : data.awaiting, revision: state.revision + data.revision.increment }; return { count: 1 }; },
-    },
-    conversationStateEffect: {
-      findFirst: async ({ where }: any) => effects.find(e => match(e, where)) ?? null,
-      create: async ({ data }: any) => { if (failAudit) throw new Error("audit unavailable"); effects.push(data); return data; },
-    },
-    message: {
-      create: async ({ data }: any) => { const row = { id: `m${messages.length}`, deletedAt: null, createdAt: new Date(), ...data }; messages.push(row); return row; },
-      findFirst: async ({ where }: any) => messages.find(m => match(m, where)) ?? null,
-      findMany: async ({ where, take }: any) => messages.filter(m => match(m, where)).sort((a, b) => +b.createdAt - +a.createdAt || b.id.localeCompare(a.id)).slice(0, take),
-    },
-    leadActivity: { create: async () => ({}) },
-  };
-  let queue = Promise.resolve();
-  mockMethod(t, prisma, "$transaction", (fn: any) => {
-    const run = queue.then(async () => {
-      const old = structuredClone({ state, effects, messages });
-      try { return await fn(tx); } catch (error) { ({ state, effects, messages } = old); throw error; }
-    });
-    queue = run.then(() => {}, () => {}); return run;
-  });
-  return { tx, state: () => state, effects: () => effects, messages: () => messages, demo: () => { demoId = "demo-a"; }, expire: () => { active = false; }, fail: () => { failAudit = true; }, human: () => { status = "HUMAN_HANDLING"; }, add: async (content: string, senderType = "CUSTOMER") => tx.message.create({ data: { ...scope, content, senderType, direction: senderType === "CUSTOMER" ? "INBOUND" : "OUTBOUND", createdAt: new Date(Date.now() + messages.length * 1000) } }) };
-}
+import { fixture, scope } from "./helpers/conversation-state-fixture";
 const command = (revision: number, effect: string) => ({ ...scope, expectedRevision: revision, source: "WORKFLOW" as const, sourceEffectId: effect });
 
 test("lazy initialization, reload, workflow, structured entities and pending field persist", async t => {
@@ -177,6 +135,7 @@ test("production runtime loads fresh persisted state after cached business conte
   await service.setAwaiting(command(0, "branch"), { type: "FIELD", field: "branch", question: "Which branch?" });
   let received = "";
   mockMethod(t, aiProvider, "generateReply", async (input: any) => { received = `${input.systemPrompt}\n${input.userPrompt}`; return { model: "test" }; });
+  mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: { intent: "GENERAL_QUESTION", resolvedEntities: [], confidence: 1, needsClarification: false }, commands: [], appliedRevision: 1, replayed: false }));
   const result = await generateContextReply(cached, { businessId: scope.businessId, conversationId: scope.conversationId, messageId: message.id });
   assert.equal(result.conversationStateRevision, 1);
   assert.equal(result.conversationSourceMessageId, message.id);

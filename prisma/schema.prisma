@@ -1869,6 +1869,7 @@ model Conversation {
   assignedStaff                     BusinessMember?                       @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
   state                             ConversationState?
   stateEffects                      ConversationStateEffect[]
+  interpretations                   ConversationInterpretation[]
   messages                          Message[]
   appointments                      Appointment[]
   appointmentRescheduleRequests     AppointmentRescheduleRequest[]
@@ -3550,6 +3551,7 @@ model ConversationState {
   awaiting              Json?
   knownEntities         Json @default("{}")
   offeredOptions        Json @default("[]")
+  offeredOptionsCreatedAt DateTime?
   lastAssistantQuestion String?
   lastResolvedIntent    String?
   revision              Int @default(0)
@@ -3575,5 +3577,19 @@ model ConversationStateEffect {
   createdAt       DateTime @default(now())
   conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationStateEffect_scope_fkey")
   @@unique([businessId, conversationId, effectKey], map: "ConversationStateEffect_scope_key")
+  @@index([businessId, conversationId, createdAt])
+}
+
+model ConversationInterpretation {
+  id String @id @default(cuid())
+  businessId String
+  conversationId String
+  sourceMessageId String
+  snapshotRevision Int
+  appliedRevision Int
+  result Json
+  createdAt DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationInterpretation_scope_fkey")
+  @@unique([businessId, conversationId, sourceMessageId], map: "ConversationInterpretation_source_key")
   @@index([businessId, conversationId, createdAt])
 }

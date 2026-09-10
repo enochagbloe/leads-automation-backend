@@ -5,6 +5,7 @@ import { prisma } from "../src/config/prisma";
 import { env } from "../src/config/env";
 import { demoService } from "../src/services/demo.service";
 import { conversationStateService as service } from "../src/services/conversation-state.service";
+import { conversationInterpretationCommandService } from "../src/services/conversation-interpretation-command.service";
 
 const run = process.env.RUN_CONVERSATION_STATE_DATABASE_TESTS === "true" ? test : test.skip;
 run("Postgres: composite tenant FK, concurrent CAS, durable replay and demo cascade isolation", async () => {
@@ -42,10 +43,16 @@ run("Postgres: composite tenant FK, concurrent CAS, durable replay and demo casc
     await Promise.all([service.setOptions(reply, options), service.setOptions(reply, options)]);
     assert.equal((await service.get(scope)).revision, 2);
     assert.equal(await prisma.conversationStateEffect.count({ where: { businessId: scope.businessId } }), 2);
+    const customer = await prisma.message.create({ data: { businessId: scope.businessId, conversationId: scope.conversationId, leadId: conversationA.leadId, content: "East Legon", senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL" } });
+    const batch = { ...scope, sourceMessageId: customer.id, snapshotRevision: 2, interpretation: { intent: "BOOKING_INTENT", confidence: .99, needsClarification: false, resolvedEntities: [{ key: "branch", value: "East Legon", kind: "TEXT", confidence: .99, certainty: "EXACT", source: "CURRENT_MESSAGE", evidence: [{ messageId: customer.id, quote: customer.content }] }] } };
+    await Promise.all([conversationInterpretationCommandService.apply(batch), conversationInterpretationCommandService.apply(batch)]);
+    assert.equal((await service.get(scope)).revision, 3);
+    assert.equal(await prisma.conversationInterpretation.count({ where: { businessId: scope.businessId } }), 1);
     await service.initialize({ businessId, conversationId: production.id });
     await demoService.destroy(actor.demoSessionId);
     assert.equal(await prisma.conversationState.count({ where: { businessId: scope.businessId } }), 0);
     assert.equal(await prisma.conversationStateEffect.count({ where: { businessId: scope.businessId } }), 0);
+    assert.equal(await prisma.conversationInterpretation.count({ where: { businessId: scope.businessId } }), 0);
     assert.equal((await service.get({ businessId, conversationId: production.id })).revision, 0);
     assert.equal(await prisma.customerMemoryExtractionJob.count({ where: { businessId: other.businessId } }), 0);
   } finally {

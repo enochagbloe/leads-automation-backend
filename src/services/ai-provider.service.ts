@@ -30,7 +30,7 @@ export type AiCompletionInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
-  responseFormat?: { type: "json_object" };
+  responseFormat?: { type: "json_object" } | { type: "json_schema"; json_schema: { name: string; strict: true; schema: Record<string, unknown> } };
   signal?: AbortSignal;
   maxAttempts?: number;
   metadata?: Record<string, unknown>;
@@ -138,6 +138,7 @@ function openRouterCompletionBody(input: AiCompletionInput, model: string, strea
     temperature: input.temperature ?? 0.2,
     max_tokens: input.maxTokens ?? 700,
     ...(input.responseFormat ? { response_format: input.responseFormat } : {}),
+    ...(input.responseFormat?.type === "json_schema" ? { provider: { require_parameters: true } } : {}),
     ...(stream ? { stream: true } : {}),
     messages: [
       { role: "system", content: input.systemPrompt },

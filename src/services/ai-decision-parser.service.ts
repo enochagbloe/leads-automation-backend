@@ -78,7 +78,7 @@ export type AiReplyDecision = {
   };
 };
 
-const INTENTS = new Set<AiReplyIntent>([
+export const AI_REPLY_INTENTS = [
   "GENERAL_QUESTION",
   "SERVICE_INQUIRY",
   "PRICING_INQUIRY",
@@ -90,7 +90,8 @@ const INTENTS = new Set<AiReplyIntent>([
   "PAYMENT_QUESTION",
   "HUMAN_REQUEST",
   "UNKNOWN",
-]);
+] as const;
+const INTENTS = new Set<AiReplyIntent>(AI_REPLY_INTENTS);
 
 const ACTIONS = new Set<AiSuggestedAction>([
   "SEND_REPLY",

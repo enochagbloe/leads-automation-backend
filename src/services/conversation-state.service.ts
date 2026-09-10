@@ -15,14 +15,19 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 function data(row: StateData | Record<string, unknown>) {
-  return validateState(Object.fromEntries(Object.keys(emptyState()).map(k => [k, (row as Record<string, unknown>)[k]])));
+  return validateState(Object.fromEntries(Object.keys(emptyState()).map(k => {
+    const value = (row as Record<string, unknown>)[k];
+    return [k, k === "offeredOptionsCreatedAt" ? value instanceof Date ? value.toISOString() : value ?? null : value];
+  })));
 }
 export async function assertConversationScope(tx: Prisma.TransactionClient, scope: ConversationScope) {
-  const conversation = await tx.conversation.findFirst({ where: { id: scope.conversationId, businessId: scope.businessId, deletedAt: null, business: { deletedAt: null } }, select: { id: true, channel: true, business: { select: { demoSessionId: true } } } });
+  z.object({ businessId: z.string().min(1).max(128), conversationId: z.string().min(1).max(128), demoSessionId: z.string().min(1).max(128).optional() }).parse(scope);
+  const conversation = await tx.conversation.findFirst({ where: { id: scope.conversationId, businessId: scope.businessId, deletedAt: null, business: { deletedAt: null } }, select: { id: true, channel: true, business: { select: { demoSessionId: true, timezone: true } } } });
   if (!conversation) throw new AppError(403, "Conversation resource forbidden", "CONVERSATION_STATE_FORBIDDEN");
   const demoId = conversation.business.demoSessionId;
   if (demoId ? demoId !== scope.demoSessionId || conversation.channel !== "DEMO" : Boolean(scope.demoSessionId) || conversation.channel === "DEMO") throw new AppError(403, "Conversation scope mismatch", "CONVERSATION_STATE_FORBIDDEN");
   if (demoId && !await tx.demoSession.findFirst({ where: { id: demoId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: scope.businessId } }, select: { id: true } })) throw new AppError(403, "Demo session expired", "CONVERSATION_STATE_FORBIDDEN");
+  return conversation;
 }
 async function initialize(tx: Prisma.TransactionClient, scope: ConversationScope) {
   await assertConversationScope(tx, scope);
@@ -52,7 +57,8 @@ async function mutate(input: StateMutation, operation: string, payload: StatePat
     if (row.revision !== input.expectedRevision) throw conflict();
     const messageIds = new Set([source.sourceMessageId, ...Object.values(patch.knownEntities ?? {}).map(e => e.sourceMessageId)].filter((v): v is string => Boolean(v)));
     for (const id of messageIds) if (!await db.message.findFirst({ where: { id, businessId: input.businessId, conversationId: input.conversationId, deletedAt: null }, select: { id: true } })) throw new AppError(403, "State source message forbidden", "CONVERSATION_STATE_FORBIDDEN");
-    const next = validateState(transform(data(row), patch));
+    const proposed = transform(data(row), patch);
+    const next = validateState({ ...proposed, ...(patch.offeredOptions !== undefined ? { offeredOptionsCreatedAt: patch.offeredOptions.length ? new Date().toISOString() : null } : {}) });
     const now = new Date();
     const changedFields = Object.keys(next).filter(k => canonical(next[k as keyof StateData]) !== canonical(data(row)[k as keyof StateData]));
     const updated = await db.conversationState.updateMany({ where: { id: row.id, businessId: input.businessId, conversationId: input.conversationId, revision: input.expectedRevision }, data: { ...next, awaiting: next.awaiting ?? Prisma.DbNull, knownEntities: next.knownEntities as Prisma.InputJsonObject, offeredOptions: next.offeredOptions as Prisma.InputJsonArray, revision: { increment: 1 }, lastActivityAt: now } });
@@ -90,5 +96,5 @@ export const conversationStateService = {
   clearOptions(input: StateMutation, tx?: Prisma.TransactionClient) { return mutate(input, "CLEAR_OPTIONS", { offeredOptions: [] }, merge, tx); },
   completeWorkflow(input: StateMutation, tx?: Prisma.TransactionClient) { return mutate(input, "COMPLETE", { activeWorkflow: null, awaiting: null, offeredOptions: [], lastAssistantQuestion: null, workflowStatus: "COMPLETED" }, merge, tx); },
   pauseWorkflow(input: StateMutation, tx?: Prisma.TransactionClient) { return mutate(input, "PAUSE", { workflowStatus: "PAUSED" }, merge, tx); },
-  resetWorkflow(input: StateMutation, tx?: Prisma.TransactionClient) { return mutate(input, "RESET", emptyState(), (s, p) => merge(s, { ...p, previousTopic: s.activeTopic }), tx); },
+  resetWorkflow(input: StateMutation, tx?: Prisma.TransactionClient) { return mutate(input, "RESET", patchSchema.parse(Object.fromEntries(Object.entries(emptyState()).filter(([key]) => key !== "offeredOptionsCreatedAt"))), (s, p) => merge(s, { ...p, previousTopic: s.activeTopic }), tx); },
 };

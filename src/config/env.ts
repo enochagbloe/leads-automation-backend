@@ -61,6 +61,7 @@ const schema = z.object({
   OPENROUTER_APP_NAME: z.string().min(1).default("BizReply AI"),
   OPENROUTER_APP_URL: optionalString,
   AI_REPLY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  CONVERSATION_OPTIONS_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
   AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
   AI_AUTO_CONFIRM_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.85),
   PREMIUM_APPOINTMENT_AUTO_CONFIRM_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),

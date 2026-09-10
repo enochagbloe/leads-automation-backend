@@ -1,11 +1,11 @@
 import { z } from "zod";
 
-const key = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/).refine(v => !["constructor", "prototype", "__proto__"].includes(v));
-const scalar = z.union([z.string().max(1000), z.number().finite(), z.boolean()]);
+export const entityKeySchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/).refine(v => !["constructor", "prototype", "__proto__"].includes(v));
+export const entityScalarSchema = z.union([z.string().max(1000), z.number().finite(), z.boolean()]);
 export const entitySchema = z.object({
-  value: scalar,
+  value: entityScalarSchema,
   kind: z.enum(["TEXT", "TIME", "DATE", "NUMBER", "BOOLEAN"]).default("TEXT"),
-  normalizedValue: scalar.optional(),
+  normalizedValue: entityScalarSchema.optional(),
   confidence: z.number().min(0).max(1).optional(),
   sourceMessageId: z.string().max(128).optional(),
   updatedAt: z.string().datetime().optional(),
@@ -15,21 +15,22 @@ export const entitySchema = z.object({
   if (e.kind === "NUMBER" && typeof e.normalizedValue !== "number") ctx.addIssue({ code: "custom", message: "NUMBER requires a normalized number" });
   if (e.kind === "BOOLEAN" && typeof e.normalizedValue !== "boolean") ctx.addIssue({ code: "custom", message: "BOOLEAN requires a normalized boolean" });
 });
-export const awaitingSchema = z.object({ type: z.enum(["FIELD", "CONFIRMATION", "OPTION_SELECTION", "FREE_TEXT", "SYSTEM_RESULT"]), field: key.optional(), question: z.string().max(1000).optional(), createdAt: z.string().datetime().optional() }).strict().refine(v => v.type !== "FIELD" || Boolean(v.field), "FIELD requires field");
-export const optionsSchema = z.array(z.object({ id: key, label: z.string().min(1).max(200), value: scalar, position: z.number().int().min(1).max(12) }).strict()).max(12).refine(v => new Set(v.map(x => x.id)).size === v.length && new Set(v.map(x => x.position)).size === v.length, "Options require unique IDs and positions");
+export const awaitingSchema = z.object({ type: z.enum(["FIELD", "CONFIRMATION", "OPTION_SELECTION", "FREE_TEXT", "SYSTEM_RESULT"]), field: entityKeySchema.optional(), question: z.string().max(1000).optional(), createdAt: z.string().datetime().optional() }).strict().refine(v => v.type !== "FIELD" || Boolean(v.field), "FIELD requires field");
+export const optionsSchema = z.array(z.object({ id: entityKeySchema, label: z.string().min(1).max(200), value: entityScalarSchema, position: z.number().int().min(1).max(12) }).strict()).max(12).refine(v => new Set(v.map(x => x.id)).size === v.length && new Set(v.map(x => x.position)).size === v.length, "Options require unique IDs and positions");
 export const stateDataSchema = z.object({
   activeTopic: z.enum(["GENERAL_ENQUIRY", "SERVICE_ENQUIRY", "APPOINTMENT", "FOLLOW_UP", "COMPLAINT", "QUOTATION", "PAYMENT", "HUMAN_HANDOFF"]).nullable(),
-  previousTopic: z.string().max(64).nullable(), activeWorkflow: key.nullable(),
+  previousTopic: z.string().max(64).nullable(), activeWorkflow: entityKeySchema.nullable(),
   workflowStatus: z.enum(["IDLE", "ACTIVE", "WAITING_FOR_CUSTOMER", "WAITING_FOR_SYSTEM", "COMPLETED", "CANCELLED", "PAUSED"]),
   awaiting: awaitingSchema.nullable(),
-  knownEntities: z.record(key, entitySchema).refine(v => Object.keys(v).length <= 32),
+  knownEntities: z.record(entityKeySchema, entitySchema).refine(v => Object.keys(v).length <= 32),
   offeredOptions: optionsSchema,
-  lastAssistantQuestion: z.string().max(1000).nullable(), lastResolvedIntent: key.nullable(),
+  offeredOptionsCreatedAt: z.string().datetime().nullable(),
+  lastAssistantQuestion: z.string().max(1000).nullable(), lastResolvedIntent: entityKeySchema.nullable(),
 }).strict();
-export const patchSchema = stateDataSchema.partial().strict();
+export const patchSchema = stateDataSchema.omit({ offeredOptionsCreatedAt: true }).partial().strict();
 export type StateData = z.infer<typeof stateDataSchema>;
 export type StatePatch = z.input<typeof patchSchema>;
-export const emptyState = (): StateData => ({ activeTopic: null, previousTopic: null, activeWorkflow: null, workflowStatus: "IDLE", awaiting: null, knownEntities: {}, offeredOptions: [], lastAssistantQuestion: null, lastResolvedIntent: null });
+export const emptyState = (): StateData => ({ activeTopic: null, previousTopic: null, activeWorkflow: null, workflowStatus: "IDLE", awaiting: null, knownEntities: {}, offeredOptions: [], offeredOptionsCreatedAt: null, lastAssistantQuestion: null, lastResolvedIntent: null });
 export function validateState(value: unknown) {
   const parsed = stateDataSchema.parse(value);
   if (["COMPLETED", "CANCELLED"].includes(parsed.workflowStatus) && (parsed.awaiting || parsed.activeWorkflow || parsed.offeredOptions.length || parsed.lastAssistantQuestion)) throw new Error("Finished workflows cannot retain transient expectations or options");

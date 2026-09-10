@@ -732,7 +732,7 @@ export const aiReplyEngine = {
         },
       };
       providerResult = await generateContextReply(context, providerInput);
-      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens });
+      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens, requests: providerResult.providerRequestCount });
       if (providerResult.fallbackExhausted) {
         const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
         const notifications = await markConversationNeedsHumanReview({
@@ -1121,6 +1121,10 @@ export const aiReplyEngine = {
       return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision, customerIssue: customerIssueResult };
     } catch (error) {
       const errorCode = safeProviderError(error);
+      const interpretationUsage = error instanceof AppError ? error.context?.conversationInterpretationUsage as { requests?: number; tokens?: number } | undefined : undefined;
+      if (!providerResult && interpretationUsage && Number.isFinite(interpretationUsage.requests) && (interpretationUsage.requests ?? 0) > 0) {
+        await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, requests: interpretationUsage.requests, tokens: interpretationUsage.tokens }).catch(() => console.error("Interpretation usage tracking failed", { businessId: conversation.businessId, conversationId: conversation.id, messageId: message.id }));
+      }
       await logInteraction({
         businessId: conversation.businessId,
         businessAccountId: conversation.business.businessAccountId,
