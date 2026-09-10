@@ -45,6 +45,7 @@
     "whatsapp:credentials:migrate": "tsx prisma/migrate-whatsapp-credentials.ts",
     "postinstall": "prisma generate",
     "prepare": "husky",
+    "test:conversation-state": "tsx --test tests/conversation-state.test.ts tests/conversation-state.integration.test.ts",
     "test:demo": "tsx --test tests/demo-session.test.ts tests/demo-website.test.ts tests/demo-setup.test.ts tests/demo-session.integration.test.ts tests/demo-message.test.ts tests/demo-message.integration.test.ts tests/demo-ai.test.ts tests/demo-ai.integration.test.ts tests/demo-realtime.test.ts"
   },
   "dependencies": {

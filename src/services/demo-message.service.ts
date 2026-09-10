@@ -48,6 +48,7 @@ export const demoMessageService = {
       const count = await tx.message.count({ where: { businessId: actor.businessId, conversationId: conversation.id, senderType: "CUSTOMER" } });
       if (count >= DEMO_CUSTOMER_MESSAGE_LIMIT) throw new AppError(429, "Demo customer message limit reached", "DEMO_MESSAGE_LIMIT_REACHED");
       const { message } = await storeInboundCustomerMessage(tx, {
+        demoSessionId: actor.demoSessionId,
         businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, content: data.text,
         provider: "DEMO", providerMessageId,
         metadata: { isDemo: true, demoSessionId: actor.demoSessionId, clientMessageId: data.clientMessageId },

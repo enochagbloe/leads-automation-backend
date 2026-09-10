@@ -1,3 +1,4 @@
+import { conversationStateService } from "./conversation-state.service";
 import { storeInboundCustomerMessage } from "./inbound-message-store.service";
 import {
   AuditAction,
@@ -352,6 +353,7 @@ export const messageService = {
             },
           },
         });
+        await conversationStateService.recordMessage({ businessId: actor.businessId, conversationId }, created.id, "STAFF", tx);
         return created;
       });
       await auditService.log({

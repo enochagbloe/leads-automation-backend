@@ -1867,6 +1867,8 @@ model Conversation {
   business                          Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   lead                              Lead                                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
   assignedStaff                     BusinessMember?                       @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  state                             ConversationState?
+  stateEffects                      ConversationStateEffect[]
   messages                          Message[]
   appointments                      Appointment[]
   appointmentRescheduleRequests     AppointmentRescheduleRequest[]
@@ -1882,6 +1884,7 @@ model Conversation {
   premiumFollowUpMessageGenerations PremiumFollowUpMessageGeneration[]
   premiumFollowUpExecutions         PremiumFollowUpExecution[]
 
+  @@unique([id, businessId])
   @@index([businessId])
   @@index([businessId, leadId])
   @@index([businessId, assignedStaffId])
@@ -3533,4 +3536,44 @@ model DemoSession {
   owner User?
   @@index([status, expiresAt])
   @@index([ipHash, status, expiresAt])
+}
+
+
+model ConversationState {
+  id                    String @id @default(cuid())
+  businessId            String
+  conversationId        String @unique
+  activeTopic           String?
+  previousTopic         String?
+  activeWorkflow        String?
+  workflowStatus        String @default("IDLE")
+  awaiting              Json?
+  knownEntities         Json @default("{}")
+  offeredOptions        Json @default("[]")
+  lastAssistantQuestion String?
+  lastResolvedIntent    String?
+  revision              Int @default(0)
+  lastActivityAt        DateTime @default(now())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationState_scope_fkey")
+  @@unique([conversationId, businessId])
+  @@index([businessId, lastActivityAt])
+}
+
+model ConversationStateEffect {
+  id              String @id @default(cuid())
+  businessId      String
+  conversationId  String
+  effectKey       String
+  commandHash     String
+  source          String
+  sourceMessageId String?
+  revisionBefore  Int
+  revisionAfter   Int
+  changedFields   Json
+  createdAt       DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationStateEffect_scope_fkey")
+  @@unique([businessId, conversationId, effectKey], map: "ConversationStateEffect_scope_key")
+  @@index([businessId, conversationId, createdAt])
 }

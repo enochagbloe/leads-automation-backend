@@ -1,8 +1,12 @@
+import { conversationStateService } from "./conversation-state.service";
+import { StatePatch } from "./conversation-state.schema";
 import { LeadActivityAction, MessageDeliveryStatus, MessageDirection, MessageSenderType, MessageType, Prisma } from "@prisma/client";
 
 export type InboundMessageStoreInput = {
   businessId: string; conversationId: string; leadId: string; content: string;
   provider?: string; providerMessageId?: string; metadata?: Prisma.InputJsonValue; createdAt?: Date;
+  demoSessionId?: string;
+  stateChange?: { expectedRevision: number; patch: StatePatch };
   lastMessagePreview?: string;
   conversationChanges?: Prisma.ConversationUpdateInput;
   activityMetadata?: Prisma.InputJsonObject;
@@ -25,5 +29,6 @@ export async function storeInboundCustomerMessage(tx: Prisma.TransactionClient, 
     businessId: input.businessId, leadId: input.leadId, action: LeadActivityAction.MESSAGE_CREATED,
     metadata: { ...input.activityMetadata, conversationId: input.conversationId, messageId: message.id, senderType: MessageSenderType.CUSTOMER },
   } });
+  await conversationStateService.recordMessage({ businessId: input.businessId, conversationId: input.conversationId, demoSessionId: input.demoSessionId }, message.id, "CUSTOMER_MESSAGE", tx, input.stateChange);
   return { message, conversation };
 }

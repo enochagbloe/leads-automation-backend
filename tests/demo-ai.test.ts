@@ -1,3 +1,6 @@
+import { conversationStateService } from "../src/services/conversation-state.service";
+import { conversationContextService } from "../src/services/conversation-context.service";
+import { emptyState } from "../src/services/conversation-state.schema";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { demoConversationService } from "../src/services/demo-conversation.service";
 import assert from "node:assert/strict";
@@ -27,12 +30,13 @@ const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "sess
 const decision = { intent: "PRICING_INQUIRY" as const, replyText: "Roof inspection costs GHS 300.", confidence: 1, shouldReply: true, requiresHumanReview: false, reason: "Confirmed fact", suggestedAction: "SEND_REPLY" as const, usedKnowledge: { profile: false, services: true, availability: false, policies: false, conversationHistory: true } };
 
 function fixture(t: TestContext, liveRealtime = false) {
+  mockMethod(t, conversationStateService, "recordMessage", async () => ({}));
   const saved = { DEMO_ENABLED: env.DEMO_ENABLED, OPENROUTER_API_KEY: env.OPENROUTER_API_KEY, OPENROUTER_DEFAULT_MODEL: env.OPENROUTER_DEFAULT_MODEL };
   Object.assign(env, { DEMO_ENABLED: true, OPENROUTER_API_KEY: "test-only", OPENROUTER_DEFAULT_MODEL: "test-model" });
   t.after(() => Object.assign(env, saved));
   const facts = emptyDemoFacts();
   facts.services = [{ name: "Roof inspection", description: null, price: "GHS 300", duration: null }, { name: "Roof replacement", description: null, price: null, duration: null }];
-  const state = { expiresAt: new Date(Date.now() + 60_000), unread: 0, preview: "", persistenceFail: false, active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, beforeResponse: undefined as (() => Promise<void>) | undefined };
+  const state = { expiresAt: new Date(Date.now() + 60_000), unread: 0, preview: "", persistenceFail: false, active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, conversationState: emptyState(), beforeResponse: undefined as (() => Promise<void>) | undefined };
   const context = { businessName: "Acme Roofing", facts, sourceWebsite: null, crawlStatus: "COMPLETE", extractionStatus: "COMPLETE", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), pagesAttempted: 1, pagesFetched: 1, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: ["Replacement price", "Hours", "Duration", "Policies"] };
   const rows: any[] = []; const activities: any[] = []; const requests: any[] = []; const events: any[] = [];
   function add(overrides: Record<string, unknown> = {}) {
@@ -58,6 +62,12 @@ function fixture(t: TestContext, liveRealtime = false) {
     if (orderBy) found.sort((a, b) => +b.createdAt - +a.createdAt || b.id.localeCompare(a.id));
     return found.slice(0, take ?? found.length).map(row => ({ ...row }));
   }
+  mockMethod(t, conversationContextService, "getSnapshot", async (input: any) => {
+    assert.equal(input.demoSessionId, actor.demoSessionId);
+    assert.equal(input.businessId, actor.businessId);
+    const trigger = rows.find(row => row.id === input.messageId)!;
+    return { state: { ...state.conversationState, revision: 7 }, currentMessage: { text: trigger.content }, recentMessages: rows.filter(row => row.createdAt <= trigger.createdAt).slice(-12).map(row => ({ ...row, text: row.content, createdAt: row.createdAt.toISOString() })), customerMemorySummary: null };
+  });
   const sessionLookup = async ({ where }: any) => {
     assert.equal(where.business.demoSessionId, where.id);
     return state.active && where.id === actor.demoSessionId && where.business.id === actor.businessId ? { ...state, demoContext: context } : null;
@@ -399,4 +409,18 @@ test("real HTTP SSE observes the customer before provider completion and the com
   assert.equal(frames[4].payload.senderType, "AI"); assert.equal(frames[5].payload.unreadCount, 1);
   const count = f.events.length; assert.equal((await httpFetch(`${base}/messages`, request)).status, 200); assert.equal(f.events.length, count);
   controller.abort(); await reader.cancel().catch(() => {});
+});
+
+
+test("shared provider receives fresh workflow, pending option and precedence instructions", async t => {
+  const f = fixture(t);
+  f.state.conversationState = { ...emptyState(), activeTopic: "APPOINTMENT", activeWorkflow: "APPOINTMENT_BOOKING", workflowStatus: "WAITING_FOR_CUSTOMER", awaiting: { type: "OPTION_SELECTION" }, offeredOptions: [{ id: "one", label: "12 PM", value: "12:00", position: 1 }, { id: "two", label: "2 PM", value: "14:00", position: 2 }] };
+  f.add({ content: "The second one." });
+  await processLatestDemoReply(actor);
+  const serialized = JSON.stringify(f.requests[0]);
+  assert.match(serialized, /OPTION_SELECTION/);
+  assert.match(serialized, /APPOINTMENT_BOOKING/);
+  assert.match(serialized, /14:00/);
+  assert.match(serialized, /The second one/);
+  assert.match(serialized, /current customer message, current conversation state, recent message history, customer memory, business knowledge/);
 });

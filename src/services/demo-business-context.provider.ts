@@ -12,6 +12,7 @@ export async function buildDemoBusinessContext(actor: DemoActor, message: Messag
   // Keep normalized JSON intact (including nulls); never truncate into invalid JSON.
   if (JSON.stringify(context.facts).length > env.AI_MAX_BUSINESS_CONTEXT_TOKENS * 2) throw new AppError(503, "Demo context exceeds runtime budget", "DEMO_AI_UNAVAILABLE");
   return {
+    demoSessionId: actor.demoSessionId,
     demoFacts: { facts: context.facts, unknowns: context.unknowns },
     business: { id: actor.businessId, name: context.businessName, industry: context.facts.industry, description: context.facts.description, website: context.sourceWebsite },
     readiness: { isAiReady: true, readinessStatus: "DEMO_READY", completionPercentage: 100, missingItems: context.unknowns, warnings: [] },
