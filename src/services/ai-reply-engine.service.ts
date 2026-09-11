@@ -1,3 +1,6 @@
+import { ConversationPlan } from "./conversation-plan.schema";
+import { assertPlanCurrent } from "./conversation-planner.service";
+import { missingAiBookingFields } from "./appointment/appointment-conversation-requirements";
 import { generateContextReply } from "./ai-reply-runtime.service";
 import { storeAiReply } from "./ai-message-store.service";
 import {
@@ -234,13 +237,7 @@ function resolveAiBookingLocationType(service: AiBusinessContext["services"][num
   return AppointmentLocationType.TO_BE_CONFIRMED;
 }
 
-function validDate(value?: string) {
-  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
-}
 
-function validTime(value?: string) {
-  return Boolean(value && /^([01]\d|2[0-3]):[0-5]\d$/.test(value));
-}
 
 function confirmedAppointmentReply(appointment: { service?: { name: string } | null; title: string; startTime: Date; timezone: string }) {
   const when = new Intl.DateTimeFormat("en-US", {
@@ -289,6 +286,7 @@ export async function createAiBookingRequest(input: {
   leadId: string;
   messageId: string;
   decision: NonNullable<AiSafetyResult["decision"]>;
+  conversationPlan?: ConversationPlan;
 }): Promise<AiBookingAppointment> {
   const key = bookingIdempotencyKey({
     businessId: input.context.business.id,
@@ -306,10 +304,7 @@ export async function createAiBookingRequest(input: {
 
 
   const intent = input.decision.appointmentIntent;
-  const missing = new Set(intent?.missingFields ?? []);
-  if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
-  if (!validDate(intent?.preferredDate)) missing.add("preferredDate");
-  if (!validTime(intent?.preferredTime)) missing.add("preferredTime");
+  const missing = new Set(missingAiBookingFields(intent));
   if (missing.size) {
     throw new AppError(422, "AI booking request is missing required details.", "AI_BOOKING_MISSING_FIELDS", { missingFields: [...missing] });
   }
@@ -349,6 +344,7 @@ export async function createAiBookingRequest(input: {
     );
   }
 
+  if (input.conversationPlan) await assertPlanCurrent(input.conversationPlan);
   const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
   const customerLocation = intent?.customerLocation?.trim() || null;
   const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
@@ -397,6 +393,7 @@ export async function createAiBookingRequest(input: {
     locationType,
     location: customerLocation,
     source: AppointmentSource.AI_CONVERSATION,
+    conversationPlan: input.conversationPlan,
     aiDecision: {
       confidence: input.decision.confidence,
       intent: input.decision.intent,
@@ -556,6 +553,11 @@ export const aiReplyEngine = {
     if (message.senderType !== MessageSenderType.CUSTOMER || message.direction !== MessageDirection.INBOUND) {
       throw new AppError(422, "AI only processes inbound customer messages.", "AI_MESSAGE_NOT_FOUND");
     }
+    const plannedReply = await prisma.message.findFirst({ where: { businessId: conversation.businessId, conversationId: conversation.id, senderType: "AI", direction: "OUTBOUND", deletedAt: null, metadata: { path: ["conversationPlan", "sourceMessageId"], equals: message.id } } });
+    if (plannedReply) {
+      console.info("conversation_plan.replayed", { businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id });
+      return { status: "REPLAYED", blocked: false, message: plannedReply, decision: undefined };
+    }
     if (message.messageType !== MessageType.TEXT && message.messageType !== MessageType.SYSTEM) {
       const decision = fallbackHumanReviewDecision("Customer sent media that AI image understanding does not support yet.");
       const notifications = await markConversationNeedsHumanReview({
@@ -711,7 +713,7 @@ export const aiReplyEngine = {
       select: { id: true },
     });
 
-    let providerResult: AiGenerateReplyResult | null = null;
+    let providerResult: Awaited<ReturnType<typeof generateContextReply>> | null = null;
     try {
       const context = await aiBusinessContextService.buildBusinessContextForAi({
         businessId: conversation.businessId,
@@ -782,6 +784,7 @@ export const aiReplyEngine = {
         });
         return { status: "AI_FALLBACK_EXHAUSTED", blocked: true, decision: fallbackDecision };
       }
+      await assertPlanCurrent(providerResult.conversationPlan);
       const safety = aiSafetyService.evaluate({
         decision: providerResult.parsedDecision,
         businessReady: businessReadyForAi(context.readiness),
@@ -852,6 +855,7 @@ export const aiReplyEngine = {
       if (safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
         try {
           bookingAppointment = await createAiBookingRequest({
+            conversationPlan: providerResult.conversationPlan,
             context,
             businessAccountId: conversation.business.businessAccountId,
             conversationId: conversation.id,
@@ -881,6 +885,7 @@ export const aiReplyEngine = {
           });
         } catch (error) {
           const code = error instanceof AppError ? error.code : "AI_BOOKING_REQUEST_FAILED";
+          if (code === "CONVERSATION_STATE_CONFLICT" || code === "CONVERSATION_PLAN_CONTROL_CHANGED") throw error;
           bookingBlockedReason = code;
           if (code === "AI_BOOKING_MISSING_FIELDS") {
             replyText = safety.decision.replyText
@@ -985,7 +990,7 @@ export const aiReplyEngine = {
               bookingBlockedReason,
               appointmentId: bookingAppointment?.id ?? null,
             }),
-          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }));
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }));
 
       if (conversation.channel === ConversationChannel.WHATSAPP) {
         try {

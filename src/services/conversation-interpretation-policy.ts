@@ -145,7 +145,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     commands.push({ type: "CLEAR_AWAITING" });
   }
   const workflow = interpretation.workflow;
-  if (workflow && workflow.action !== "NONE" && !interruption) {
+  if (workflow && workflow.action !== "NONE" && (!interruption || workflow.action === "CANCEL" && interpretation.intent === "CANCELLATION_INTENT")) {
     if (workflow.action === "START") {
       if (!workflow.name || state.activeWorkflow && state.activeWorkflow !== workflow.name) return ambiguous("ACTIVE_WORKFLOW_MUST_BE_PRESERVED");
       if (interpretation.topic && workflowTopic[workflow.name] !== interpretation.topic) return ambiguous("WORKFLOW_TOPIC_MISMATCH");

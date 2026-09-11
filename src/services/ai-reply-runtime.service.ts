@@ -1,3 +1,4 @@
+import { conversationPlannerService } from "./conversation-planner.service";
 import { conversationContextService } from "./conversation-context.service";
 import { AiBusinessContext, aiPromptContextFormatter } from "./ai-context-builder.service";
 import { aiProvider, AiGenerateReplyInput } from "./ai-provider.service";
@@ -9,11 +10,12 @@ export async function generateContextReply(context: AiBusinessContext, options: 
   const scope = { businessId: context.business.id, conversationId: context.conversation.id, demoSessionId: context.demoSessionId, messageId: context.triggerMessage.id, customerMemorySummary: context.customerMemory.summary ?? undefined };
   let snapshot = await conversationContextService.getSnapshot(scope);
   const meaning = await conversationInterpreterService.interpret({ businessContext: context, conversationSnapshot: snapshot, signal: options.signal, model: options.model });
-  if (meaning.commands.length) {
+  if (meaning.commands.length || meaning.appliedRevision !== snapshot.state.revision) {
     snapshot = await conversationContextService.getSnapshot(scope);
     if (snapshot.state.revision !== meaning.appliedRevision) throw new AppError(409, "Conversation changed after interpretation", "CONVERSATION_STATE_CONFLICT");
   }
-  context = { ...context, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
+  const conversationPlan = await conversationPlannerService.plan({ conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context });
+  context = { ...context, conversationPlan, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
   const result = await aiProvider.generateReply({ ...options, systemPrompt: aiPromptContextFormatter.buildSystemPrompt(context), userPrompt: aiPromptContextFormatter.buildUserPrompt(context) }).catch(error => {
     const failure = error instanceof AppError ? error : new AppError(503, "AI reply unavailable", "AI_PROVIDER_ERROR");
     failure.context = { ...failure.context, conversationInterpretationUsage: { requests: meaning.usage?.providerRequestCount ?? 0, tokens: meaning.usage?.totalTokens ?? 0 } };
@@ -41,5 +43,17 @@ export async function generateContextReply(context: AiBusinessContext, options: 
       }
     }
   }
-  return { ...result, totalTokens: (result.totalTokens ?? 0) + (meaning.usage?.totalTokens ?? 0), promptTokens: (result.promptTokens ?? 0) + (meaning.usage?.promptTokens ?? 0), completionTokens: (result.completionTokens ?? 0) + (meaning.usage?.completionTokens ?? 0), providerRequestCount: result.providerRequestCount + (meaning.usage?.providerRequestCount ?? 0), conversationStateRevision: snapshot.state.revision, conversationSourceMessageId: context.triggerMessage.id, interpretation: meaning.interpretation };
+  if (decision && !result.fallbackExhausted) {
+    if (conversationPlan.move === "NO_ACTION") { decision.shouldReply = false; decision.replyText = null; decision.suggestedAction = "NO_ACTION"; }
+    else if (conversationPlan.requiresHumanReview) { decision.requiresHumanReview = true; decision.suggestedAction = "REQUEST_HUMAN_REVIEW"; }
+    else if (!context.demoSessionId) {
+      decision.suggestedAction = decision.requiresHumanReview ? "REQUEST_HUMAN_REVIEW" : decision.shouldReply ? "SEND_REPLY" : "NO_ACTION";
+      const request = conversationPlan.workflowRequest;
+      if (request?.type === "CREATE_BOOKING_REQUEST" && !decision.requiresHumanReview) {
+        decision.appointmentIntent = { ...decision.appointmentIntent, serviceId: request.serviceId, preferredDate: request.preferredDate, preferredTime: request.preferredTime, timezone: request.timezone, missingFields: [] };
+        decision.suggestedAction = "CREATE_BOOKING_REQUEST";
+      } else delete decision.appointmentIntent;
+    }
+  }
+  return { ...result, conversationPlan, totalTokens: (result.totalTokens ?? 0) + (meaning.usage?.totalTokens ?? 0), promptTokens: (result.promptTokens ?? 0) + (meaning.usage?.promptTokens ?? 0), completionTokens: (result.completionTokens ?? 0) + (meaning.usage?.completionTokens ?? 0), providerRequestCount: result.providerRequestCount + (meaning.usage?.providerRequestCount ?? 0), conversationStateRevision: snapshot.state.revision, conversationSourceMessageId: context.triggerMessage.id, interpretation: meaning.interpretation };
 }

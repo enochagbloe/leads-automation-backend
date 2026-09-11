@@ -22,7 +22,7 @@ function data(row: StateData | Record<string, unknown>) {
 }
 export async function assertConversationScope(tx: Prisma.TransactionClient, scope: ConversationScope) {
   z.object({ businessId: z.string().min(1).max(128), conversationId: z.string().min(1).max(128), demoSessionId: z.string().min(1).max(128).optional() }).parse(scope);
-  const conversation = await tx.conversation.findFirst({ where: { id: scope.conversationId, businessId: scope.businessId, deletedAt: null, business: { deletedAt: null } }, select: { id: true, channel: true, business: { select: { demoSessionId: true, timezone: true } } } });
+  const conversation = await tx.conversation.findFirst({ where: { id: scope.conversationId, businessId: scope.businessId, deletedAt: null, business: { deletedAt: null } }, select: { id: true, channel: true, status: true, humanTakeover: true, aiEnabled: true, business: { select: { demoSessionId: true, timezone: true } } } });
   if (!conversation) throw new AppError(403, "Conversation resource forbidden", "CONVERSATION_STATE_FORBIDDEN");
   const demoId = conversation.business.demoSessionId;
   if (demoId ? demoId !== scope.demoSessionId || conversation.channel !== "DEMO" : Boolean(scope.demoSessionId) || conversation.channel === "DEMO") throw new AppError(403, "Conversation scope mismatch", "CONVERSATION_STATE_FORBIDDEN");

@@ -31,7 +31,9 @@ const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "sess
 const decision = { intent: "PRICING_INQUIRY" as const, replyText: "Roof inspection costs GHS 300.", confidence: 1, shouldReply: true, requiresHumanReview: false, reason: "Confirmed fact", suggestedAction: "SEND_REPLY" as const, usedKnowledge: { profile: false, services: true, availability: false, policies: false, conversationHistory: true } };
 
 function fixture(t: TestContext, liveRealtime = false) {
+  mockMethod(t, console, "info", () => {});
   mockMethod(t, conversationStateService, "recordMessage", async () => ({}));
+  mockMethod(t, conversationStateService, "get", async () => ({ ...emptyState(), businessId: actor.businessId, conversationId: "conversation-a", revision: 7 }) as any);
   const saved = { DEMO_ENABLED: env.DEMO_ENABLED, OPENROUTER_API_KEY: env.OPENROUTER_API_KEY, OPENROUTER_DEFAULT_MODEL: env.OPENROUTER_DEFAULT_MODEL };
   Object.assign(env, { DEMO_ENABLED: true, OPENROUTER_API_KEY: "test-only", OPENROUTER_DEFAULT_MODEL: "test-model" });
   t.after(() => Object.assign(env, saved));
@@ -68,15 +70,16 @@ function fixture(t: TestContext, liveRealtime = false) {
     assert.equal(input.demoSessionId, actor.demoSessionId);
     assert.equal(input.businessId, actor.businessId);
     const trigger = rows.find(row => row.id === input.messageId)!;
-    return { state: { ...state.conversationState, revision: 7 }, currentMessage: { text: trigger.content }, recentMessages: rows.filter(row => row.createdAt <= trigger.createdAt).slice(-12).map(row => ({ ...row, text: row.content, createdAt: row.createdAt.toISOString() })), customerMemorySummary: null };
+    return { state: { ...state.conversationState, businessId: actor.businessId, conversationId: "conversation-a", revision: 7 }, currentMessage: { id: trigger.id, text: trigger.content }, recentMessages: rows.filter(row => row.createdAt <= trigger.createdAt).slice(-12).map(row => ({ ...row, text: row.content, createdAt: row.createdAt.toISOString() })), customerMemorySummary: null };
   });
   const sessionLookup = async ({ where }: any) => {
-    assert.equal(where.business.demoSessionId, where.id);
+    if (where.business.demoSessionId) assert.equal(where.business.demoSessionId, where.id);
     return state.active && where.id === actor.demoSessionId && where.business.id === actor.businessId ? { ...state, demoContext: context } : null;
   };
   const tx = {
+    $queryRaw: async () => [],
     demoSession: { updateMany: async (args: any) => ({ count: await sessionLookup(args) ? 1 : 0 }), findFirst: sessionLookup, findUniqueOrThrow: async () => ({ setupAttemptId: state.setupAttemptId }) },
-    conversation: { findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel, lastMessagePreview: state.preview, lastMessageAt: new Date(), unreadCount: state.unread, status: "AI_HANDLING", updatedAt: new Date() }], update: async ({ where, data }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); state.unread += data.unreadCount?.increment ?? 0; state.preview = data.lastMessagePreview; return {}; } },
+    conversation: { findFirst: async ({ where }: any) => where.id === "conversation-a" && where.businessId === actor.businessId ? { id: "conversation-a", channel: state.channel, business: { demoSessionId: actor.demoSessionId, timezone: "Africa/Accra" } } : null, findMany: async ({ where }: any) => [{ id: "conversation-a", businessId: where.businessId, leadId: "customer-a", channel: state.channel, lastMessagePreview: state.preview, lastMessageAt: new Date(), unreadCount: state.unread, status: "AI_HANDLING", updatedAt: new Date() }], update: async ({ where, data }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.id, "conversation-a"); state.unread += data.unreadCount?.increment ?? 0; state.preview = data.lastMessagePreview; return {}; } },
     lead: { findFirst: async ({ where }: any) => { assert.equal(where.businessId, actor.businessId); assert.equal(where.phone, "demo_customer_session-a"); return state.validLead ? { id: "customer-a" } : null; } },
     message: {
       findFirst: async (args: any) => select(args)[0] ?? null,

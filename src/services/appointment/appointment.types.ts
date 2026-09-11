@@ -1,3 +1,4 @@
+import type { ConversationPlan } from "../conversation-plan.schema";
 import { 
   BusinessRole,
   AppointmentSource,
@@ -27,6 +28,7 @@ export type AppointmentAiDecisionContext = {
 export type InternalCreateAppointmentInput = Omit<CreateAppointmentInput, "source"> & {
   source: AppointmentSource;
   aiDecision?: AppointmentAiDecisionContext | null;
+  conversationPlan?: ConversationPlan;
 };
 
 export type CreationConfirmation = {

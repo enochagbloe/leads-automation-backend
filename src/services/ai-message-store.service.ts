@@ -1,9 +1,30 @@
 import { conversationStateService } from "./conversation-state.service";
 import { StatePatch } from "./conversation-state.schema";
 import { Prisma, ConversationStatus } from "@prisma/client";
+import { ConversationPlan, conversationPlanSchema } from "./conversation-plan.schema";
+import { assistantPlanPatch, assertPlanCurrent } from "./conversation-planner.service";
+import { AppError } from "../utils/errors";
 
 /** Canonical persistence only. Delivery, billing and automation belong to callers. */
-export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.MessageUncheckedCreateInput, status: ConversationStatus, activity: Prisma.InputJsonObject, options?: { demoSessionId?: string; stateChange?: { expectedRevision: number; patch: StatePatch } }) {
+export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.MessageUncheckedCreateInput, status: ConversationStatus, activity: Prisma.InputJsonObject, options?: { demoSessionId?: string; stateChange?: { expectedRevision: number; patch: StatePatch }; plan?: ConversationPlan }) {
+  if (options?.plan) {
+    const plan = conversationPlanSchema.parse(options.plan);
+    if (plan.businessId !== data.businessId || plan.conversationId !== data.conversationId || plan.demoSessionId !== options.demoSessionId) throw new AppError(403, "Plan scope forbidden", "CONVERSATION_STATE_FORBIDDEN");
+    // Match inbound persistence's conversation -> state lock order, and serialize staff control changes.
+    await tx.$queryRaw`SELECT "id" FROM "Conversation" WHERE "businessId" = ${data.businessId} AND "id" = ${data.conversationId} FOR UPDATE`;
+    await conversationStateService.get(plan, tx);
+    await tx.$queryRaw`SELECT "id" FROM "ConversationState" WHERE "businessId" = ${data.businessId} AND "conversationId" = ${data.conversationId} FOR UPDATE`;
+    const prior = await tx.message.findFirst({ where: { businessId: data.businessId, conversationId: data.conversationId, senderType: "AI", direction: "OUTBOUND", deletedAt: null, metadata: { path: ["conversationPlan", "sourceMessageId"], equals: plan.sourceMessageId } } });
+    if (prior) {
+      console.info("conversation_plan.replayed", { businessId: data.businessId, conversationId: data.conversationId, sourceMessageId: plan.sourceMessageId });
+      return prior;
+    }
+    await assertPlanCurrent(plan, tx);
+    if (options.stateChange && options.stateChange.expectedRevision !== plan.stateRevision) throw new AppError(409, "Outcome revision differs from plan", "CONVERSATION_STATE_CONFLICT");
+    options = { ...options, stateChange: options.stateChange ?? { expectedRevision: plan.stateRevision, patch: assistantPlanPatch(plan, data.content) } };
+    const metadata = data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata) ? data.metadata as Prisma.InputJsonObject : {};
+    data = { ...data, metadata: { ...metadata, conversationPlan: JSON.parse(JSON.stringify(plan)) as Prisma.InputJsonObject } };
+  }
   const created = await tx.message.create({ data });
   await tx.conversation.update({
     where: { id: data.conversationId, businessId: data.businessId, leadId: data.leadId },

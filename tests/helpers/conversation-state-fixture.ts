@@ -18,11 +18,11 @@ export function fixture(t: TestContext) {
   let active = true;
   let failAudit = false;
   let status = "AI_HANDLING";
-  const match = (row: any, where: any): boolean => Object.entries(where).every(([k, v]: [string, any]) => k === "OR" ? v.some((w: any) => match(row, w)) : v && typeof v === "object" && !(v instanceof Date) ? v.in ? v.in.includes(row[k]) : v.lt !== undefined ? row[k] < v.lt : v.lte !== undefined ? row[k] <= v.lte : true : v instanceof Date ? +row[k] === +v : row[k] === v);
+  const match = (row: any, where: any): boolean => Object.entries(where).every(([k, v]: [string, any]) => k === "metadata" ? v.path.reduce((o: any, key: string) => o?.[key], row.metadata) === v.equals : k === "OR" ? v.some((w: any) => match(row, w)) : v && typeof v === "object" && !(v instanceof Date) ? v.in ? v.in.includes(row[k]) : v.lt !== undefined ? row[k] < v.lt : v.lte !== undefined ? row[k] <= v.lte : true : v instanceof Date ? +row[k] === +v : row[k] === v);
   const tx: any = {
     $queryRaw: async () => [],
     conversation: {
-      findFirst: async ({ where }: any) => where.id === scope.conversationId && where.businessId === scope.businessId ? { id: scope.conversationId, channel: demoId ? "DEMO" : "WHATSAPP", business: { demoSessionId: demoId, timezone } } : null,
+      findFirst: async ({ where }: any) => where.id === scope.conversationId && where.businessId === scope.businessId ? { id: scope.conversationId, status, humanTakeover: status === "HUMAN_HANDLING", aiEnabled: true, channel: demoId ? "DEMO" : "WHATSAPP", business: { demoSessionId: demoId, timezone } } : null,
       update: async () => ({ id: scope.conversationId, status }),
     },
     demoSession: { findFirst: async ({ where }: any) => active && where.id === demoId && where.business.id === scope.businessId ? { id: demoId } : null },
