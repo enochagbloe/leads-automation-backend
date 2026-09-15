@@ -64,7 +64,7 @@ The response stage does not write semantic state or perform external effects. A 
 
 `storeAiReply()` checks that persisted text matches the validated text. Its existing conversation/state locks, revision guard and source-message replay check remain authoritative. The message, plan-derived awaiting/question/options, audit effect and preview commit in one transaction. An audit failure rolls them back together. Replay returns the original message and metadata without another state revision. Delivery and demo realtime publication remain after commit.
 
-`metadata.conversationResponse` records validation version, purpose, asked field, option IDs, completion flag, regeneration count, fallback use and source (`MODEL`, `PLAN_FALLBACK`, `WORKFLOW_RESULT`). No hidden reasoning is stored. Events `generated`, `validation_failed`, `regenerated`, `fallback_used` and `persisted` log identifiers and policy metadata, not message bodies or demo credentials. `persisted` is emitted by callers after transaction commit.
+`metadata.conversationResponse` records validation version, purpose, asked field, option IDs, completion flag, regeneration count, fallback use and source (`MODEL`, `PLAN_FALLBACK`, `WORKFLOW_RESULT`, `NO_ACTION`). No hidden reasoning is stored. Events `generated`, `validation_failed`, `regenerated`, `fallback_used` and `persisted` log identifiers and policy metadata, not message bodies or demo credentials. `persisted` is emitted by callers after transaction commit.
 
 Production and demo use the same response abstraction. Business/conversation/source/revision checks reuse Sprint 1–3 boundaries. Demo scope is inherited through the existing demo-owned business/conversation, not a new state table. No production appointment, payment, memory, follow-up or WhatsApp effects are introduced for demo. Existing scoped demo realtime behavior is retained. BASIC, PLUS and PREMIUM all use the same state/interpreter/planner/response path; capabilities affect actions and limits, not wording policy.
 
@@ -105,7 +105,7 @@ The 45 response tests cover field/purpose adherence, deceptive metadata, logical
 
 ## Limitations and Sprint 5 handoff
 
-Deterministic text checks are conservative English heuristics, not a proof of arbitrary natural-language truth. Structured claims and references are the primary contract. Paraphrases, service-to-price semantic mismatches, relative-date wording and nuanced tone still depend partly on model adherence. No live paid model-quality evaluation was run. Multilingual response policies and broader live quality evaluation need separate work.
+Deterministic text checks are conservative English heuristics, not a proof of arbitrary natural-language truth. Structured claims and references are the primary contract. Paraphrases, service-to-price semantic mismatches, relative-date wording and nuanced tone still depend partly on model adherence. The original Sprint 4 verification did not run live model-quality evaluation; the follow-up results below cover six live response cases. Multilingual response policies and broader live quality evaluation need separate work.
 
 Existing appointment execution and final message persistence are separate transactions; this sprint retains their existing idempotency/failure handling. It does not make all external effects and delivery globally atomic. Human-review behavior can still suppress an automated reply under existing production policy. The legacy prompt/parser remain available for compatibility, but shared conversational response generation no longer uses their independent intent/action output.
 
@@ -116,3 +116,31 @@ Sprint 5 should:
 3. Continue applying expected-revision state batches and source-message effect IDs. Persist the planner's exact next expectation/options with the validated reply.
 4. Supply trusted result data through the shared runtime and preserve strict demo effect policy. Connect real demo-safe availability only if a later sprint intentionally provides it.
 5. Reuse `conversationResponseService.generate()` and `conversationResponsePolicyService.validate()` for verbalization. Keep wording separate from permissions, actions and topic switching; do not add a planner AI call.
+
+## Pre-Sprint 5 confidence correction
+
+Semantic safety now receives `ConversationPlan.confidence`, inherited from contextual interpretation. `ConversationResponse.confidence` remains available in `validatedResponse` as wording-quality telemetry only: it cannot authorize effects, bypass planner restrictions, or block a semantically confident reply. Safe fallback confidence likewise cannot increase semantic confidence. `NO_ACTION` metadata now uses source `NO_ACTION`, with zero provider calls and `fallbackUsed: false`.
+
+Two regression tests exercise the real response/runtime-to-safety boundary with an explicit 0.80 safety threshold:
+
+- Plan confidence 0.96 and valid wording confidence 0.40: semantic confidence remains 0.96 and safety permits the reply.
+- Ambiguous interpretation confidence 0.40 and wording confidence 1.0: the plan remains clarification, intent remains UNKNOWN, no workflow request/appointment payload is authorized, and semantic low-confidence safety remains effective.
+
+Follow-up verification: `pnpm typecheck`, `pnpm typecheck:tests` and `pnpm build` passed; `pnpm test:conversation-response` passed 47 tests, `pnpm test:conversation-interpreter` passed 38, `pnpm test:conversation-planner` passed 29, and `pnpm test:demo` passed 73 with 6 database integration tests skipped.
+
+### Live response smoke evaluation
+
+Opt in with `RUN_CONVERSATION_RESPONSE_LIVE_TESTS=true` and run `npx tsx --test tests/conversation-response.live.test.ts`. This uses the configured paid provider with synthetic inputs, an in-memory database and no customer/production side effects. Each of six cases permits the existing single corrective retry; fallback counts as a quality failure rather than a generated-response success. These are response-stage smoke cases, not an end-to-end interpreter or PostgreSQL evaluation.
+
+Run on 2026-09-15 with `openai/gpt-4o-mini`: **4 passed, 2 failed quality expectations**, eight response requests total.
+
+| Case | Actual outcome |
+| --- | --- |
+| Pending date | Passed first attempt: “What day would you like to come in?” |
+| Corrected time | Passed first attempt; asks for the date without reintroducing the old time |
+| Options | Passed first attempt; presents 12 PM and 2 PM and asks which time |
+| Clarification | Two invalid generations; safe fallback “Could you clarify what you mean?”; quality test failed |
+| Confirmation | Passed first attempt: “Would you like to continue with the appointment at 2 PM?” |
+| Unknown price | Two invalid generations; `CONVERSATION_RESPONSE_INVALID`, no generated reply; quality test failed |
+
+The confidence wiring correction is independent of these quality findings. No validator rules were relaxed to make the live run green. Clarification and unknown-price model adherence need follow-up before claiming consistently natural live responses. Real PostgreSQL concurrency testing remains outstanding on a disposable database.

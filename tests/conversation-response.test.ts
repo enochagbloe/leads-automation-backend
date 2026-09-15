@@ -240,6 +240,29 @@ test("only actual appointment availability checks provide grounded availability 
 test("NO_ACTION validates ownership and makes no response-provider request", async t => {
   const f = await prepared(t); f.context.conversationPlan = { ...f.plan, move: "NO_ACTION", responseDirective: { ...f.plan.responseDirective, purpose: "WAIT", askOneQuestion: false } };
   mockMethod(t, aiProvider, "generateReply", () => assert.fail("no response call allowed"));
-  const r = await f.run(); assert.equal(r.validatedResponse.text, null); assert.equal(r.providerRequestCount, 0);
+  const r = await f.run(); assert.equal(r.validatedResponse.text, null); assert.equal(r.providerRequestCount, 0); assert.equal(r.conversationResponse.source, "NO_ACTION"); assert.equal(r.conversationResponse.fallbackUsed, false);
   f.context.conversationPlan.businessId = "other-tenant"; await assert.rejects(f.run(), { code: "CONVERSATION_STATE_FORBIDDEN" });
+});
+
+test("low wording confidence cannot block a semantically confident planned question", async t => {
+  const f = await prepared(t); f.plan.confidence = .96;
+  mockMethod(t, aiProvider, "generateReply", async () => ({ rawText: JSON.stringify(f.output({ confidence: .40 })), providerRequestCount: 1 }) as any);
+  const result = await f.run();
+  assert.equal(result.validatedResponse.confidence, .40, "retain response quality telemetry");
+  assert.equal(result.parsedDecision.confidence, .96);
+  assert.equal(result.conversationResponse.fallbackUsed, false);
+  const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, minConfidence: .8 });
+  assert.equal(safety.allowed, true); assert.equal(safety.status, "SUCCESS");
+});
+test("perfect wording confidence cannot override ambiguous interpretation or planner restrictions", async t => {
+  const f = await prepared(t); const before = structuredClone(f.state());
+  mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: meaning({ confidence: .40, needsClarification: true, clarificationReason: "OPTION_REFERENCE_AMBIGUOUS" }), commands: [], appliedRevision: f.state().revision }) as any);
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => ({ rawText: JSON.stringify({ ...responseOutput(input), confidence: 1 }), providerRequestCount: 1 }) as any);
+  const result = await generateContextReply(f.context, { ...scope, messageId: f.m.id });
+  assert.equal(result.validatedResponse.confidence, 1); assert.equal(result.parsedDecision.confidence, .40);
+  assert.equal(result.conversationPlan.move, "ASK_FOR_CLARIFICATION"); assert.equal(result.parsedDecision.intent, "UNKNOWN");
+  assert.equal(result.conversationPlan.workflowRequest, undefined); assert.equal(result.parsedDecision.appointmentIntent, undefined);
+  assert.equal(result.parsedDecision.suggestedAction, "SEND_REPLY"); assert.deepEqual(f.state(), before);
+  const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, validatedConversationClarification: true, minConfidence: .8 });
+  assert.equal(safety.allowed, false); assert.equal(safety.status, "BLOCKED_LOW_CONFIDENCE");
 });

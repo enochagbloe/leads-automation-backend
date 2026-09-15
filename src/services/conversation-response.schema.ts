@@ -43,4 +43,4 @@ export const responseOutputSchema = {
   },
   required: ["complaints", "text", "acknowledgedContext", "fulfilledPurpose", "askedField", "questionCount", "referencedOptionIds", "referencedFactIds", "claimsActionCompleted", "claims", "confidence", "requiresHumanReview"],
 };
-export type ResponseValidationMetadata = { validationVersion: 1; source: "MODEL" | "PLAN_FALLBACK" | "WORKFLOW_RESULT"; fulfilledPurpose: ConversationResponse["fulfilledPurpose"]; askedField: string | null; referencedOptionIds: string[]; claimsActionCompleted: boolean; regenerationCount: number; fallbackUsed: boolean };
+export type ResponseValidationMetadata = { validationVersion: 1; source: "MODEL" | "PLAN_FALLBACK" | "WORKFLOW_RESULT" | "NO_ACTION"; fulfilledPurpose: ConversationResponse["fulfilledPurpose"]; askedField: string | null; referencedOptionIds: string[]; claimsActionCompleted: boolean; regenerationCount: number; fallbackUsed: boolean };
