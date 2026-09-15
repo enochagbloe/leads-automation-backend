@@ -7,7 +7,7 @@ import { canonical, resolveResources } from "./demo-message.service";
 import { buildDemoBusinessContext } from "./demo-business-context.provider";
 import { generateContextReply } from "./ai-reply-runtime.service";
 import { aiSafetyService } from "./ai-safety.service";
-import { storeAiReply } from "./ai-message-store.service";
+import { storeAiReply, logConversationResponsePersisted } from "./ai-message-store.service";
 
 export const DEMO_AI_LIMIT = 50;
 const unavailable = () => new AppError(503, "Demo AI is unavailable for this message", "DEMO_AI_UNAVAILABLE");
@@ -58,7 +58,7 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
       const context = await buildDemoBusinessContext(actor, customer);
       result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(30_000), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
     } catch { throw unavailable(); }
-    const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true });
+    const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true, validatedConversationClarification: result.conversationPlan.move === "ASK_FOR_CLARIFICATION" });
     if (result.fallbackExhausted || !safety.allowed || safety.decision.suggestedAction !== "SEND_REPLY" || safety.decision.requiresHumanReview || !safety.decision.shouldReply || !safety.decision.replyText?.trim()) throw unavailable();
     const ai = await prisma.$transaction(async tx => {
       const { conversation, lead } = await lock(tx, actor);
@@ -66,8 +66,9 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
       if (conversation.id !== customer.conversationId || lead.id !== customer.leadId || session.setupAttemptId !== claim.setupAttemptId) throw unavailable();
       const stillPresent = await tx.message.findFirst({ where: { id: customer.id, businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT" } });
       if (!stillPresent) throw unavailable();
-      return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId }, { demoSessionId: actor.demoSessionId, plan: result.conversationPlan });
+      return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId }, { demoSessionId: actor.demoSessionId, plan: result.conversationPlan, response: { text: result.validatedResponse.text, metadata: result.conversationResponse } });
     });
+    logConversationResponsePersisted(ai);
     await demoRealtimeService.message(actor, customer.conversationId, canonical(ai));
     await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "COMPLETED");
     return response(customer, ai);

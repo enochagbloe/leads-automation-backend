@@ -1,3 +1,4 @@
+import { responseOutput } from "./helpers/response-output";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
 import { fixture, scope } from "./helpers/conversation-state-fixture";
@@ -135,7 +136,7 @@ test("demo shares planner but never requests production creation", async t => {
 test("shared runtime makes two calls, supplies plan, and overrides model re-planning", async t => {
   const f = setup(t); await f.booking(); const m = await f.add("Can I book at 12?"); let calls = 0;
   mockMethod(t, conversationInterpreterService, "interpret", async () => { calls++; return { interpretation: meaning(), commands: [], appliedRevision: f.state().revision }; });
-  mockMethod(t, aiProvider, "generateReply", async (input: any) => { calls++; assert.match(input.systemPrompt, /authoritative next conversational move/); assert.doesNotMatch(input.systemPrompt, /if service, date, and time are present/); assert.match(input.userPrompt, /ASK_FOR_FIELD/); return { parsedDecision: { intent: "BOOKING_INTENT", suggestedAction: "CREATE_BOOKING_REQUEST", shouldReply: true, replyText: "What day?", requiresHumanReview: false, appointmentIntent: { preferredTime: "18:00" } }, totalTokens: 1, providerRequestCount: 1 }; });
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => { calls++; assert.match(input.systemPrompt, /authoritative next conversational move/); assert.doesNotMatch(input.systemPrompt, /if service, date, and time are present/); assert.match(input.userPrompt, /ASK_FOR_FIELD/); return { rawText: JSON.stringify(responseOutput(input)), totalTokens: 1, providerRequestCount: 1 }; });
   const result = await generateContextReply(f.context(m), { ...scope, messageId: m.id }); assert.equal(calls, 2); assert.equal(result.parsedDecision!.suggestedAction, "SEND_REPLY"); assert.equal(result.parsedDecision!.appointmentIntent, undefined); assert.equal(result.conversationPlan.targetField, "preferredDate");
 });
 test("shared booking requirements reject invalid dates and times", () => {

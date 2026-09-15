@@ -2,7 +2,7 @@ import { ConversationPlan } from "./conversation-plan.schema";
 import { assertPlanCurrent } from "./conversation-planner.service";
 import { missingAiBookingFields } from "./appointment/appointment-conversation-requirements";
 import { generateContextReply } from "./ai-reply-runtime.service";
-import { storeAiReply } from "./ai-message-store.service";
+import { storeAiReply, logConversationResponsePersisted } from "./ai-message-store.service";
 import {
   BusinessRole,
   ConversationChannel,
@@ -786,6 +786,7 @@ export const aiReplyEngine = {
       }
       await assertPlanCurrent(providerResult.conversationPlan);
       const safety = aiSafetyService.evaluate({
+        validatedConversationClarification: providerResult!.conversationPlan.move === "ASK_FOR_CLARIFICATION",
         decision: providerResult.parsedDecision,
         businessReady: businessReadyForAi(context.readiness),
         humanTakeover: conversation.humanTakeover,
@@ -868,7 +869,7 @@ export const aiReplyEngine = {
           replyText = bookingAppointment.status === AppointmentStatus.CONFIRMED
             && bookingAppointment.confirmationSource === AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM
             ? confirmedAppointmentReply(bookingAppointment)
-            : "Thanks. I’ve sent your appointment request to the business team for confirmation. They’ll confirm the final appointment shortly.";
+            : "Your appointment request has been saved for the business to review.";
           await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id });
           realtimeService.publish({
             type: "business.ai.booking_request.created",
@@ -989,9 +990,15 @@ export const aiReplyEngine = {
               bookingRequestCreated,
               bookingBlockedReason,
               appointmentId: bookingAppointment?.id ?? null,
+              workflowExecutionResult: bookingRequestCreated ? {
+                businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id,
+                stateRevision: providerResult!.conversationPlan.stateRevision, status: "SUCCEEDED",
+                claims: bookingAppointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [],
+              } : providerResult!.trustedWorkflowResult,
             }),
-          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }));
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }));
 
+      logConversationResponsePersisted(aiMessage);
       if (conversation.channel === ConversationChannel.WHATSAPP) {
         try {
           const integration = await getWhatsAppIntegration(conversation.businessId);

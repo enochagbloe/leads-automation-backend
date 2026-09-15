@@ -4,6 +4,7 @@ import { AppError } from "../utils/errors";
 import { AI_DECISION_PARSE_FAILURE_REASON, AiReplyDecision, fallbackHumanReviewDecision, parseAiDecision } from "./ai-decision-parser.service";
 
 export type AiGenerateReplyInput = {
+  responseSchema?: Record<string, unknown>;
   businessId: string;
   conversationId: string;
   messageId: string;
@@ -305,6 +306,7 @@ export class OpenRouterProvider implements AiProvider {
   }
 
   async generateReply(input: AiGenerateReplyInput): Promise<AiGenerateReplyResult> {
+    if (input.responseSchema) return this.generateCompletion({ ...input, maxAttempts: 1, responseFormat: { type: "json_schema", json_schema: { name: "conversation_response", strict: true, schema: input.responseSchema } }, metadata: { ...input.metadata, conversationId: input.conversationId, messageId: input.messageId, feature: "CONVERSATION_RESPONSE" } });
     if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
     const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
     if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");

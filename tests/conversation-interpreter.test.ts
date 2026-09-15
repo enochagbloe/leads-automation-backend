@@ -1,3 +1,4 @@
+import { responseOutput } from "./helpers/response-output";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
 import { fixture, scope } from "./helpers/conversation-state-fixture";
@@ -194,10 +195,10 @@ test("local calendar anchors cross UTC midnight and daylight-saving changes with
 test("shared runtime consumes canonical meaning, blocks ambiguous effects and includes both calls in usage", async t => {
   const f = setup(t); const m = await f.add("Unclear choice"); f.next(base({ needsClarification: true, clarificationReason: "OPTION_REFERENCE_AMBIGUOUS" }));
   let replyInput: any;
-  mockMethod(t, aiProvider, "generateReply", async (input: any) => { replyInput = input; return { totalTokens: 20, providerRequestCount: 1, parsedDecision: { intent: "BOOKING_INTENT", confidence: .99, requiresHumanReview: false, shouldReply: true, suggestedAction: "CREATE_BOOKING_REQUEST", appointmentIntent: { preferredTime: "14:00" } } }; });
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => { replyInput = input; return { totalTokens: 20, providerRequestCount: 1, rawText: JSON.stringify(responseOutput(input)) }; });
   const result = await generateContextReply(f.context(m), { businessId: scope.businessId, conversationId: scope.conversationId, messageId: m.id });
   assert.equal(result.totalTokens, 31); assert.equal(result.providerRequestCount, 2); assert.equal(result.parsedDecision?.intent, "UNKNOWN"); assert.equal(result.parsedDecision?.suggestedAction, "SEND_REPLY"); assert.equal(result.parsedDecision?.appointmentIntent, undefined);
-  assert.match(replyInput.systemPrompt, /canonical meaning/); assert.match(replyInput.userPrompt, /OPTION_REFERENCE_AMBIGUOUS/);
+  assert.match(replyInput.systemPrompt, /authoritative next conversational move/); assert.match(replyInput.userPrompt, /OPTION_REFERENCE_AMBIGUOUS/);
 });
 
 test("a unique offered value can supply a missing option ID/field, while low-confidence confirmation still cannot mutate", async t => {
@@ -240,7 +241,7 @@ test("demo uses real interpreter and shared reply runtime without production usa
   const m = await f.add("East Legon instead"); f.next(base({ resolvedEntities: [entity(m, "branch", "East Legon")] }));
   const context = { ...f.context(m, "demo-a"), demoFacts: { facts: emptyDemoFacts(), unknowns: [] } };
   let replyInput: any;
-  mockMethod(t, aiProvider, "generateReply", async (input: any) => { replyInput = input; return { providerRequestCount: 1, totalTokens: 4, parsedDecision: { intent: "BOOKING_INTENT", confidence: .99, requiresHumanReview: false, shouldReply: true, suggestedAction: "SEND_REPLY" } }; });
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => { replyInput = input; return { providerRequestCount: 1, totalTokens: 4, rawText: JSON.stringify(responseOutput(input)) }; });
   const result = await generateContextReply(context, { businessId: scope.businessId, conversationId: scope.conversationId, messageId: m.id });
   assert.equal(f.state().knownEntities.branch.value, "East Legon"); assert.equal(result.providerRequestCount, 2);
   assert.match(replyInput.systemPrompt, /only SEND_REPLY/); assert.doesNotMatch(replyInput.systemPrompt, /CREATE_BOOKING_REQUEST/);

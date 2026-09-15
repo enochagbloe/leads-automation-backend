@@ -1,3 +1,4 @@
+import { responseOutput } from "./helpers/response-output";
 import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import { conversationStateService } from "../src/services/conversation-state.service";
 import { conversationContextService } from "../src/services/conversation-context.service";
@@ -124,7 +125,7 @@ function fixture(t: TestContext, liveRealtime = false) {
     assert.equal(body.metadata.channel, "DEMO"); assert.equal(body.metadata.isDemo, true); assert.equal(body.metadata.plan, undefined);
     await state.beforeResponse?.();
     if (state.fail) return new Response("{}", { status: 503 });
-    return Response.json({ choices: [{ message: { content: state.malformed ? "invalid json" : JSON.stringify(state.nextDecision) } }], model: "test-model" });
+    return Response.json({ choices: [{ message: { content: state.malformed ? "invalid json" : JSON.stringify({ ...responseOutput({ userPrompt: body.messages[1].content }, state.nextDecision.replyText), ...(state.nextDecision.suggestedAction === "CREATE_BOOKING_REQUEST" ? { forbiddenAction: "CREATE_BOOKING_REQUEST" } : {}) }) } }], model: "test-model" });
   });
   return { state, context, rows, add, activities, requests, fetchSpy, events };
 }
@@ -185,7 +186,7 @@ for (const failure of ["provider", "malformed", "unsafe"]) test(`${failure} fail
   if (failure === "unsafe") f.state.nextDecision = { ...decision, suggestedAction: "CREATE_BOOKING_REQUEST" };
   await assert.rejects(processLatestDemoReply(actor), { code: "DEMO_AI_UNAVAILABLE" });
   await assert.rejects(processLatestDemoReply(actor), { code: "DEMO_AI_UNAVAILABLE" });
-  assert.equal(f.rows.length, 1); assert.equal(f.rows[0].content, customer.content); assert.equal(f.requests.length, 1); assert.equal(f.activities.length, 0);
+  assert.equal(f.rows.length, 1); assert.equal(f.rows[0].content, customer.content); assert.equal(f.requests.length, failure === "provider" ? 1 : 2); assert.equal(f.activities.length, 0);
   assert.deepEqual(f.events.filter(e => e.type === "demo.ai.processing").map(e => e.payload.status), ["STARTED", "FAILED"]);
   assert.equal(f.events.filter(e => e.type === "message.created").length, 0);
 });
@@ -256,11 +257,11 @@ for (const change of ["expired", "setup"]) test(`in-flight ${change} change prev
 
 for (const intent of ["BOOKING_INTENT", "COMPLAINT", "HUMAN_REQUEST"]) test(`${intent} gets a conversational SEND_REPLY without action instructions`, async t => {
   const f = fixture(t); f.add({ content: intent === "BOOKING_INTENT" ? "I want to book roofing for Tuesday." : intent });
-  f.state.nextDecision = { ...decision, intent, replyText: intent === "HUMAN_REQUEST" ? "This is a demo; no human has been contacted." : "Please tell me a little more." };
+  f.state.nextDecision = { ...decision, intent, replyText: intent === "HUMAN_REQUEST" ? "This is a demo; no human has been contacted." : intent === "BOOKING_INTENT" ? "What day would you like to come in?" : "I am sorry that happened." };
   const result = await processLatestDemoReply(actor); assert.equal(result.aiMessage.text, f.state.nextDecision.replyText);
   const prompt = f.requests[0].messages[0].content;
   assert.doesNotMatch(prompt, /CREATE_BOOKING_REQUEST|REQUEST_HUMAN_REVIEW|Complaint case matching/);
-  assert.match(prompt, /Booking intent: ask conversationally/); assert.match(prompt, /Complaint: acknowledge/); assert.match(prompt, /Human request: explain/);
+  assert.match(prompt, /authoritative next conversational move/); assert.match(prompt, /only SEND_REPLY is permitted/); assert.match(prompt, /no external effects/);
   if (intent === "HUMAN_REQUEST") assert.equal(aiSafetyService.evaluate({ decision: f.state.nextDecision, businessReady: true, humanTakeover: false }).allowed, false);
 });
 

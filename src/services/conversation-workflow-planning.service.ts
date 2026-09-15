@@ -1,3 +1,4 @@
+import type { WorkflowExecutionResult } from "./conversation-response.schema";
 import type { AiBusinessContext } from "./ai-context-builder.service";
 import type { ConversationContextSnapshot } from "./conversation-context.service";
 import type { ConversationInterpretation } from "./conversation-interpretation.schema";
@@ -7,7 +8,7 @@ import { checkSlot } from "./appointment/appointment-availability.service";
 
 export const appointmentPlanningBackend = { checkSlot };
 
-export type PlanningInput = { conversationSnapshot: ConversationContextSnapshot; interpretation: ConversationInterpretation; businessContext: AiBusinessContext };
+export type PlanningInput = { conversationSnapshot: ConversationContextSnapshot; interpretation: ConversationInterpretation; businessContext: AiBusinessContext; onWorkflowResult?: (result: WorkflowExecutionResult) => void };
 export type WorkflowRequirement = { key: string; required: boolean; satisfied: boolean; priority: number; source: "CONVERSATION_STATE" | "WORKFLOW_PROVIDER" | "BACKEND_STATE"; group?: string };
 export type WorkflowPlanningResult = {
   status: "NEEDS_INPUT" | "NEEDS_CLARIFICATION" | "READY_FOR_ACTION" | "NEEDS_CONFIRMATION" | "OPTIONS" | "WAITING" | "HUMAN_REQUIRED";
@@ -44,6 +45,7 @@ export const appointmentConversationAdapter: ConversationWorkflowPlanningAdapter
     if (context.runtimeKnowledgeGuards?.some(g => ["SERVICE", "BUSINESS_AVAILABILITY", "APPOINTMENT_SETTINGS"].includes(g.canonicalEntityType) && (!g.canonicalEntityId || g.canonicalEntityType !== "SERVICE" || g.canonicalEntityId === service.id))) return { status: "HUMAN_REQUIRED", requirements, reasonCode: "BOOKING_KNOWLEDGE_REQUIRES_REVIEW" };
     if (context.safetyInstructions?.canDetectBookingIntent === false) return { status: "HUMAN_REQUIRED", requirements, reasonCode: "BOOKING_CAPABILITY_UNAVAILABLE" };
     const availability = await appointmentPlanningBackend.checkSlot({ businessId: context.business.id, serviceId: service.id, date: preferredDate!, time: preferredTime!, timezone: input.conversationSnapshot.timezone, assignedStaffId: context.lead?.assignedStaffId });
+    input.onWorkflowResult?.({ businessId: context.business.id, conversationId: context.conversation.id, sourceMessageId: context.triggerMessage.id, stateRevision: input.conversationSnapshot.state.revision, status: "SUCCEEDED", claims: availability.available ? ["AVAILABILITY"] : [] });
     if (!availability.available) return { status: "NEEDS_CLARIFICATION", requirements, targetField: "preferredTime", reasonCode: availability.reason ?? "APPOINTMENT_SLOT_UNAVAILABLE" };
     return { status: "READY_FOR_ACTION", requirements, reasonCode: "BOOKING_INPUT_READY", action: { type: "CREATE_BOOKING_REQUEST", serviceId: service.id, preferredDate: preferredDate!, preferredTime: preferredTime!, timezone: input.conversationSnapshot.timezone } };
   },

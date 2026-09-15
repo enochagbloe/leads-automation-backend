@@ -1,3 +1,4 @@
+import { responseOutput } from "./helpers/response-output";
 import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
@@ -134,7 +135,7 @@ test("production runtime loads fresh persisted state after cached business conte
   } as unknown as AiBusinessContext;
   await service.setAwaiting(command(0, "branch"), { type: "FIELD", field: "branch", question: "Which branch?" });
   let received = "";
-  mockMethod(t, aiProvider, "generateReply", async (input: any) => { received = `${input.systemPrompt}\n${input.userPrompt}`; return { model: "test" }; });
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => { received = `${input.systemPrompt}\n${input.userPrompt}`; return { model: "test", rawText: JSON.stringify(responseOutput(input)), providerRequestCount: 1 }; });
   mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: { intent: "GENERAL_QUESTION", resolvedEntities: [], confidence: 1, needsClarification: false }, commands: [], appliedRevision: 1, replayed: false }));
   const result = await generateContextReply(cached, { businessId: scope.businessId, conversationId: scope.conversationId, messageId: message.id });
   assert.equal(result.conversationStateRevision, 1);

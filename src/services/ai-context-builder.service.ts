@@ -1,3 +1,4 @@
+import type { WorkflowExecutionResult } from "./conversation-response.schema";
 import type { ConversationPlan } from "./conversation-plan.schema";
 import type { ConversationInterpretation } from "./conversation-interpretation.schema";
 import type { ConversationContextSnapshot } from "./conversation-context.service";
@@ -42,6 +43,7 @@ import { redactGuardedContextPricing, redactGuardedServicePricing } from "./know
 
 export type AiBusinessContext = {
   conversationPlan?: ConversationPlan;
+  trustedWorkflowResult?: WorkflowExecutionResult;
   conversationInterpretation?: ConversationInterpretation;
   conversationSnapshot?: ConversationContextSnapshot;
   demoSessionId?: string;

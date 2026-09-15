@@ -1,12 +1,13 @@
+import { ResponseValidationMetadata } from "./conversation-response.schema";
 import { conversationStateService } from "./conversation-state.service";
 import { StatePatch } from "./conversation-state.schema";
-import { Prisma, ConversationStatus } from "@prisma/client";
+import { Prisma, ConversationStatus, Message } from "@prisma/client";
 import { ConversationPlan, conversationPlanSchema } from "./conversation-plan.schema";
 import { assistantPlanPatch, assertPlanCurrent } from "./conversation-planner.service";
 import { AppError } from "../utils/errors";
 
 /** Canonical persistence only. Delivery, billing and automation belong to callers. */
-export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.MessageUncheckedCreateInput, status: ConversationStatus, activity: Prisma.InputJsonObject, options?: { demoSessionId?: string; stateChange?: { expectedRevision: number; patch: StatePatch }; plan?: ConversationPlan }) {
+export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.MessageUncheckedCreateInput, status: ConversationStatus, activity: Prisma.InputJsonObject, options?: { demoSessionId?: string; stateChange?: { expectedRevision: number; patch: StatePatch }; plan?: ConversationPlan; response?: { text: string | null; metadata: ResponseValidationMetadata } }) {
   if (options?.plan) {
     const plan = conversationPlanSchema.parse(options.plan);
     if (plan.businessId !== data.businessId || plan.conversationId !== data.conversationId || plan.demoSessionId !== options.demoSessionId) throw new AppError(403, "Plan scope forbidden", "CONVERSATION_STATE_FORBIDDEN");
@@ -25,6 +26,11 @@ export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.Me
     const metadata = data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata) ? data.metadata as Prisma.InputJsonObject : {};
     data = { ...data, metadata: { ...metadata, conversationPlan: JSON.parse(JSON.stringify(plan)) as Prisma.InputJsonObject } };
   }
+  if (options?.response) {
+    if (options.response.text?.trim() !== data.content.trim()) throw new AppError(422, "Validated response differs from persisted text", "CONVERSATION_RESPONSE_TEXT_MISMATCH");
+    const metadata = data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata) ? data.metadata as Prisma.InputJsonObject : {};
+    data = { ...data, metadata: { ...metadata, conversationResponse: JSON.parse(JSON.stringify(options.response.metadata)) as Prisma.InputJsonObject } };
+  }
   const created = await tx.message.create({ data });
   await tx.conversation.update({
     where: { id: data.conversationId, businessId: data.businessId, leadId: data.leadId },
@@ -32,5 +38,18 @@ export async function storeAiReply(tx: Prisma.TransactionClient, data: Prisma.Me
   });
   await tx.leadActivity.create({ data: { businessId: data.businessId, leadId: data.leadId, action: "MESSAGE_CREATED", metadata: { source: "AI_REPLY_ENGINE", conversationId: data.conversationId, messageId: created.id, senderType: "AI", direction: "OUTBOUND", ...activity } } });
   await conversationStateService.recordMessage({ businessId: data.businessId, conversationId: data.conversationId, demoSessionId: options?.demoSessionId }, created.id, "AI_INTERPRETATION", tx, options?.stateChange);
+
   return created;
+}
+
+/** Call only after the enclosing message/state transaction has committed. */
+export function logConversationResponsePersisted(message: Message) {
+  const metadata = message.metadata as Prisma.JsonObject | null;
+  const response = metadata?.conversationResponse as Prisma.JsonObject | undefined;
+  const plan = metadata?.conversationPlan as Prisma.JsonObject | undefined;
+  if (response) console.info("conversation_response.persisted", {
+    businessId: message.businessId, conversationId: message.conversationId, sourceMessageId: plan?.sourceMessageId,
+    planMove: plan?.move, planPurpose: plan?.responseDirective && typeof plan.responseDirective === "object" && !Array.isArray(plan.responseDirective) ? plan.responseDirective.purpose : undefined,
+    validationOutcome: "VALID", ...response,
+  });
 }

@@ -1,7 +1,9 @@
+import type { WorkflowExecutionResult } from "./conversation-response.schema";
+import { conversationResponseService } from "./conversation-response.service";
 import { conversationPlannerService } from "./conversation-planner.service";
 import { conversationContextService } from "./conversation-context.service";
-import { AiBusinessContext, aiPromptContextFormatter } from "./ai-context-builder.service";
-import { aiProvider, AiGenerateReplyInput } from "./ai-provider.service";
+import { AiBusinessContext } from "./ai-context-builder.service";
+import { AiGenerateReplyInput } from "./ai-provider.service";
 import { conversationInterpreterService } from "./conversation-interpreter.service";
 import { AppError } from "../utils/errors";
 
@@ -14,11 +16,13 @@ export async function generateContextReply(context: AiBusinessContext, options: 
     snapshot = await conversationContextService.getSnapshot(scope);
     if (snapshot.state.revision !== meaning.appliedRevision) throw new AppError(409, "Conversation changed after interpretation", "CONVERSATION_STATE_CONFLICT");
   }
-  const conversationPlan = await conversationPlannerService.plan({ conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context });
-  context = { ...context, conversationPlan, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
-  const result = await aiProvider.generateReply({ ...options, systemPrompt: aiPromptContextFormatter.buildSystemPrompt(context), userPrompt: aiPromptContextFormatter.buildUserPrompt(context) }).catch(error => {
+  let trustedWorkflowResult: WorkflowExecutionResult | undefined;
+  const conversationPlan = await conversationPlannerService.plan({ conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context, onWorkflowResult: result => { trustedWorkflowResult = result; } });
+  context = { ...context, trustedWorkflowResult, conversationPlan, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
+  const result = await conversationResponseService.generate(context, options).catch(error => {
     const failure = error instanceof AppError ? error : new AppError(503, "AI reply unavailable", "AI_PROVIDER_ERROR");
-    failure.context = { ...failure.context, conversationInterpretationUsage: { requests: meaning.usage?.providerRequestCount ?? 0, tokens: meaning.usage?.totalTokens ?? 0 } };
+    const responseUsage = failure.context?.conversationResponseUsage as { requests?: number; tokens?: number } | undefined;
+    failure.context = { ...failure.context, conversationInterpretationUsage: { requests: (meaning.usage?.providerRequestCount ?? 0) + (responseUsage?.requests ?? 0), tokens: (meaning.usage?.totalTokens ?? 0) + (responseUsage?.tokens ?? 0) } };
     throw failure;
   });
   const decision = result.parsedDecision;
