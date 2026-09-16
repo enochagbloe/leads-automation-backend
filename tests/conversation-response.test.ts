@@ -297,3 +297,39 @@ test("clarification without a target requires null askedField despite a pending 
   });
   const r = await f.run(); assert.equal(calls, 2); assert.equal(r.validatedResponse.askedField, null); assert.equal(r.conversationResponse.fallbackUsed, false);
 });
+
+
+for (const industry of ["Dental practice", "Consultancy firm"]) test(`${industry}: answer contract prevents unplanned follow-up and corrects a rejected question`, async t => {
+  const f = setup(t, true);
+  const m = await f.add(industry === "Dental practice" ? "My tooth hurts and I do not know why." : "Our company is struggling with project delivery and needs advice.");
+  const input = await f.input(m, meaning({ intent: "SERVICE_INQUIRY" }));
+  input.businessContext.business.name = industry;
+  const plan = await planner.plan(input);
+  assert.equal(plan.move, "ANSWER");
+  const before = structuredClone(f.state()); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => {
+    const props = request.responseSchema.properties;
+    assert.deepEqual(props.questionCount.enum, [0]);
+    assert.deepEqual(props.askedField, { type: "null" });
+    assert.deepEqual(props.fulfilledPurpose.enum, ["ANSWER_CUSTOMER"]);
+    assert.match(request.systemPrompt, /Write statements only/);
+    if (++calls === 2) assert.match(request.userPrompt, /Do not ask any question/);
+    return { rawText: JSON.stringify({ ...responseOutput(request, calls === 1 ? "Would you like more help?" : "I understand your concern."), questionCount: calls === 1 ? 1 : 0 }), providerRequestCount: 1 } as any;
+  });
+  const result = await responses.generate({ ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan }, { ...scope, messageId: m.id });
+  assert.equal(calls, 2); assert.equal(result.conversationResponse.fallbackUsed, false);
+  assert.equal(result.validatedResponse.questionCount, 0); assert.equal(result.validatedResponse.askedField, null);
+  assert.deepEqual(f.state(), before);
+  await prisma.$transaction(tx => storeAiReply(tx, { ...scope, leadId: "lead-a", senderType: "AI", direction: "OUTBOUND", content: result.validatedResponse.text!, messageType: "TEXT", deliveryStatus: "INTERNAL" }, "AI_HANDLING", {}, { demoSessionId: f.scoped.demoSessionId, plan, response: { text: result.validatedResponse.text, metadata: result.conversationResponse } }));
+  assert.equal(f.messages().filter(m => m.senderType === "AI").length, 1);
+});
+
+test("question plans retain their exact field and single-question schema", async t => {
+  const f = await prepared(t);
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => {
+    assert.deepEqual(request.responseSchema.properties.questionCount.enum, [1]);
+    assert.deepEqual(request.responseSchema.properties.askedField, { type: "string", enum: ["preferredDate"] });
+    return { rawText: JSON.stringify(responseOutput(request)), providerRequestCount: 1 } as any;
+  });
+  assert.equal((await f.run()).validatedResponse.askedField, "preferredDate");
+});

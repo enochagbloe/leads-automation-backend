@@ -23,3 +23,13 @@ Regression tests cover explicit transaction budgets, safe timeout diagnostics, r
 ## Operational follow-up
 
 Restart the backend to load the new defaults. Send a new message or start a new demo after an earlier failed attempt: an already claimed failed message is deliberately not reprocessed under the same client ID. No schema migration is required. Database latency and model latency still affect response time; this change does not guarantee every provider response will pass response policy.
+
+## Plan-bound response contract follow-up
+
+A service enquiry reproduced `CONVERSATION_RESPONSE_INVALID`: the planner selected ANSWER with no question, but both model attempts appended a question and failed `QUESTION_COUNT_INVALID`. The generic retry listed a code without spelling out the required correction.
+
+Response generation now specializes the output schema and instructions for each trusted plan: exact purpose, asked field (including null), question count and human-review flag. Corrective generation repeats those explicit requirements. Deterministic validation remains unchanged; a model cannot bypass response policy by supplying valid-looking metadata.
+
+This is shared, industry-neutral behavior. Dental and management consultancy enquiries are test fixtures, not runtime branches or hard-coded business facts.
+
+Verification: 54 response tests and 74 demo tests passed; 6 database integration tests skipped. Both typechecks and build passed. All 8 opt-in live smoke cases passed: dental used one model response, consultancy used one corrective retry, and unknown pricing used the existing safe fallback. Replaying generation against the previously failing stored demo context passed on the first model attempt without saving a reply or modifying the failed inbound message. These checks demonstrate the observed failure is corrected, not that every future model output is guaranteed valid.

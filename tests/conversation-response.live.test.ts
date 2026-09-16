@@ -9,7 +9,7 @@ import type { AiBusinessContext } from "../src/services/ai-context-builder.servi
 
 // Opt-in paid provider smoke tests: synthetic context, in-memory DB, no external business effects.
 const live = process.env.RUN_CONVERSATION_RESPONSE_LIVE_TESTS === "true" ? test : test.skip;
-for (const scenario of ["pending-date", "corrected-time", "options", "clarification", "confirmation", "unknown-price"]) live(`live response: ${scenario}`, { timeout: 60000 }, async t => {
+for (const scenario of ["pending-date", "corrected-time", "options", "clarification", "confirmation", "unknown-price", "service-enquiry-dental", "service-enquiry-consultancy"]) live(`live response: ${scenario}`, { timeout: 60000 }, async t => {
   const f = fixture(t); let sequence = 0;
   t.after(() => { for (const log of f.logs.filter(entry => entry[0] === "conversation_response.validation_failed")) t.diagnostic(JSON.stringify(log)); });
   const command = () => ({ ...scope, expectedRevision: f.state()?.revision ?? 0, source: "WORKFLOW" as const, sourceEffectId: `response-live:${++sequence}` });
@@ -25,14 +25,17 @@ for (const scenario of ["pending-date", "corrected-time", "options", "clarificat
   }
   if (scenario === "confirmation") { await state.setAwaiting(command(), { type: "CONFIRMATION", question: "Would you like to continue?" }); text = "Can you repeat the details?"; }
   if (scenario === "unknown-price") text = "How much is cleaning?";
-  await f.add("I can help arrange a visit.", "AI");
+  if (scenario === "service-enquiry-dental" || scenario === "service-enquiry-consultancy") {
+    await state.resetWorkflow(command());
+    text = scenario === "service-enquiry-dental" ? "Good afternoon, I have a tooth problem I cannot identify and it hurts a lot." : "Our company is struggling with project delivery and needs advice.";
+  } else await f.add("I can help arrange a visit.", "AI");
   const message = await f.add(text);
   const snapshot = await conversationContextService.getSnapshot({ ...scope, messageId: message.id });
-  const context = { business: { id: scope.businessId, name: "Smoke evaluation business" }, conversation: { id: scope.conversationId, status: "AI_HANDLING", aiEnabled: true },
+  const context = { business: { id: scope.businessId, name: scenario === "service-enquiry-dental" ? "Synthetic Dental Practice" : scenario === "service-enquiry-consultancy" ? "Synthetic Management Consultancy" : "Smoke evaluation business" }, conversation: { id: scope.conversationId, status: "AI_HANDLING", aiEnabled: true },
     services: [], triggerMessage: { id: message.id, text, createdAt: message.createdAt.toISOString() }, customerMemory: { summary: null }, planCapabilities: { aiReplies: true, tone: "PROFESSIONAL" },
     safetyInstructions: {}, runtimeKnowledgeGuards: [], recentMessages: snapshot.recentMessages, existingCustomerIssues: [], pendingFollowUpContexts: [], policies: [], knowledgeArticles: [], knowledgeDocumentChunks: [], approvedKnowledgeFacts: [],
   } as unknown as AiBusinessContext;
-  const plan = await conversationPlannerService.plan({ businessContext: context, conversationSnapshot: snapshot, interpretation: { intent: scenario === "unknown-price" ? "PRICING_INQUIRY" : "BOOKING_INTENT", confidence: .96, needsClarification: scenario === "clarification", ...(scenario === "clarification" ? { clarificationReason: "OPTION_REFERENCE_AMBIGUOUS" } : {}), resolvedEntities: [] } });
+  const plan = await conversationPlannerService.plan({ businessContext: context, conversationSnapshot: snapshot, interpretation: { intent: scenario === "unknown-price" ? "PRICING_INQUIRY" : scenario.startsWith("service-enquiry-") ? "SERVICE_INQUIRY" : "BOOKING_INTENT", confidence: .96, needsClarification: scenario === "clarification", ...(scenario === "clarification" ? { clarificationReason: "OPTION_REFERENCE_AMBIGUOUS" } : {}), resolvedEntities: [] } });
   const result = await conversationResponseService.generate({ ...context, conversationPlan: plan, conversationSnapshot: snapshot }, { ...scope, messageId: message.id, signal: AbortSignal.timeout(45000), temperature: 0, maxTokens: 700 });
   // Synthetic fixture text is intentionally visible for manual wording review; production logs omit bodies.
   t.diagnostic(JSON.stringify({ scenario, model: result.model, text: result.validatedResponse.text, requests: result.providerRequestCount, fallback: result.conversationResponse.fallbackUsed, responseConfidence: result.validatedResponse.confidence, semanticConfidence: result.parsedDecision.confidence }));
@@ -40,6 +43,7 @@ for (const scenario of ["pending-date", "corrected-time", "options", "clarificat
     assert.equal(result.validatedResponse.text, "I don't have a confirmed price for that right now.");
     assert.equal(result.conversationResponse.source, "PLAN_FALLBACK");
   } else assert.equal(result.conversationResponse.fallbackUsed, false, "other smoke cases require generated wording");
+  if (scenario.startsWith("service-enquiry-")) { assert.equal(result.validatedResponse.questionCount, 0); assert.equal(result.validatedResponse.askedField, null); }
   if (scenario === "clarification") assert.equal(result.validatedResponse.askedField, null);
   assert.equal(result.parsedDecision.confidence, .96);
   assert.equal(f.state().revision, snapshot.state.revision);

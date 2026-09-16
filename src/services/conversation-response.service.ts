@@ -5,6 +5,25 @@ import { ConversationResponse, responseOutputSchema, ResponseValidationMetadata,
 import { conversationResponsePolicyService, fieldLabels, hasGroundedPrice, ResponseFact } from "./conversation-response-policy.service";
 import { assertPlanCurrent } from "./conversation-planner.service";
 import { AppError } from "../utils/errors";
+import { ConversationPlan } from "./conversation-plan.schema";
+
+/** Constrain wording metadata to the backend plan before generation, as well as validating afterward. */
+export function plannedResponseContract(plan: ConversationPlan) {
+  const askedField = ["ASK_FOR_FIELD", "ASK_FOR_OPTION", "ASK_FOR_CLARIFICATION"].includes(plan.move) ? plan.targetField ?? null : null;
+  const questionCount = plan.responseDirective.askOneQuestion ? 1 : 0;
+  return {
+    instruction: `For this response, fulfilledPurpose MUST be ${JSON.stringify(plan.responseDirective.purpose)}, askedField MUST be ${JSON.stringify(askedField)}, questionCount MUST be ${questionCount}, and requiresHumanReview MUST be ${plan.requiresHumanReview}. ` +
+      (questionCount === 0
+        ? "Write statements only. Do not ask any question, request more details, offer a booking question, or append an invitation such as 'Would you like me to help?'. Acknowledge the customer's concern and answer using grounded information; do not invent facts or outcomes."
+        : "Ask exactly one logical question for the planned move; do not append a second request."),
+    schema: { ...responseOutputSchema, properties: { ...responseOutputSchema.properties,
+      fulfilledPurpose: { type: "string", enum: [plan.responseDirective.purpose] },
+      askedField: askedField === null ? { type: "null" } : { type: "string", enum: [askedField] },
+      questionCount: { type: "integer", enum: [questionCount] },
+      requiresHumanReview: { type: "boolean", enum: [plan.requiresHumanReview] },
+    } },
+  };
+}
 
 export const naturalResponsePrompt = `You verbalize a supplied ConversationPlan, the authoritative next conversational move. You do not interpret intent, select a workflow, execute actions or choose the next requirement.
 Return only the structured response schema. complaints is normally empty. Only when the canonical plan intent is COMPLAINT, preserve existing issue extraction: bounded category, severity, summary, matching against supplied existing issue IDs, and internal-action needs; this never authorizes routing or changes intent. Do not return intent, suggestedAction, appointmentIntent or arbitrary state. fulfilledPurpose must equal the plan purpose; askedField is the exact planned target or null. For ASK_FOR_CLARIFICATION, when plan.targetField is absent, askedField MUST be JSON null. Never infer askedField from state.awaiting.field, options, or the active workflow; clarify the reference conversationally while keeping askedField null. This does NOT mean text is null: every move except NO_ACTION requires non-empty customer-facing text. For untargeted clarification, return text such as "Which option do you mean?" together with askedField: null and questionCount: 1. Never suppress a clarification because the customer meaning is ambiguous. questionCount counts logical requests, including requests without question marks. Never hide multiple requests in one question. For ANSWER do not append a pending workflow question.
@@ -41,6 +60,7 @@ export const conversationResponseService = {
   async generate(context: AiBusinessContext, options: Omit<AiGenerateReplyInput, "systemPrompt" | "userPrompt">) {
     const plan = context.conversationPlan!; const snapshot = context.conversationSnapshot!;
     const facts = responseFacts(context);
+    const contract = plannedResponseContract(plan);
     const trustedWorkflowResult: WorkflowExecutionResult = context.trustedWorkflowResult ?? { businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, stateRevision: plan.stateRevision, status: plan.workflowRequest && !context.demoSessionId ? "REQUESTED" : "NOT_EXECUTED", claims: [] };
     const event = { businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, planMove: plan.move, planPurpose: plan.responseDirective.purpose };
     const userPrompt = JSON.stringify({ context: JSON.parse(aiPromptContextFormatter.format(context)), responseFacts: facts, trustedWorkflowResult, tone: context.planCapabilities.tone });
@@ -57,7 +77,7 @@ export const conversationResponseService = {
     for (let attempt = 0; attempt <= 1; attempt++) {
       await assertPlanCurrent(plan);
       try {
-        usage = await aiProvider.generateReply({ ...options, maxAttempts: 1, responseSchema: responseOutputSchema, systemPrompt: naturalResponsePrompt + (context.demoSessionId ? "\nReply-only demo: only SEND_REPLY is permitted by the backend; no external effects are allowed." : ""), userPrompt: userPrompt + (attempt ? `\nCorrect the preceding contract violations: ${correction.join(", ")}. Produce a fresh response to the same plan.` : "") });
+        usage = await aiProvider.generateReply({ ...options, maxAttempts: 1, responseSchema: contract.schema, systemPrompt: naturalResponsePrompt + "\n" + contract.instruction + (context.demoSessionId ? "\nReply-only demo: only SEND_REPLY is permitted by the backend; no external effects are allowed." : ""), userPrompt: userPrompt + (attempt ? `\nCorrect the preceding contract violations: ${correction.join(", ")}. ${contract.instruction} Produce a fresh response to the same plan.` : "") });
       } catch (error) {
         const count = error instanceof AppError && typeof error.context?.providerRequestCount === "number" ? error.context.providerRequestCount : 0;
         throw new AppError(503, "Response provider unavailable", "CONVERSATION_RESPONSE_UNAVAILABLE", { providerRequestCount: requests + count, conversationResponseUsage: { requests: requests + count, tokens } });
