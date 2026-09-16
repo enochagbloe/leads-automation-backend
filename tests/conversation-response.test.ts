@@ -90,10 +90,11 @@ test("exact options required and invented options rejected", async t => {
   for (const patch of [{ text: "12 PM or 3 PM. Which time works best?" }, { referencedOptionIds: ["one", "fake"] }, { referencedOptionIds: ["one"] }]) assert.equal(f.check({ ...r, ...patch }, { plan }).valid, false);
 });
 test("clarification may restate options but cannot choose for the customer", async t => {
-  const f = await prepared(t); const plan = { ...f.plan, move: "ASK_FOR_CLARIFICATION", targetField: undefined, responseDirective: { ...f.plan.responseDirective, purpose: "CLARIFY" } };
+  const f = await prepared(t); const plan = { ...f.plan, move: "ASK_FOR_CLARIFICATION", reasonCode: "OPTION_REFERENCE_AMBIGUOUS", targetField: undefined, responseDirective: { ...f.plan.responseDirective, purpose: "CLARIFY" } };
+  const state = { ...f.input.conversationSnapshot.state, awaiting: { type: "OPTION_SELECTION", field: "preferredTime" }, offeredOptionsCreatedAt: new Date().toISOString(), offeredOptions: [{ id: "one", label: "2 PM", value: "14:00", position: 1 }] };
   const r = f.output({ text: "Could you clarify which option you mean?", askedField: null, fulfilledPurpose: "CLARIFY" });
-  assert.equal(f.check(r, { plan }).valid, true);
-  assert.equal(f.check({ ...r, text: "I'll go with 2 PM. Is that okay?" }, { plan }).valid, false);
+  assert.equal(f.check(r, { plan, state }).valid, true);
+  assert.equal(f.check({ ...r, text: "I'll go with 2 PM. Is that okay?" }, { plan, state }).valid, false);
 });
 for (const text of ["Your appointment is confirmed.", "Booked!", "2 PM is available.", "I have passed this to the team.", "Payment received.", "Refund processed.", "Quote sent.", "A staff member is assigned.", "I'm not sure but your booking is confirmed."]) test(`unsupported outcome: ${text}`, async t => {
   const f = await prepared(t); const plan = { ...f.plan, move: "ANSWER", responseDirective: { ...f.plan.responseDirective, purpose: "ANSWER_CUSTOMER", askOneQuestion: false } };
@@ -332,4 +333,47 @@ test("question plans retain their exact field and single-question schema", async
     return { rawText: JSON.stringify(responseOutput(request)), providerRequestCount: 1 } as any;
   });
   assert.equal((await f.run()).validatedResponse.askedField, "preferredDate");
+});
+
+
+for (const text of ["Which option do you mean?", "Which choice?", "Do you mean the first one?", "The second option?", "Which one do you mean?"]) test(`ungrounded clarification rejected: ${text}`, async t => {
+  const f = await prepared(t); const plan = await planner.plan({ ...f.input, interpretation: meaning({ needsClarification: true }) });
+  const r = f.output({ text, askedField: null, fulfilledPurpose: "CLARIFY" });
+  const checked = f.check(r, { plan }); assert.equal(checked.valid, false); assert.ok(checked.issues.includes("UNGROUNDED_OPTION_CLARIFICATION"));
+});
+
+for (const kind of ["fresh", "stale", "unrelated"] as const) test(`${kind} options govern clarification references`, async t => {
+  const f = await prepared(t);
+  await state.setOptions(f.command(), [{ id: "one", label: "12 PM", value: "12:00", position: 1 }, { id: "two", label: "2 PM", value: "14:00", position: 2 }]);
+  await state.setAwaiting(f.command(), { type: "OPTION_SELECTION", field: "preferredTime" });
+  if (kind === "stale") f.state().offeredOptionsCreatedAt = new Date(0).toISOString();
+  const snapshot = await conversationContextService.getSnapshot({ ...scope, messageId: f.m.id });
+  const plan = await planner.plan({ ...f.input, conversationSnapshot: snapshot, interpretation: meaning({ needsClarification: true, clarificationReason: kind === "unrelated" ? "CONTEXT_INSUFFICIENT" : "OPTION_REFERENCE_AMBIGUOUS" }) });
+  assert.equal(f.check(f.output({ text: "Which option do you mean?", askedField: null, fulfilledPurpose: "CLARIFY" }), { plan, state: snapshot.state }).valid, kind === "fresh");
+});
+
+test("unfounded option questions regenerate once then use neutral validated fallback", async t => {
+  const f = await prepared(t); f.context.conversationPlan = await planner.plan({ ...f.input, interpretation: meaning({ needsClarification: true }) }); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => { calls++; return { rawText: JSON.stringify(responseOutput(input, "Which option do you mean?")), providerRequestCount: 1 } as any; });
+  const r = await f.run(); assert.equal(calls, 2); assert.equal(r.validatedResponse.text, "Could you clarify what you mean?"); assert.equal(r.conversationResponse.fallbackUsed, true);
+});
+
+test("understood greeting allows a greeting back after an earlier greeting", async t => {
+  const f = setup(t); await f.add("Hi! How can I help?", "AI"); const m = await f.add("hrllo");
+  const input = await f.input(m, meaning({ intent: "GENERAL_QUESTION", conversationAct: "GREETING" })); const plan = await planner.plan(input);
+  assert.equal(plan.reasonCode, "CUSTOMER_GREETING"); assert.equal(plan.responseDirective.askOneQuestion, true); assert.equal(plan.workflowRequest, undefined);
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => ({ rawText: JSON.stringify(responseOutput(input, "Hi again. How can I help?")), providerRequestCount: 1 }) as any);
+  const r = await responses.generate({ ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan }, { ...scope, messageId: m.id });
+  assert.equal(r.conversationResponse.fallbackUsed, false); assert.equal(r.validatedResponse.text, "Hi again. How can I help?");
+});
+
+
+test("demo unavailable explanation passes existing safety after rejected confirmation wording", async t => {
+  const f = await prepared(t, true);
+  const plan: ConversationPlan = { ...f.plan, move: "CONTINUE_WORKFLOW", targetField: undefined, reasonCode: "DEMO_AVAILABILITY_NOT_CONNECTED", responseDirective: { acknowledgeContext: true, askOneQuestion: false, purpose: "ACKNOWLEDGE" } };
+  f.context.conversationPlan = plan;
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => ({ rawText: JSON.stringify(responseOutput(input, "I cannot confirm bookings in this demo.")), providerRequestCount: 1 }) as any);
+  const r = await f.run(); assert.equal(r.conversationResponse.fallbackUsed, true);
+  assert.equal(aiSafetyService.evaluate({ decision: r.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true }).allowed, true);
+  assert.deepEqual(r.validatedResponse.claims, []); assert.equal(r.validatedResponse.claimsActionCompleted, false);
 });

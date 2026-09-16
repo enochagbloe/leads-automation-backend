@@ -6,6 +6,7 @@ const confidence = z.number().min(0).max(1);
 export const workflowNames = ["APPOINTMENT_BOOKING", "APPOINTMENT_RESCHEDULE", "APPOINTMENT_CANCEL", "COMPLAINT_INTAKE", "GENERAL_ENQUIRY", "SERVICE_ENQUIRY", "HUMAN_HANDOFF"] as const;
 export const interpretationSchema = z.object({
   intent: z.enum(AI_REPLY_INTENTS),
+  conversationAct: z.enum(["GREETING"]).nullish().transform(v => v ?? undefined),
   topic: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined),
   workflow: z.object({ name: z.enum(workflowNames).nullish().transform(v => v ?? undefined), action: z.enum(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]) }).strict().nullish().transform(v => v ?? undefined),
   resolvedEntities: z.array(z.object({

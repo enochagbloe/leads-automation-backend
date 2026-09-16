@@ -13,6 +13,7 @@ const scalar = { anyOf: [text, number, boolean] };
 const topic = enumeration(["GENERAL_ENQUIRY", "SERVICE_ENQUIRY", "APPOINTMENT", "FOLLOW_UP", "COMPLAINT", "QUOTATION", "PAYMENT", "HUMAN_HANDOFF"]);
 export const interpretationOutputSchema = object({
   intent: enumeration(AI_REPLY_INTENTS),
+  conversationAct: nullable(enumeration(["GREETING"])),
   topic: nullable(topic),
   workflow: nullable(object({ name: nullable(enumeration(workflowNames)), action: enumeration(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]) })),
   optionResolution: { anyOf: [
@@ -35,5 +36,5 @@ export const interpretationOutputSchema = object({
   confirmation: nullable(object({ type: enumeration(["YES", "NO", "UNCLEAR"]), confidence: number })),
   correction: nullable(object({ isCorrection: boolean, replacesEntity: nullable(text) })),
   topicShift: nullable(object({ detected: boolean, from: nullable(topic), to: nullable(topic) })),
-  confidence: number, needsClarification: boolean, clarificationReason: nullable(text),
+  confidence: number, needsClarification: { ...boolean, description: "True only for unresolved meaning or ambiguous supplied values. False for a clear booking request with missing date/time, or a clear correction that leaves another field unanswered. Missing workflow fields are collected by the planner." }, clarificationReason: nullable(text),
 });

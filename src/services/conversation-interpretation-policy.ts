@@ -8,7 +8,7 @@ export type InterpretationCommand =
   | { type: "CLEAR_AWAITING" }
   | { type: "SET_WORKFLOW"; name: string; action: string }
   | { type: "SET_INTENT"; intent: string };
-export const semanticConfidenceThreshold = () => Math.max(env.AI_MIN_CONFIDENCE, env.AI_AUTO_CONFIRM_MIN_CONFIDENCE);
+export const semanticConfidenceThreshold = () => env.AI_MIN_CONFIDENCE;
 export function optionsAreFresh(state: StateData, now = Date.now()) {
   const issued = state.offeredOptionsCreatedAt ? Date.parse(state.offeredOptionsCreatedAt) : NaN;
   return state.offeredOptions.length > 0 && Number.isFinite(issued) && issued <= now && now - issued <= env.CONVERSATION_OPTIONS_TTL_MINUTES * 60_000;
@@ -25,12 +25,33 @@ export const continuationIntent = (workflow: string | null) => workflowIntent[wo
 /** Pure validator. It builds a bounded patch; no AI-provided command or whole-state replacement is accepted. */
 export function planInterpretation(snapshot: ConversationContextSnapshot, proposed: ConversationInterpretation, now = Date.now()) {
   const interpretation = structuredClone(proposed);
+  const high = semanticConfidenceThreshold();
+  // These structured provider codes describe operational incompleteness, not unclear meaning.
+  // Normalize only a high-confidence booking goal with exact supplied information and truly
+  // absent fields. All evidence/type/reference/workflow checks below still run before mutation.
+  const missing = ({ MISSING_DATE: ["preferredDate"], MISSING_TIME: ["preferredTime"], MISSING_DATE_TIME: ["preferredDate", "preferredTime"] } as Record<string, string[]>)[interpretation.clarificationReason ?? ""];
+  if (interpretation.needsClarification && missing && interpretation.intent === "BOOKING_INTENT" && interpretation.confidence >= high &&
+      interpretation.workflow?.name === "APPOINTMENT_BOOKING" && ["START", "CONTINUE", "UPDATE"].includes(interpretation.workflow.action) &&
+      !interpretation.topicShift?.detected && !interpretation.selectedOption && !interpretation.optionResolution && !interpretation.confirmation &&
+      interpretation.resolvedEntities.some(e => e.source === "CURRENT_MESSAGE") &&
+      interpretation.resolvedEntities.every(e => e.certainty === "EXACT" && e.confidence >= high) &&
+      missing.every(key => !snapshot.state.knownEntities[key] && !interpretation.resolvedEntities.some(e => e.key === key))) {
+    interpretation.needsClarification = false;
+    delete interpretation.clarificationReason;
+  }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
   if (interpretation.needsClarification) return ambiguous(interpretation.clarificationReason ?? "INTERPRETATION_AMBIGUOUS");
-  const high = semanticConfidenceThreshold();
-  if (interpretation.confidence < high) return ambiguous(interpretation.confidence < env.AI_MIN_CONFIDENCE ? "LOW_CONFIDENCE" : "CONFIDENCE_REQUIRES_CLARIFICATION");
-  if (interpretation.intent === "UNKNOWN") return ambiguous("CONTEXT_INSUFFICIENT");
+  if (interpretation.confidence < high) return ambiguous("LOW_CONFIDENCE");
   const state = snapshot.state;
+  // A high-confidence YES/NO to the actual pending confirmation has an existing
+  // workflow intent. Normalize that structured result; this grants no action permission.
+  const continuedIntent = continuationIntent(state.activeWorkflow);
+  if (interpretation.intent === "UNKNOWN" && state.awaiting?.type === "CONFIRMATION" &&
+      interpretation.confirmation && interpretation.confirmation.type !== "UNCLEAR" && interpretation.confirmation.confidence >= high &&
+      !interpretation.topicShift?.detected && continuedIntent && (!interpretation.workflow?.name || interpretation.workflow.name === state.activeWorkflow)) {
+    interpretation.intent = continuedIntent as ConversationInterpretation["intent"];
+  }
+  if (interpretation.intent === "UNKNOWN") return ambiguous("CONTEXT_INSUFFICIENT");
   const message = snapshot.currentMessage;
   if (!message) return ambiguous("SOURCE_MESSAGE_MISSING");
   const clock = localClock(message.createdAt, snapshot.timezone);
@@ -57,6 +78,9 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     const resolution = interpretation.optionResolution;
     if (!resolution || !resolution.candidateOptionIds.includes(selected.id) || resolution.candidateOptionIds.some(id => !state.offeredOptions.some(o => o.id === id))) return ambiguous("OPTION_REFERENCE_AMBIGUOUS");
     if (resolution.anchorMessageId && resolution.basis !== "CONTEXT_FOCUS") return ambiguous("OPTION_REFERENCE_BASIS_CONFLICT");
+    // The model contract lists final compatible candidates. Multiple remaining choices are
+    // ambiguous; a simultaneous selected position must not erase that uncertainty.
+    if (resolution.candidateOptionIds.length !== 1) return ambiguous("OPTION_REFERENCE_AMBIGUOUS");
     let candidates = state.offeredOptions.filter(o => resolution.candidateOptionIds.includes(o.id));
     // Apply the model's structured selector to actual records. This resolves no natural language.
     if (resolution.basis === "POSITION" && selection.position !== undefined) candidates = candidates.filter(o => o.position === selection.position);
@@ -91,6 +115,10 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
       if (reference.type === "OPTION" && (!selected || reference.optionId !== selected.id || pending?.field !== entity.key || (entity.normalizedValue ?? entity.value) !== selected.value)) return ambiguous("OPTION_ENTITY_MISMATCH");
       if (reference.type === "HISTORY" && !snapshot.recentMessages.some(m => m.id === reference.messageId && m.id !== message.id && entity.evidence.some(e => e.messageId === m.id))) return ambiguous("HISTORY_REFERENCE_MISSING");
     }
+    // An unchanged, evidenced historical value is already canonical. Do not re-anchor an
+    // old relative date to this message or rewrite its provenance while updating another field.
+    if (entity.source === "CONVERSATION_CONTEXT" && known[entity.key] && entity.kind === known[entity.key]!.kind &&
+        (entity.normalizedValue ?? entity.value) === (known[entity.key]!.normalizedValue ?? known[entity.key]!.value)) continue;
     const fieldKind = ({ preferredDate: "DATE", preferredTime: "TIME" } as Record<string, string>)[entity.key] ?? (known[entity.key]?.kind !== "TEXT" ? known[entity.key]?.kind : undefined);
     // A normalized scalar can arrive labelled TEXT. Promote only through the canonical field's
     // validator, never by interpreting the utterance or inventing a missing normalized value.

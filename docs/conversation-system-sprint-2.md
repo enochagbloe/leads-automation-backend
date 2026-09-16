@@ -6,7 +6,7 @@ Sprint 1 supplies tenant/demo validation, lazy state initialization, revision-ch
 
 Production runtime owns subscription accounting, safety checks, booking/complaint execution, WhatsApp and other effects. Demo has a durable per-message attempt claim, a 50-turn bound, a shared time budget and reply-only safety. Customer memory remains a separate resolver/extraction system. No interpreter code will invoke those workflow effects or promote state to memory.
 
-Existing confidence conventions are `AI_MIN_CONFIDENCE` (default .75) and `AI_AUTO_CONFIRM_MIN_CONFIDENCE` (default .85). The higher threshold will govern semantic mutations; the lower distinguishes uncertain interpretation from low-confidence output. Neither threshold authorizes business actions.
+Existing confidence conventions are `AI_MIN_CONFIDENCE` (default .75) and `AI_AUTO_CONFIRM_MIN_CONFIDENCE` (default .85). Semantic interpretation and state mutations use AI_MIN_CONFIDENCE. The auto-confirm threshold belongs only to consequential appointment authorization, alongside its existing permissions and operational safeguards.
 
 Sprint 1 stores options but has no option-issued timestamp; activity updates alone cannot establish freshness. Add an issuance timestamp maintained only by explicit option changes. Add a scoped interpretation receipt so replay after later state changes returns the original interpretation without another semantic update.
 
@@ -61,7 +61,7 @@ FIELD resolution requires a validated entity for the actual pending field. CONFI
 
 ## Confidence, commands, transactions and replay
 
-The semantic threshold is `max(AI_MIN_CONFIDENCE, AI_AUTO_CONFIRM_MIN_CONFIDENCE)`, normally .85. Overall and relevant entity/selection/confirmation confidences must meet it. Medium results are retained for clarification, low results do not mutate semantic state, and unknown/ambiguous results carry a reason code. A high component score does not bypass a low overall score.
+The semantic threshold is `AI_MIN_CONFIDENCE`, normally .75. Overall and relevant entity/selection/confirmation confidences must meet it. Below-threshold results do not mutate semantic state and are retained for clarification; unknown/ambiguous results carry a reason code. Appointment auto-confirmation still separately requires `AI_AUTO_CONFIRM_MIN_CONFIDENCE`, normally .85. A high component score does not bypass a low overall score.
 
 `conversationInterpretationCommandService.apply({ businessId, conversationId, demoSessionId?, sourceMessageId, snapshotRevision, interpretation })` parses the result, validates tenant/demo ownership and reloads the canonical CUSTOMER/INBOUND source and recent evidence. It locks the state row and checks the snapshot revision. The pure policy builds bounded SET_ENTITY, CLEAR_AWAITING, SET_WORKFLOW and SET_INTENT commands, then one validated Sprint 1 patch commits all changes atomically. A failed entity, receipt insert or revision check cannot leave a partially applied batch. No provider call occurs in this transaction.
 

@@ -1,9 +1,14 @@
+import { optionsAreFresh } from "./conversation-interpretation-policy";
 import { ConversationPlan } from "./conversation-plan.schema";
 import { StateData } from "./conversation-state.schema";
 import { ConversationResponse, conversationResponseSchema, WorkflowExecutionResult, workflowExecutionResultSchema } from "./conversation-response.schema";
 export type ResponseFact = { id: string; value: string };
 export type ResponsePolicyInput = { plan: ConversationPlan; state: StateData; recentMessages: Array<{ senderType: string; text: string }>; trustedWorkflowResult?: WorkflowExecutionResult; facts: ResponseFact[]; existingIssueIds?: string[]; generatedResponse: unknown };
 export const fieldLabels: Record<string, string> = { preferredDate: "day", preferredTime: "time", customerName: "name", customerPhone: "phone number", customerLocation: "location", branch: "branch", service: "service", serviceName: "service", email: "email address" };
+export function clarificationOptions(plan: ConversationPlan, state: StateData) {
+  return plan.move === "ASK_FOR_CLARIFICATION" && optionsAreFresh(state) && state.awaiting?.type === "OPTION_SELECTION" &&
+    (plan.targetField ? plan.targetField === state.awaiting.field : /^(?:OPTION_|OPTIONS_)/.test(plan.reasonCode)) ? state.offeredOptions : [];
+}
 const fieldPatterns: Record<string, RegExp> = { preferredDate: /\b(day|date)\b/i, preferredTime: /\btime\b/i, customerName: /\bname\b/i, customerPhone: /\b(phone|number)\b/i, customerLocation: /\b(location|address)\b/i, branch: /\bbranch\b/i, service: /\bservice\b/i, email: /\bemail\b/i };
 const positiveClaims: Array<[ConversationResponse["claims"][number], RegExp]> = [
   ["APPOINTMENT_CONFIRMED", /\b(?:appointment|booking|visit)\b.{0,35}\b(?:confirmed|booked|scheduled)\b|\b(?:confirmed|booked|scheduled)\b.{0,25}\b(?:appointment|booking|visit)\b/i],
@@ -26,6 +31,8 @@ export const conversationResponsePolicyService = {
     const r = parsed.data; const p = input.plan; const issues = new Set<string>(); const text = r.text ?? "";
     if (r.complaints.length && (p.intent !== "COMPLAINT" || r.complaints.some(c => c.matchedIssueId && !input.existingIssueIds?.includes(c.matchedIssueId)))) issues.add("COMPLAINT_REFERENCE_INVALID");
     if (p.move === "NO_ACTION" ? r.text !== null : !text) issues.add("RESPONSE_PRESENCE_INVALID");
+    // Match the downstream booking safety gate before accepting wording, including negated mentions.
+    if (p.demoSessionId && p.intent === "BOOKING_INTENT" && /confirm(ed|ation)?/i.test(text)) issues.add("BOOKING_CONFIRMATION_WORDING");
     if (r.requiresHumanReview !== p.requiresHumanReview) issues.add("REVIEW_POLICY_MISMATCH");
     if (r.fulfilledPurpose !== p.responseDirective.purpose) issues.add("PURPOSE_MISMATCH");
     const expectedField = ["ASK_FOR_FIELD", "ASK_FOR_OPTION", "ASK_FOR_CLARIFICATION"].includes(p.move) ? p.targetField ?? null : null;
@@ -38,7 +45,8 @@ export const conversationResponsePolicyService = {
     if (!p.responseDirective.askOneQuestion && clauses.length) issues.add("UNPLANNED_QUESTION");
     if (p.move === "ASK_FOR_CLARIFICATION" && /\b(?:I(?: will|'ll)|we(?: will|'ll)) (?:choose|select|go with|use)\b/i.test(text)) issues.add("CLARIFICATION_GUESSES");
     if (expectedField && input.state.knownEntities[expectedField] && p.move === "ASK_FOR_FIELD") issues.add("KNOWN_FIELD_REQUESTED");
-    const options = p.options ?? (p.move === "ASK_FOR_CLARIFICATION" ? input.state.offeredOptions : []);
+    const options = p.options ?? clarificationOptions(p, input.state);
+    if (p.move === "ASK_FOR_CLARIFICATION" && !options.length && /\b(?:options?|choices?|(?:first|second|third|last|other)\s+(?:one|option|choice)|which\s+one)\b/i.test(text)) issues.add("UNGROUNDED_OPTION_CLARIFICATION");
     if (new Set(r.referencedOptionIds).size !== r.referencedOptionIds.length || r.referencedOptionIds.some(id => !options.some(o => o.id === id))) issues.add("OPTION_REFERENCE_INVALID");
     if (p.move === "ASK_FOR_OPTION" && (r.referencedOptionIds.length !== options.length || options.some(o => !r.referencedOptionIds.includes(o.id) || !text.includes(o.label)))) issues.add("OPTIONS_NOT_PRESERVED");
     if (p.move.startsWith("ASK_") && !["service", "serviceName"].includes(expectedField ?? "") && /\b(?:we offer[^.!?]*,|our services include)/i.test(text)) issues.add("UNPLANNED_SERVICE_MENU");
@@ -59,7 +67,7 @@ export const conversationResponsePolicyService = {
     if (/\b(?:ConversationPlan|CREATE_BOOKING_REQUEST|workflow|entity|sourceMessageId|preferredDate|preferredTime|according to the system)\b/i.test(text) || [p.businessId, p.conversationId, p.sourceMessageId].some(id => id.length > 5 && text.includes(id))) issues.add("INTERNAL_TERMINOLOGY");
     if (/thank you for (?:providing|confirming|your response)|please provide (?:the following|your preferred)|your requested entity/i.test(text)) issues.add("FORM_LIKE_LANGUAGE");
     const prior = input.recentMessages.filter(m => m.senderType === "AI" || m.senderType === "STAFF");
-    if (prior.length && /^(?:hello|hi[!,. ]|welcome|good morning)/i.test(text)) issues.add("REPEATED_GREETING");
+    if (prior.length && p.reasonCode !== "CUSTOMER_GREETING" && /^(?:hello|hi[!,. ]|welcome|good morning)/i.test(text)) issues.add("REPEATED_GREETING");
     const opening = text.split(/[.!?]/)[0]?.trim().toLowerCase();
     if (r.acknowledgedContext && opening && opening.length > 12 && prior.slice(-2).some(m => m.text.toLowerCase().startsWith(opening))) issues.add("REPEATED_ACKNOWLEDGEMENT");
     return issues.size ? { valid: false as const, issues: [...issues] } : { valid: true as const, response: r, issues: [] };

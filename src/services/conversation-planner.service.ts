@@ -42,7 +42,12 @@ export const conversationPlannerService = {
     };
     // Safety, ambiguity, explicit intent, interruptions, lifecycle, provider requirements.
     if (context.conversation.humanTakeover || context.conversation.status === "NEEDS_HUMAN_REVIEW" || context.planCapabilities?.aiReplies === false) return finish("NO_ACTION", "HUMAN_OR_POLICY_CONTROL", "WAIT", { requiresHumanReview: true });
-    if (meaning.needsClarification) return finish("ASK_FOR_CLARIFICATION", meaning.clarificationReason ?? "INTERPRETATION_AMBIGUOUS", "CLARIFY");
+    if (meaning.needsClarification) {
+      // Ask about one explicitly evidenced uncertain temporal value, without applying it to state.
+      const uncertain = meaning.resolvedEntities.filter(e => ["preferredDate", "preferredTime"].includes(e.key) && e.certainty !== "EXACT" && e.evidence.some(q => q.messageId === snapshot.currentMessage?.id && snapshot.currentMessage.text.includes(q.quote)));
+      return finish("ASK_FOR_CLARIFICATION", meaning.clarificationReason ?? "INTERPRETATION_AMBIGUOUS", "CLARIFY", uncertain.length === 1 ? { targetField: uncertain[0]!.key } : {});
+    }
+    if (meaning.intent === "GENERAL_QUESTION" && meaning.conversationAct === "GREETING") return finish("ANSWER", "CUSTOMER_GREETING", "ANSWER_CUSTOMER", { responseDirective: { acknowledgeContext: false, askOneQuestion: true, purpose: "ANSWER_CUSTOMER" } });
     if (meaning.intent === "HUMAN_REQUEST") return finish("REQUEST_HUMAN", "CUSTOMER_REQUESTED_HUMAN", "HANDOFF", { requiresHumanReview: !context.demoSessionId });
     if (meaning.intent === "COMPLAINT") return finish("REQUEST_HUMAN", "EXISTING_COMPLAINT_POLICY", "HANDOFF", { requiresHumanReview: !context.demoSessionId });
     const interrupted = meaning.topicShift?.detected || ["GENERAL_QUESTION", "SERVICE_INQUIRY", "PRICING_INQUIRY", "AVAILABILITY_INQUIRY", "PAYMENT_QUESTION"].includes(meaning.intent);
