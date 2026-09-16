@@ -1,3 +1,4 @@
+import { AppError } from "../src/utils/errors";
 import { responseOutput } from "./helpers/response-output";
 import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import { conversationStateService } from "../src/services/conversation-state.service";
@@ -429,4 +430,22 @@ test("shared provider receives fresh workflow, pending option and precedence ins
   assert.match(serialized, /14:00/);
   assert.match(serialized, /The second one/);
   assert.match(serialized, /current customer message, current conversation state, recent message history, customer memory, business knowledge/);
+});
+
+
+test("demo failures expose safe cause codes without leaking internal error context", async t => {
+  const f = fixture(t); f.add();
+  const logs: unknown[] = [];
+  mockMethod(t, console, "warn", (...args: unknown[]) => { logs.push(args); });
+  mockMethod(t, conversationInterpreterService, "interpret", async () => {
+    throw new AppError(503, "private SQL and tokens", "CONVERSATION_DATABASE_UNAVAILABLE", { databaseCode: "P2028", secret: "private SQL and tokens" });
+  });
+  await assert.rejects(processLatestDemoReply(actor), (error: any) => {
+    assert.equal(error.code, "DEMO_AI_UNAVAILABLE");
+    assert.deepEqual(error.context, { reason: "CONVERSATION_DATABASE_UNAVAILABLE", databaseCode: "P2028" });
+    return true;
+  });
+  assert.ok(!JSON.stringify(logs).includes("private SQL"));
+  assert.equal(f.rows.filter(r => r.senderType === "CUSTOMER").length, 1);
+  assert.equal(f.rows.filter(r => r.senderType === "AI").length, 0);
 });

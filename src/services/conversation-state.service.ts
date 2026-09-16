@@ -1,3 +1,4 @@
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
@@ -67,7 +68,7 @@ async function mutate(input: StateMutation, operation: string, payload: StatePat
     transition = { revisionBefore: row.revision, revisionAfter: row.revision + 1, changedFields };
     return { ...row, ...next, revision: row.revision + 1, updatedAt: now, lastActivityAt: now };
   };
-  const result = tx ? await run(tx) : await prisma.$transaction(run);
+  const result = tx ? await run(tx) : await prisma.$transaction(run, conversationTransactionOptions());
   // For caller-owned transactions the durable journal is the commit-aware audit.
   if (!tx && transition) console.info("conversation_state.updated", { businessId: input.businessId, conversationId: input.conversationId, ...transition, source: source.source, sourceMessageId: source.sourceMessageId });
   return result;
@@ -83,7 +84,7 @@ export const conversationStateService = {
     const current = await tx.conversationState.findFirstOrThrow({ where: { businessId: scope.businessId, conversationId: scope.conversationId } });
     return mutate({ ...scope, expectedRevision: change?.expectedRevision ?? current.revision, source, sourceMessageId: messageId, sourceEffectId: `message:${messageId}` }, "MESSAGE", change?.patch ?? {}, merge, tx);
   },
-  get(scope: ConversationScope, tx?: Prisma.TransactionClient) { return tx ? initialize(tx, scope) : prisma.$transaction(db => initialize(db, scope)); },
+  get(scope: ConversationScope, tx?: Prisma.TransactionClient) { return tx ? initialize(tx, scope) : prisma.$transaction(db => initialize(db, scope), conversationTransactionOptions()); },
   initialize(scope: ConversationScope, tx?: Prisma.TransactionClient) { return this.get(scope, tx); },
   patch(input: StateMutation, patch: StatePatch, tx?: Prisma.TransactionClient) { return mutate(input, "PATCH", patch, merge, tx); },
   setEntity(input: StateMutation, key: string, entity: z.input<typeof entitySchema>, tx?: Prisma.TransactionClient) {

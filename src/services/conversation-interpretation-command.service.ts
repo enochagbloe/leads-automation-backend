@@ -1,3 +1,4 @@
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
@@ -20,7 +21,7 @@ export const conversationInterpretationCommandService = {
       await source(tx, input);
       const receipt = await tx.conversationInterpretation.findFirst({ where: { businessId: input.businessId, conversationId: input.conversationId, sourceMessageId: input.sourceMessageId } });
       return receipt ? { interpretation: interpretationSchema.parse(receipt.result), appliedRevision: receipt.appliedRevision } : null;
-    });
+    }, conversationTransactionOptions());
   },
   async apply(input: InterpretationScope & { snapshotRevision: number; interpretation: unknown }) {
     z.number().int().nonnegative().parse(input.snapshotRevision);
@@ -40,7 +41,7 @@ export const conversationInterpretationCommandService = {
       const updated = planned.commands.length ? await conversationStateService.patch({ ...input, expectedRevision: input.snapshotRevision, source: "AI_INTERPRETATION", sourceEffectId: `interpretation:v1:${message.id}` }, planned.patch, tx) : state;
       await tx.conversationInterpretation.create({ data: { businessId: input.businessId, conversationId: input.conversationId, sourceMessageId: message.id, snapshotRevision: input.snapshotRevision, appliedRevision: updated.revision, result: planned.interpretation as Prisma.InputJsonObject } });
       return { interpretation: planned.interpretation, appliedRevision: updated.revision, commands: planned.commands, replayed: false };
-    });
+    }, conversationTransactionOptions());
     return result;
   },
 };

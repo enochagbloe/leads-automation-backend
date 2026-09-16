@@ -269,3 +269,21 @@ test("exact multi-turn fixture carries one reason/date/time through options, con
   assert.equal(f.state().knownEntities.reason.value, "painful/shaky tooth"); assert.equal(f.state().knownEntities.preferredDate.normalizedValue, date); assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "15:00");
   assert.deepEqual(Object.keys(f.state().knownEntities).sort(), ["preferredDate", "preferredTime", "reason"]); assert.equal(f.receipts().length, 6);
 });
+
+
+test("database timeout retains a safe diagnostic code and no semantic state changes", async t => {
+  const f = setup(t);
+  const { Prisma } = await import("@prisma/client");
+  const m = await f.add("Hello");
+  mockMethod(t, conversationInterpretationCommandService, "apply", async () => {
+    throw new Prisma.PrismaClientKnownRequestError("private SQL details", { code: "P2028", clientVersion: "6" });
+  });
+  await assert.rejects(f.run(m), (error: any) => {
+    assert.equal(error.code, "CONVERSATION_DATABASE_UNAVAILABLE");
+    assert.equal(error.context.databaseCode, "P2028");
+    assert.ok(!JSON.stringify(error).includes("private SQL"));
+    return true;
+  });
+  assert.equal(f.receipts().length, 0);
+  assert.equal(f.state().revision, 0);
+});

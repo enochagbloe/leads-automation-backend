@@ -204,3 +204,20 @@ test("human takeover after planning blocks the old reply without resetting state
   const f = setup(t); await f.booking(); const p = await f.plan(await f.add("Can I book?")); const before = structuredClone(f.state()); f.human();
   await assert.rejects(f.save(p, "What day?"), (e: any) => e.code === "CONVERSATION_PLAN_CONTROL_CHANGED"); assert.deepEqual(f.state(), before);
 });
+
+
+test("production AI disable after planning still blocks persistence", async t => {
+  const f = setup(t);
+  const p = await f.plan(await f.add("Hello"));
+  f.disableAi();
+  await assert.rejects(f.save(p, "Hello"), (e: any) => e.code === "CONVERSATION_PLAN_CONTROL_CHANGED");
+});
+
+test("demo production automation stays disabled while replies work; takeover still blocks", async t => {
+  const f = setup(t, true);
+  const p = await f.plan(await f.add("Hello"));
+  await f.save(p, "Hello");
+  const next = await f.plan(await f.add("Help"));
+  f.human();
+  await assert.rejects(f.save(next, "Hello"), (e: any) => e.code === "CONVERSATION_PLAN_CONTROL_CHANGED");
+});

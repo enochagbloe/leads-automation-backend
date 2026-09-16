@@ -1,3 +1,5 @@
+import { env } from "../config/env";
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { demoRealtimeService } from "./demo-realtime.service";
 import { Message, Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
@@ -48,7 +50,7 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
     await tx.message.update({ where: { id: customer.id, ...scope }, data: { metadata: { ...metadata(customer), demoAiAttempted: true } } });
     const session = await tx.demoSession.findUniqueOrThrow({ where: { id: actor.demoSessionId }, select: { setupAttemptId: true } });
     return { customer, existing: null, setupAttemptId: session.setupAttemptId };
-  });
+  }, conversationTransactionOptions());
   if (claim.existing) return response(claim.customer, claim.existing);
   const customer = claim.customer;
   await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "STARTED");
@@ -56,8 +58,13 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
     let result;
     try {
       const context = await buildDemoBusinessContext(actor, customer);
-      result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(30_000), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
-    } catch { throw unavailable(); }
+      result = await generateContextReply(context, { businessId: actor.businessId, conversationId: customer.conversationId, messageId: customer.id, maxAttempts: 1, signal: AbortSignal.timeout(env.DEMO_AI_PROCESSING_TIMEOUT_MS), metadata: { channel: "DEMO", source: "INBOUND_MESSAGE", isDemo: true, demoSessionId: actor.demoSessionId } });
+    } catch (error) {
+      const reason = error instanceof AppError && /^[A-Z0-9_]{1,80}$/.test(error.code) ? error.code : "DEMO_AI_INTERNAL_ERROR";
+      const databaseCode = error instanceof AppError && typeof error.context?.databaseCode === "string" && /^P[0-9]{4}$/.test(error.context.databaseCode) ? error.context.databaseCode : undefined;
+      console.warn("demo_ai.failed", { businessId: actor.businessId, conversationId: customer.conversationId, sourceMessageId: customer.id, stage: "RUNTIME", reason, databaseCode });
+      throw new AppError(503, "Demo AI is unavailable for this message", "DEMO_AI_UNAVAILABLE", { reason, ...(databaseCode ? { databaseCode } : {}) });
+    }
     const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true, validatedConversationClarification: result.conversationPlan.move === "ASK_FOR_CLARIFICATION" });
     if (result.fallbackExhausted || !safety.allowed || safety.decision.suggestedAction !== "SEND_REPLY" || safety.decision.requiresHumanReview || !safety.decision.shouldReply || !safety.decision.replyText?.trim()) throw unavailable();
     const ai = await prisma.$transaction(async tx => {
@@ -67,7 +74,7 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
       const stillPresent = await tx.message.findFirst({ where: { id: customer.id, businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, deletedAt: null, senderType: "CUSTOMER", direction: "INBOUND", messageType: "TEXT" } });
       if (!stillPresent) throw unavailable();
       return storeAiReply(tx, { businessId: actor.businessId, conversationId: conversation.id, leadId: lead.id, senderType: "AI", direction: "OUTBOUND", messageType: "TEXT", deliveryStatus: "INTERNAL", readAt: new Date(), content: safety.decision.replyText!.trim(), provider: "DEMO", providerMessageId: customer.id, metadata: { isDemo: true, demoSessionId: actor.demoSessionId, sourceInboundMessageId: customer.id, sourceCustomerMessageId: customer.id, model: result.model } }, "OPEN", { isDemo: true, demoSessionId: actor.demoSessionId }, { demoSessionId: actor.demoSessionId, plan: result.conversationPlan, response: { text: result.validatedResponse.text, metadata: result.conversationResponse } });
-    });
+    }, conversationTransactionOptions());
     logConversationResponsePersisted(ai);
     await demoRealtimeService.message(actor, customer.conversationId, canonical(ai));
     await demoRealtimeService.processing(actor, customer.conversationId, customer.id, "COMPLETED");

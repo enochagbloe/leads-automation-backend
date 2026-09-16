@@ -12,6 +12,8 @@ const credentialKeyId = z.string().regex(/^[A-Za-z0-9_-]+$/).default("primary");
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DEPLOYMENT_ENVIRONMENT: z.enum(STORAGE_ENVIRONMENTS).optional(),
+  CONVERSATION_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().min(5000).max(60000).default(20000),
+  DEMO_AI_PROCESSING_TIMEOUT_MS: z.coerce.number().int().min(30000).max(180000).default(90000),
   DEMO_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   DEMO_SESSION_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(60),
   DEMO_MAX_ACTIVE_SESSIONS_PER_IP: z.coerce.number().int().min(1).max(20).default(3),

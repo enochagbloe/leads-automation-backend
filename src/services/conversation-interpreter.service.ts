@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { interpretationOutputSchema } from "./conversation-interpretation-output";
 import { AppError } from "../utils/errors";
 import { aiProvider, AiCompletionResult } from "./ai-provider.service";
@@ -57,14 +58,14 @@ export const conversationInterpreterService = {
       console.info(result.interpretation.needsClarification ? "conversation_interpretation.ambiguous" : "conversation_interpretation.completed", { ...event, intent: result.interpretation.intent, confidence: result.interpretation.confidence, needsClarification: result.interpretation.needsClarification, resolvedEntityKeys: result.commands.filter(c => c.type === "SET_ENTITY").map(c => c.key), commandCount: result.commands.length });
       return { ...result, usage };
     } catch (error) {
-      console.warn(error instanceof AppError && error.code === "CONVERSATION_STATE_CONFLICT" ? "conversation_interpretation.state_conflict" : "conversation_interpretation.failed", { ...event, code: error instanceof AppError ? error.code : "INTERPRETATION_INVALID" });
+      console.warn(error instanceof AppError && error.code === "CONVERSATION_STATE_CONFLICT" ? "conversation_interpretation.state_conflict" : "conversation_interpretation.failed", { ...event, code: error instanceof AppError || error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "INTERPRETATION_INVALID" });
       const requests = usage?.providerRequestCount ?? (error instanceof AppError && typeof error.context?.providerRequestCount === "number" ? error.context.providerRequestCount : 0);
       const accounting = { requests, tokens: usage?.totalTokens ?? 0 };
       if (error instanceof AppError) {
         error.context = { ...error.context, conversationInterpretationUsage: accounting };
         throw error;
       }
-      throw new AppError(503, "Contextual interpretation unavailable", "CONVERSATION_INTERPRETATION_UNAVAILABLE", { conversationInterpretationUsage: accounting });
+      throw new AppError(503, "Contextual interpretation unavailable", error instanceof Prisma.PrismaClientKnownRequestError ? "CONVERSATION_DATABASE_UNAVAILABLE" : "CONVERSATION_INTERPRETATION_UNAVAILABLE", { conversationInterpretationUsage: accounting, ...(error instanceof Prisma.PrismaClientKnownRequestError ? { databaseCode: error.code } : {}) });
     }
   },
 };

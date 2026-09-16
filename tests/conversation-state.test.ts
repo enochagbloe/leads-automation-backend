@@ -1,3 +1,4 @@
+import { env } from "../src/config/env";
 import { responseOutput } from "./helpers/response-output";
 import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
 import assert from "node:assert/strict";
@@ -143,4 +144,18 @@ test("production runtime loads fresh persisted state after cached business conte
   assert.match(received, /Which branch/); assert.match(received, /East Legon/); assert.match(received, /Preferred branch Tema/);
   assert.match(received, /Explicit current preferences override remembered preferences/);
   assert.equal(cached.conversationSnapshot, undefined);
+});
+
+
+test("state reads, mutations and snapshots use an explicit bounded transaction budget", async t => {
+  const f = fixture(t);
+  await service.get(scope);
+  await service.setActiveWorkflow(command(0, "timeout-budget"), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  await conversationContextService.getSnapshot(scope);
+  assert.equal(f.transactionOptions.length, 3);
+  for (const options of f.transactionOptions) {
+    assert.equal(options.timeout, env.CONVERSATION_TRANSACTION_TIMEOUT_MS);
+    assert.equal(options.maxWait, 10000);
+  }
+  assert.equal(f.transactionOptions[2].isolationLevel, "RepeatableRead");
 });

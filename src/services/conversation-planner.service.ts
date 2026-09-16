@@ -1,3 +1,4 @@
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
@@ -9,11 +10,13 @@ import { optionsAreFresh } from "./conversation-interpretation-policy";
 import { StatePatch } from "./conversation-state.schema";
 
 export async function assertPlanCurrent(plan: ConversationPlan, transaction?: Prisma.TransactionClient): Promise<void> {
-  if (!transaction) return prisma.$transaction(tx => assertPlanCurrent(plan, tx));
+  if (!transaction) return prisma.$transaction(tx => assertPlanCurrent(plan, tx), conversationTransactionOptions());
   const tx = transaction;
   conversationPlanSchema.parse(plan);
   const conversation = await assertConversationScope(tx, plan);
-  if (plan.move !== "NO_ACTION" && (conversation.humanTakeover || conversation.status === "NEEDS_HUMAN_REVIEW" || conversation.aiEnabled === false)) throw new AppError(409, "Conversation control changed; automated plan is no longer eligible", "CONVERSATION_PLAN_CONTROL_CHANGED");
+  // Demo rows intentionally disable production automation. Scope/expiry were validated above.
+  const productionAiDisabled = !plan.demoSessionId && conversation.aiEnabled === false;
+  if (plan.move !== "NO_ACTION" && (conversation.humanTakeover || conversation.status === "NEEDS_HUMAN_REVIEW" || productionAiDisabled)) throw new AppError(409, "Conversation control changed; automated plan is no longer eligible", "CONVERSATION_PLAN_CONTROL_CHANGED");
   const source = await tx.message.findFirst({ where: { id: plan.sourceMessageId, businessId: plan.businessId, conversationId: plan.conversationId, senderType: "CUSTOMER", direction: "INBOUND", deletedAt: null }, select: { id: true } });
   if (!source) throw new AppError(403, "Plan source forbidden", "CONVERSATION_STATE_FORBIDDEN");
   const state = await conversationStateService.get(plan, tx);

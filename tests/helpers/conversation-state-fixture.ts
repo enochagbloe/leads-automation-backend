@@ -16,13 +16,14 @@ export function fixture(t: TestContext) {
   let messages: any[] = [];
   let demoId: string | null = null;
   let active = true;
+  let productionAiEnabled = true;
   let failAudit = false;
   let status = "AI_HANDLING";
   const match = (row: any, where: any): boolean => Object.entries(where).every(([k, v]: [string, any]) => k === "metadata" ? v.path.reduce((o: any, key: string) => o?.[key], row.metadata) === v.equals : k === "OR" ? v.some((w: any) => match(row, w)) : v && typeof v === "object" && !(v instanceof Date) ? v.in ? v.in.includes(row[k]) : v.lt !== undefined ? row[k] < v.lt : v.lte !== undefined ? row[k] <= v.lte : true : v instanceof Date ? +row[k] === +v : row[k] === v);
   const tx: any = {
     $queryRaw: async () => [],
     conversation: {
-      findFirst: async ({ where }: any) => where.id === scope.conversationId && where.businessId === scope.businessId ? { id: scope.conversationId, status, humanTakeover: status === "HUMAN_HANDLING", aiEnabled: true, channel: demoId ? "DEMO" : "WHATSAPP", business: { demoSessionId: demoId, timezone } } : null,
+      findFirst: async ({ where }: any) => where.id === scope.conversationId && where.businessId === scope.businessId ? { id: scope.conversationId, status, humanTakeover: status === "HUMAN_HANDLING", aiEnabled: demoId ? false : productionAiEnabled, channel: demoId ? "DEMO" : "WHATSAPP", business: { demoSessionId: demoId, timezone } } : null,
       update: async () => ({ id: scope.conversationId, status }),
     },
     demoSession: { findFirst: async ({ where }: any) => active && where.id === demoId && where.business.id === scope.businessId ? { id: demoId } : null },
@@ -47,13 +48,15 @@ export function fixture(t: TestContext) {
     },
     leadActivity: { create: async () => ({}) },
   };
+  const transactionOptions: any[] = [];
   let queue = Promise.resolve();
-  mockMethod(t, prisma, "$transaction", (fn: any) => {
+  mockMethod(t, prisma, "$transaction", (fn: any, options?: any) => {
+    transactionOptions.push(options);
     const run = queue.then(async () => {
       const old = structuredClone({ state, effects, messages, receipts });
       try { return await fn(tx); } catch (error) { ({ state, effects, messages, receipts } = old); throw error; }
     });
     queue = run.then(() => {}, () => {}); return run;
   });
-  return { tx, logs, setTimezone: (value: string) => { timezone = value; }, receipts: () => receipts, state: () => state, effects: () => effects, messages: () => messages, demo: () => { demoId = "demo-a"; }, expire: () => { active = false; }, fail: () => { failAudit = true; }, human: () => { status = "HUMAN_HANDLING"; }, add: async (content: string, senderType = "CUSTOMER") => tx.message.create({ data: { ...scope, content, senderType, direction: senderType === "CUSTOMER" ? "INBOUND" : "OUTBOUND", createdAt: new Date(Date.now() + messages.length * 1000) } }) };
+  return { tx, logs, transactionOptions, disableAi: () => { productionAiEnabled = false; }, setTimezone: (value: string) => { timezone = value; }, receipts: () => receipts, state: () => state, effects: () => effects, messages: () => messages, demo: () => { demoId = "demo-a"; }, expire: () => { active = false; }, fail: () => { failAudit = true; }, human: () => { status = "HUMAN_HANDLING"; }, add: async (content: string, senderType = "CUSTOMER") => tx.message.create({ data: { ...scope, content, senderType, direction: senderType === "CUSTOMER" ? "INBOUND" : "OUTBOUND", createdAt: new Date(Date.now() + messages.length * 1000) } }) };
 }

@@ -1,3 +1,4 @@
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { ConversationPlan } from "./conversation-plan.schema";
 import { assertPlanCurrent } from "./conversation-planner.service";
 import { missingAiBookingFields } from "./appointment/appointment-conversation-requirements";
@@ -996,7 +997,7 @@ export const aiReplyEngine = {
                 claims: bookingAppointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [],
               } : providerResult!.trustedWorkflowResult,
             }),
-          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }));
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }), conversationTransactionOptions());
 
       logConversationResponsePersisted(aiMessage);
       if (conversation.channel === ConversationChannel.WHATSAPP) {

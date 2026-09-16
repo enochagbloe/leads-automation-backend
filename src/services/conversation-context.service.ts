@@ -1,3 +1,4 @@
+import { conversationTransactionOptions } from "./conversation-transaction";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { env } from "../config/env";
@@ -23,7 +24,7 @@ export const conversationContextService = {
             recentMessages: rows.reverse().map(m => ({ id: m.id, text: m.content.slice(0, 2000), senderType: m.senderType, direction: m.direction, createdAt: m.createdAt.toISOString() })),
             customerMemorySummary: input.demoSessionId ? null : input.customerMemorySummary?.slice(0, 4000) ?? null,
           };
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+        }, { ...conversationTransactionOptions(), isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
       } catch (error) {
         // Concurrent lazy initialization can abort a repeatable-read snapshot.
         if (attempt >= 2 || !(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2034") throw error;
