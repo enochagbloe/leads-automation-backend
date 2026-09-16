@@ -206,7 +206,7 @@ test("exact dental sequence validates visible replies and preserves interrupted 
 });
 
 test("invalid factual answers fail after two attempts without inventing a template answer", async t => {
-  const f = await prepared(t); const input = { ...f.input, interpretation: meaning({ intent: "PRICING_INQUIRY" }) }; f.context.conversationPlan = await planner.plan(input); let calls = 0;
+  const f = await prepared(t); const input = { ...f.input, interpretation: meaning({ intent: "GENERAL_QUESTION" }) }; f.context.conversationPlan = await planner.plan(input); let calls = 0;
   mockMethod(t, aiProvider, "generateReply", async () => { calls++; return { rawText: "not JSON", providerRequestCount: 1, totalTokens: 3 } as any; });
   await assert.rejects(f.run(), (e: any) => e.code === "CONVERSATION_RESPONSE_INVALID" && e.context.conversationResponseUsage.requests === 2 && e.context.conversationResponseUsage.tokens === 6); assert.equal(calls, 2); assert.equal(f.messages().length, 1);
 });
@@ -265,4 +265,35 @@ test("perfect wording confidence cannot override ambiguous interpretation or pla
   assert.equal(result.parsedDecision.suggestedAction, "SEND_REPLY"); assert.deepEqual(f.state(), before);
   const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, validatedConversationClarification: true, minConfidence: .8 });
   assert.equal(safety.allowed, false); assert.equal(safety.status, "BLOCKED_LOW_CONFIDENCE");
+});
+
+test("unknown pricing falls back after two invalid outputs and preserves pending booking", async t => {
+  const f = await prepared(t); await state.setAwaiting(f.command(), { type: "FIELD", field: "preferredDate" });
+  const snapshot = await conversationContextService.getSnapshot({ ...scope, messageId: f.m.id });
+  const plan = await planner.plan({ ...f.input, conversationSnapshot: snapshot, interpretation: meaning({ intent: "PRICING_INQUIRY" }) });
+  f.context.conversationPlan = plan; f.context.conversationSnapshot = snapshot; let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async () => { calls++; return { rawText: "invalid JSON", providerRequestCount: 1 } as any; });
+  const r = await f.run(); assert.equal(calls, 2); assert.equal(r.conversationResponse.source, "PLAN_FALLBACK");
+  assert.equal(r.validatedResponse.text, "I don't have a confirmed price for that right now.");
+  assert.equal(r.validatedResponse.askedField, null); assert.deepEqual(r.validatedResponse.claims, []);
+  assert.equal(r.parsedDecision.confidence, plan.confidence);
+  await prisma.$transaction(tx => storeAiReply(tx, { ...scope, leadId: "lead-a", senderType: "AI", direction: "OUTBOUND", content: r.validatedResponse.text!, messageType: "TEXT", deliveryStatus: "INTERNAL" }, "AI_HANDLING", {}, { plan, response: { text: r.validatedResponse.text, metadata: r.conversationResponse } }));
+  assert.equal(f.state().awaiting.field, "preferredDate"); assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING");
+});
+for (const priceType of ["FIXED", "FREE"] as const) test(`${priceType} price prevents the unknown-price fallback`, async t => {
+  const f = await prepared(t); f.context.services = [{ ...f.context.services[0]!, basePrice: priceType === "FREE" ? null : 300, currency: "GHS", priceType }];
+  f.context.conversationPlan = await planner.plan({ ...f.input, interpretation: meaning({ intent: "PRICING_INQUIRY" }) });
+  mockMethod(t, aiProvider, "generateReply", async () => ({ rawText: "invalid JSON", providerRequestCount: 1 }) as any);
+  await assert.rejects(f.run(), { code: "CONVERSATION_RESPONSE_INVALID" });
+});
+test("clarification without a target requires null askedField despite a pending field", async t => {
+  const f = await prepared(t); await state.setAwaiting(f.command(), { type: "FIELD", field: "preferredDate" });
+  const snapshot = await conversationContextService.getSnapshot({ ...scope, messageId: f.m.id });
+  const plan = await planner.plan({ ...f.input, conversationSnapshot: snapshot, interpretation: meaning({ needsClarification: true, clarificationReason: "OPTION_REFERENCE_AMBIGUOUS" }) });
+  f.context.conversationPlan = plan; f.context.conversationSnapshot = snapshot; let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (input: any) => {
+    assert.match(input.systemPrompt, /askedField MUST be JSON null/);
+    return { rawText: JSON.stringify({ ...responseOutput(input), askedField: ++calls === 1 ? "preferredDate" : null }), providerRequestCount: 1 } as any;
+  });
+  const r = await f.run(); assert.equal(calls, 2); assert.equal(r.validatedResponse.askedField, null); assert.equal(r.conversationResponse.fallbackUsed, false);
 });

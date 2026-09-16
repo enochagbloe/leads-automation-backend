@@ -2,12 +2,12 @@ import { aiProvider, AiGenerateReplyInput, AiGenerateReplyResult } from "./ai-pr
 import { AiBusinessContext, aiPromptContextFormatter } from "./ai-context-builder.service";
 import { AiReplyDecision } from "./ai-decision-parser.service";
 import { ConversationResponse, responseOutputSchema, ResponseValidationMetadata, WorkflowExecutionResult } from "./conversation-response.schema";
-import { conversationResponsePolicyService, fieldLabels, ResponseFact } from "./conversation-response-policy.service";
+import { conversationResponsePolicyService, fieldLabels, hasGroundedPrice, ResponseFact } from "./conversation-response-policy.service";
 import { assertPlanCurrent } from "./conversation-planner.service";
 import { AppError } from "../utils/errors";
 
 export const naturalResponsePrompt = `You verbalize a supplied ConversationPlan, the authoritative next conversational move. You do not interpret intent, select a workflow, execute actions or choose the next requirement.
-Return only the structured response schema. complaints is normally empty. Only when the canonical plan intent is COMPLAINT, preserve existing issue extraction: bounded category, severity, summary, matching against supplied existing issue IDs, and internal-action needs; this never authorizes routing or changes intent. Do not return intent, suggestedAction, appointmentIntent or arbitrary state. fulfilledPurpose must equal the plan purpose; askedField is the exact planned target or null. questionCount counts logical requests, including requests without question marks. Never hide multiple requests in one question. For ANSWER do not append a pending workflow question.
+Return only the structured response schema. complaints is normally empty. Only when the canonical plan intent is COMPLAINT, preserve existing issue extraction: bounded category, severity, summary, matching against supplied existing issue IDs, and internal-action needs; this never authorizes routing or changes intent. Do not return intent, suggestedAction, appointmentIntent or arbitrary state. fulfilledPurpose must equal the plan purpose; askedField is the exact planned target or null. For ASK_FOR_CLARIFICATION, when plan.targetField is absent, askedField MUST be JSON null. Never infer askedField from state.awaiting.field, options, or the active workflow; clarify the reference conversationally while keeping askedField null. This does NOT mean text is null: every move except NO_ACTION requires non-empty customer-facing text. For untargeted clarification, return text such as "Which option do you mean?" together with askedField: null and questionCount: 1. Never suppress a clarification because the customer meaning is ambiguous. questionCount counts logical requests, including requests without question marks. Never hide multiple requests in one question. For ANSWER do not append a pending workflow question.
 Use 1-3 short sentences by default. Sound calm, direct, conversational and professional. Use the business tone setting without changing facts or permissions. Same conversational quality for all tiers. No default emojis, repeated greetings, service menus, mechanical thanks or repeated sympathy. Avoid 'Thank you for providing', 'Please provide your preferred', 'According to the system', workflow jargon and internal identifiers.
 Acknowledge meaningful context briefly when useful, not on every turn. Do not ask for known information. Use corrected active values; do not describe old values as current. Ask exactly one logical question when the plan requests one. Don't mention every known fact.
 Only supplied options may be offered; preserve all labels and exact IDs in metadata, never show IDs in text. For clarification do not choose a default. A planned request is not a successful outcome. Never claim a booking, payment, refund, handoff, assignment or availability unless the scoped trustedWorkflowResult explicitly supports that claim. NOT_EXECUTED, REQUESTED and FAILED do not prove success.
@@ -24,7 +24,7 @@ export function responseFacts(context: AiBusinessContext): ResponseFact[] {
   }
   return facts.slice(0, 30);
 }
-export function fallbackResponse(context: AiBusinessContext): ConversationResponse | null {
+export function fallbackResponse(context: AiBusinessContext, facts = responseFacts(context)): ConversationResponse | null {
   const p = context.conversationPlan!;
   let text: string | null = null;
   if (p.move === "NO_ACTION") text = null;
@@ -33,6 +33,7 @@ export function fallbackResponse(context: AiBusinessContext): ConversationRespon
   else if (p.move === "ASK_FOR_CONFIRMATION") text = "Would you like to continue with these details?";
   else if (p.move === "ASK_FOR_OPTION") text = `${p.options!.map(o => o.label).join(", ")}. Which option works best for you?`;
   else if (p.move === "WAIT_FOR_SYSTEM") text = "One moment while I check.";
+  else if (p.move === "ANSWER" && p.intent === "PRICING_INQUIRY" && !hasGroundedPrice(facts)) text = "I don't have a confirmed price for that right now.";
   else return null;
   return { complaints: [], text, fulfilledPurpose: p.responseDirective.purpose, acknowledgedContext: false, askedField: ["ASK_FOR_FIELD", "ASK_FOR_OPTION", "ASK_FOR_CLARIFICATION"].includes(p.move) ? p.targetField ?? null : null, questionCount: p.responseDirective.askOneQuestion ? 1 : 0, referencedOptionIds: p.options?.map(o => o.id) ?? [], referencedFactIds: [], claimsActionCompleted: false, claims: [], confidence: 1, requiresHumanReview: p.requiresHumanReview };
 }
@@ -69,7 +70,7 @@ export const conversationResponseService = {
       console.warn("conversation_response.validation_failed", { ...event, validationOutcome: correction, regenerationCount: attempt });
       if (!attempt) console.info("conversation_response.regenerated", { ...event, regenerationCount: 1 });
     }
-    const fallback = fallbackResponse(context);
+    const fallback = fallbackResponse(context, facts);
     if (fallback && conversationResponsePolicyService.validate({ plan, state: snapshot.state, recentMessages: snapshot.recentMessages, facts, existingIssueIds: context.existingCustomerIssues.map(i => i.id), trustedWorkflowResult, generatedResponse: fallback }).valid) { await assertPlanCurrent(plan); return finish(fallback, 1, true); }
     throw new AppError(503, "No valid response could be generated", "CONVERSATION_RESPONSE_INVALID");
     } catch (error) {

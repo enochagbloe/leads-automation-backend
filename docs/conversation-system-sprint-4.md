@@ -130,7 +130,7 @@ Follow-up verification: `pnpm typecheck`, `pnpm typecheck:tests` and `pnpm build
 
 ### Live response smoke evaluation
 
-Opt in with `RUN_CONVERSATION_RESPONSE_LIVE_TESTS=true` and run `npx tsx --test tests/conversation-response.live.test.ts`. This uses the configured paid provider with synthetic inputs, an in-memory database and no customer/production side effects. Each of six cases permits the existing single corrective retry; fallback counts as a quality failure rather than a generated-response success. These are response-stage smoke cases, not an end-to-end interpreter or PostgreSQL evaluation.
+Opt in with `RUN_CONVERSATION_RESPONSE_LIVE_TESTS=true` and run `npx tsx --test tests/conversation-response.live.test.ts`. This uses the configured paid provider with synthetic inputs, an in-memory database and no customer/production side effects. Each of six cases permits the existing single corrective retry. In this initial evaluation, fallback counted as a quality failure rather than a generated-response success; Sprint 4.1 below explicitly allows the requested safe unknown-price fallback. These are response-stage smoke cases, not an end-to-end interpreter or PostgreSQL evaluation.
 
 Run on 2026-09-15 with `openai/gpt-4o-mini`: **4 passed, 2 failed quality expectations**, eight response requests total.
 
@@ -144,3 +144,23 @@ Run on 2026-09-15 with `openai/gpt-4o-mini`: **4 passed, 2 failed quality expect
 | Unknown price | Two invalid generations; `CONVERSATION_RESPONSE_INVALID`, no generated reply; quality test failed |
 
 The confidence wiring correction is independent of these quality findings. No validator rules were relaxed to make the live run green. Clarification and unknown-price model adherence need follow-up before claiming consistently natural live responses. Real PostgreSQL concurrency testing remains outstanding on a disposable database.
+
+## Sprint 4.1 — clarification and unknown pricing
+
+The response prompt now explicitly requires JSON `null` for `askedField` when an `ASK_FOR_CLARIFICATION` plan has no `targetField`. It separately requires non-empty reply text: null field metadata does not suppress the clarification question. The model must not infer a target from the pending expectation, options or workflow. The existing validator still rejects a fabricated target; no policy restriction was loosened.
+
+After two invalid generations, an `ANSWER` plan with canonical intent `PRICING_INQUIRY` and no grounded price fact can use this exact safe fallback:
+
+> I don't have a confirmed price for that right now.
+
+Grounded price recognition reuses the validator's currency/amount recognition over the governed response facts and recognizes explicit free-price facts. It is deliberately conservative: a price fact anywhere in that bounded context prevents this fallback, rather than guessing which service the customer meant. A known price, another answer intent, or provider/network failure does not select this fallback. It asserts no amount, performs no action, asks no new question and preserves any interrupted workflow. It passes the same response validator and existing atomic persistence path, with `PLAN_FALLBACK` metadata and semantic confidence from the plan.
+
+Four added regressions cover untargeted clarification despite a pending field, fixed/free price exclusion, and unknown-price fallback with preserved booking state. The opt-in live suite accepts the explicit unknown-price fallback as a usable response, while still requiring generated wording for clarification and the other scenarios. Its diagnostics continue to distinguish generated wording from fallback; this is not a claim that fallback is a successful model generation.
+
+### Sprint 4.1 live result — 2026-09-16
+
+All six isolated live cases passed on `openai/gpt-4o-mini`, using seven response requests in the final run. Pending date, corrected time, options, clarification and confirmation each passed on their first model attempt. Clarification generated “Which option do you mean?” with `askedField: null`. Unknown-price used the exact safe fallback after two generations violated the field/question constraints; it is a successful safe response, not a successful model generation. No production database or business effects were used.
+
+Diagnostics from the earlier targeted clarification run showed `RESPONSE_PRESENCE_INVALID` and `QUESTION_MISSING`: the model was returning null reply text. Explicitly distinguishing required text from null `askedField` resolved this in the final smoke run. Provider nondeterminism remains a limitation; the fallback and validator remain necessary.
+
+Sprint 4.1 verification: `pnpm test:conversation-response` passed 51 tests; `pnpm test:demo` passed 73 with 6 database integration tests skipped. `pnpm typecheck`, `pnpm typecheck:tests`, and `pnpm build` all exited successfully. The final opt-in six-case live run passed all six with five generated replies and one explicit unknown-price fallback.

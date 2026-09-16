@@ -11,6 +11,7 @@ import type { AiBusinessContext } from "../src/services/ai-context-builder.servi
 const live = process.env.RUN_CONVERSATION_RESPONSE_LIVE_TESTS === "true" ? test : test.skip;
 for (const scenario of ["pending-date", "corrected-time", "options", "clarification", "confirmation", "unknown-price"]) live(`live response: ${scenario}`, { timeout: 60000 }, async t => {
   const f = fixture(t); let sequence = 0;
+  t.after(() => { for (const log of f.logs.filter(entry => entry[0] === "conversation_response.validation_failed")) t.diagnostic(JSON.stringify(log)); });
   const command = () => ({ ...scope, expectedRevision: f.state()?.revision ?? 0, source: "WORKFLOW" as const, sourceEffectId: `response-live:${++sequence}` });
   await state.setActiveWorkflow(command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
   await state.setEntity(command(), "preferredTime", { kind: "TIME", value: "2 PM", normalizedValue: "14:00" });
@@ -35,7 +36,11 @@ for (const scenario of ["pending-date", "corrected-time", "options", "clarificat
   const result = await conversationResponseService.generate({ ...context, conversationPlan: plan, conversationSnapshot: snapshot }, { ...scope, messageId: message.id, signal: AbortSignal.timeout(45000), temperature: 0, maxTokens: 700 });
   // Synthetic fixture text is intentionally visible for manual wording review; production logs omit bodies.
   t.diagnostic(JSON.stringify({ scenario, model: result.model, text: result.validatedResponse.text, requests: result.providerRequestCount, fallback: result.conversationResponse.fallbackUsed, responseConfidence: result.validatedResponse.confidence, semanticConfidence: result.parsedDecision.confidence }));
-  assert.equal(result.conversationResponse.fallbackUsed, false, "smoke success must be generated wording, not a template");
+  if (scenario === "unknown-price" && result.conversationResponse.fallbackUsed) {
+    assert.equal(result.validatedResponse.text, "I don't have a confirmed price for that right now.");
+    assert.equal(result.conversationResponse.source, "PLAN_FALLBACK");
+  } else assert.equal(result.conversationResponse.fallbackUsed, false, "other smoke cases require generated wording");
+  if (scenario === "clarification") assert.equal(result.validatedResponse.askedField, null);
   assert.equal(result.parsedDecision.confidence, .96);
   assert.equal(f.state().revision, snapshot.state.revision);
   assert.ok(result.validatedResponse.text && result.validatedResponse.text.length < 400);

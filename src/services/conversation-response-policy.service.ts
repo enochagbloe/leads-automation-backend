@@ -17,6 +17,8 @@ const amounts = (text: string) => [...text.matchAll(/(GH₵|GHS|USD|GBP|EUR|[$£
   const currency = ({ "GH₵": "GHS", "$": "USD", "£": "GBP", "€": "EUR" } as Record<string, string>)[m[1]!.toUpperCase()] ?? m[1]!.toUpperCase();
   return `${currency}:${m[2]!.replace(/,/g, "")}`;
 });
+// Use the same grounded-price recognition as response validation; do not infer missing prices.
+export const hasGroundedPrice = (facts: ResponseFact[]) => facts.some(f => amounts(f.value).length > 0 || /"(?:pricing|price)"\s*:\s*"free\.?"/i.test(f.value));
 export const conversationResponsePolicyService = {
   validate(input: ResponsePolicyInput) {
     const parsed = conversationResponseSchema.safeParse(input.generatedResponse);
