@@ -157,13 +157,15 @@ for (const status of ["READY", "READY_PARTIAL"]) test(`${status}: real prompt/pr
 test("normalized null prices, durations, empty hours and policies remain unknown in actual runtime envelope", async t => {
   const f = fixture(t); const context = await buildDemoBusinessContext(actor, f.add() as any);
   const formatted = JSON.parse(aiPromptContextFormatter.format(context));
-  const data = formatted.sections.temporaryDemoFacts.data;
-  assert.equal(data.facts.services[1].price, null); assert.equal(data.facts.services[1].duration, null);
-  assert.deepEqual(data.facts.openingHours, []); assert.deepEqual(data.facts.policies, []);
+  const catalog = formatted.sections.serviceCatalog.data;
+  assert.equal(context.services[1]!.priceDescription, null); assert.equal(context.services[1]!.durationText, null);
+  assert.match(catalog[1].pricing, /Price not set/);
+  assert.equal(formatted.sections.availability.data, null); assert.deepEqual(formatted.sections.customerFacingPolicies.data, []);
+  assert.equal(formatted.sections.temporaryDemoFacts, undefined);
   const prompt = aiPromptContextFormatter.buildSystemPrompt(context);
   assert.match(prompt, /Null or absent prices, hours, durations and policies are unknown/);
   assert.doesNotMatch(prompt, /CREATE_BOOKING_REQUEST|REQUEST_HUMAN_REVIEW|Complaint case matching|complaints\[\]/);
-  const production = aiPromptContextFormatter.buildSystemPrompt({ ...context, demoFacts: undefined });
+  const production = aiPromptContextFormatter.buildSystemPrompt({ ...context, demoFacts: undefined, demoSessionId: undefined });
   assert.match(production, /use suggestedAction CREATE_BOOKING_REQUEST/); assert.match(production, /Complaint case matching is required/);
   assert.match(production, /Request human review when uncertain/);
 });

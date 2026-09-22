@@ -104,3 +104,11 @@ test("removing a resolved guard restores canonical pricing on a fresh context", 
   assert.equal(redactGuardedServicePricing(original, []).basePrice, 487);
   assert.equal(redactGuardedContextPricing(context([original], [])).safetyInstructions.canAnswerPricingQuestions, true);
 });
+
+
+test("website price text cannot bypass a canonical pricing guard", () => {
+  const input = context([service({ source: "WEBSITE", priceType: undefined, basePrice: null, priceDescription: "GHS 487" })], [guard()]);
+  const formatted = aiPromptContextFormatter.format(input);
+  assert.doesNotMatch(formatted, /487/);
+  assert.equal(JSON.parse(formatted).sections.capabilities.data.canAnswerPricingQuestions, false);
+});

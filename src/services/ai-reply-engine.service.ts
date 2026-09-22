@@ -1,3 +1,4 @@
+import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import { conversationTransactionOptions } from "./conversation-transaction";
 import { ConversationPlan } from "./conversation-plan.schema";
 import { assertPlanCurrent } from "./conversation-planner.service";
@@ -226,7 +227,7 @@ function normalizeName(value?: string | null) {
 
 function resolveAiBookingLocationType(service: AiBusinessContext["services"][number], requested?: AppointmentLocationType) {
   if (service.defaultLocationType) return service.defaultLocationType;
-  if (!service.allowAiToChooseLocationType) return AppointmentLocationType.TO_BE_CONFIRMED;
+  if (!service.allowAiToChooseLocationType || !service.allowedLocationTypes) return AppointmentLocationType.TO_BE_CONFIRMED;
   if (
     requested
     && requested !== AppointmentLocationType.TO_BE_CONFIRMED
@@ -714,16 +715,17 @@ export const aiReplyEngine = {
       select: { id: true },
     });
 
+    const timing = new ConversationRuntimeTiming();
     let providerResult: Awaited<ReturnType<typeof generateContextReply>> | null = null;
     try {
-      const context = await aiBusinessContextService.buildBusinessContextForAi({
+      const context = await timing.measure("contextBuildMs", () => aiBusinessContextService.buildBusinessContextForAi({
         businessId: conversation.businessId,
         conversationId: conversation.id,
         messageId: message.id,
         plan: usage.subscription.plan.code,
         maxMessages: env.AI_MAX_CONTEXT_MESSAGES,
         maxContextTokens: env.AI_MAX_BUSINESS_CONTEXT_TOKENS,
-      });
+      }));
       const providerInput = {
         businessId: conversation.businessId,
         conversationId: conversation.id,
@@ -734,7 +736,7 @@ export const aiReplyEngine = {
           source: "INBOUND_MESSAGE" as const,
         },
       };
-      providerResult = await generateContextReply(context, providerInput);
+      providerResult = await generateContextReply(context, providerInput, timing);
       await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens, requests: providerResult.providerRequestCount });
       if (providerResult.fallbackExhausted) {
         const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
@@ -856,15 +858,15 @@ export const aiReplyEngine = {
       let successStatus: AiExecutionStatus = "SUCCESS_AUTO_REPLIED";
       if (safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
         try {
-          bookingAppointment = await createAiBookingRequest({
-            conversationPlan: providerResult.conversationPlan,
+          bookingAppointment = await timing.measure("workflowMs", () => createAiBookingRequest({
+            conversationPlan: providerResult!.conversationPlan,
             context,
             businessAccountId: conversation.business.businessAccountId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
             messageId: message.id,
             decision: safety.decision,
-          });
+          }));
           bookingRequestCreated = true;
           successStatus = "SUCCESS_BOOKING_REQUEST_CREATED";
           replyText = bookingAppointment.status === AppointmentStatus.CONFIRMED
@@ -966,7 +968,7 @@ export const aiReplyEngine = {
       let providerMessageId: string | null = null;
       let sendError: string | null = null;
 
-      const aiMessage = await prisma.$transaction(tx => storeAiReply(tx, {
+      const aiMessage = await timing.measure("persistenceMs", () => prisma.$transaction(tx => storeAiReply(tx, {
             businessId: conversation.businessId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
@@ -997,7 +999,7 @@ export const aiReplyEngine = {
                 claims: bookingAppointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [],
               } : providerResult!.trustedWorkflowResult,
             }),
-          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }), conversationTransactionOptions());
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }), conversationTransactionOptions()));
 
       logConversationResponsePersisted(aiMessage);
       if (conversation.channel === ConversationChannel.WHATSAPP) {
@@ -1161,6 +1163,8 @@ export const aiReplyEngine = {
         payload: { conversationId: conversation.id, messageId: message.id, errorCode },
       });
       throw error instanceof AppError ? error : new AppError(500, "AI reply processing failed.", "AI_PROVIDER_ERROR");
+    } finally {
+      timing.report({ businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id });
     }
   },
 

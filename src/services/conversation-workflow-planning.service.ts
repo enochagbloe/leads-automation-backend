@@ -1,3 +1,4 @@
+import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import type { WorkflowExecutionResult } from "./conversation-response.schema";
 import type { AiBusinessContext } from "./ai-context-builder.service";
 import type { ConversationContextSnapshot } from "./conversation-context.service";
@@ -8,7 +9,7 @@ import { checkSlot } from "./appointment/appointment-availability.service";
 
 export const appointmentPlanningBackend = { checkSlot };
 
-export type PlanningInput = { conversationSnapshot: ConversationContextSnapshot; interpretation: ConversationInterpretation; businessContext: AiBusinessContext; onWorkflowResult?: (result: WorkflowExecutionResult) => void };
+export type PlanningInput = { timing?: ConversationRuntimeTiming; conversationSnapshot: ConversationContextSnapshot; interpretation: ConversationInterpretation; businessContext: AiBusinessContext; onWorkflowResult?: (result: WorkflowExecutionResult) => void };
 export type WorkflowRequirement = { key: string; required: boolean; satisfied: boolean; priority: number; source: "CONVERSATION_STATE" | "WORKFLOW_PROVIDER" | "BACKEND_STATE"; group?: string };
 export type WorkflowPlanningResult = {
   status: "NEEDS_INPUT" | "NEEDS_CLARIFICATION" | "READY_FOR_ACTION" | "NEEDS_CONFIRMATION" | "OPTIONS" | "WAITING" | "HUMAN_REQUIRED";
@@ -37,8 +38,8 @@ export const appointmentConversationAdapter: ConversationWorkflowPlanningAdapter
     const missingTemporal = requirements.filter(r => r.required && !r.satisfied && r.key !== "service").sort((a, b) => a.priority - b.priority)[0];
     if (missingTemporal) return { status: "NEEDS_INPUT", requirements, targetField: missingTemporal.key, reasonCode: "BOOKING_INFORMATION_REQUIRED" };
     if (context.demoSessionId) {
-      // Temporary website facts are not a production service catalog or availability source.
-      return { status: "READY_FOR_ACTION", requirements: requirements.filter(r => r.key !== "service" || r.satisfied), reasonCode: "DEMO_AVAILABILITY_NOT_CONNECTED", action: { type: "CHECK_APPOINTMENT_AVAILABILITY", preferredDate: preferredDate!, preferredTime: preferredTime!, timezone: input.conversationSnapshot.timezone ?? "" } };
+      // The canonical website catalog resolves services, but never proves slot availability or authorizes bookings.
+      return { status: "READY_FOR_ACTION", requirements: requirements.filter(r => r.key !== "service" || r.satisfied), reasonCode: "DEMO_AVAILABILITY_NOT_CONNECTED", action: { type: "CHECK_APPOINTMENT_AVAILABILITY", ...(service ? { serviceId: service.id } : {}), preferredDate: preferredDate!, preferredTime: preferredTime!, timezone: input.conversationSnapshot.timezone ?? "" } };
     }
     if (!service) return { status: "NEEDS_CLARIFICATION", requirements, targetField: "service", reasonCode: "SERVICE_MAPPING_REQUIRED" };
     if (!service.isBookable || !service.durationMinutes || !input.conversationSnapshot.timezone) return { status: "HUMAN_REQUIRED", requirements, reasonCode: "BOOKING_CONFIGURATION_REQUIRES_REVIEW" };
@@ -54,6 +55,6 @@ export const conversationWorkflowPlanningService = {
   adapters: [appointmentConversationAdapter] as readonly ConversationWorkflowPlanningAdapter[],
   async inspect(workflow: string, input: PlanningInput) {
     const adapter = this.adapters.find(a => a.supports(workflow));
-    return adapter ? adapter.inspect(input) : null;
+    return adapter ? input.timing ? input.timing.measure("workflowMs", () => adapter.inspect(input)) : adapter.inspect(input) : null;
   },
 };

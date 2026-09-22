@@ -1,3 +1,4 @@
+import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import type { WorkflowExecutionResult } from "./conversation-response.schema";
 import { conversationResponseService } from "./conversation-response.service";
 import { conversationPlannerService } from "./conversation-planner.service";
@@ -8,18 +9,19 @@ import { conversationInterpreterService } from "./conversation-interpreter.servi
 import { AppError } from "../utils/errors";
 
 /** Shared prompt/provider execution; callers own policy and side effects. */
-export async function generateContextReply(context: AiBusinessContext, options: Omit<AiGenerateReplyInput, "systemPrompt" | "userPrompt">) {
+export async function generateContextReply(context: AiBusinessContext, options: Omit<AiGenerateReplyInput, "systemPrompt" | "userPrompt">, timing = new ConversationRuntimeTiming()) {
   const scope = { businessId: context.business.id, conversationId: context.conversation.id, demoSessionId: context.demoSessionId, messageId: context.triggerMessage.id, customerMemorySummary: context.customerMemory.summary ?? undefined };
-  let snapshot = await conversationContextService.getSnapshot(scope);
-  const meaning = await conversationInterpreterService.interpret({ businessContext: context, conversationSnapshot: snapshot, signal: options.signal, model: options.model });
+  let snapshot = await timing.measure("contextBuildMs", () => conversationContextService.getSnapshot(scope));
+  const meaning = await timing.measure("interpretationMs", () => conversationInterpreterService.interpret({ businessContext: context, conversationSnapshot: snapshot, signal: options.signal, model: options.model }));
   if (meaning.commands.length || meaning.appliedRevision !== snapshot.state.revision) {
-    snapshot = await conversationContextService.getSnapshot(scope);
+    snapshot = await timing.measure("contextBuildMs", () => conversationContextService.getSnapshot(scope));
     if (snapshot.state.revision !== meaning.appliedRevision) throw new AppError(409, "Conversation changed after interpretation", "CONVERSATION_STATE_CONFLICT");
   }
   let trustedWorkflowResult: WorkflowExecutionResult | undefined;
-  const conversationPlan = await conversationPlannerService.plan({ conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context, onWorkflowResult: result => { trustedWorkflowResult = result; } });
+  const workflowBefore = timing.stages.workflowMs;
+  const conversationPlan = await timing.measure("plannerMs", () => conversationPlannerService.plan({ timing, conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context, onWorkflowResult: result => { trustedWorkflowResult = result; } })).finally(() => { timing.stages.plannerMs = Math.max(0, timing.stages.plannerMs - (timing.stages.workflowMs - workflowBefore)); });
   context = { ...context, trustedWorkflowResult, conversationPlan, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
-  const result = await conversationResponseService.generate(context, options).catch(error => {
+  const result = await timing.measure("responseMs", () => conversationResponseService.generate(context, options)).catch(error => {
     const failure = error instanceof AppError ? error : new AppError(503, "AI reply unavailable", "AI_PROVIDER_ERROR");
     const responseUsage = failure.context?.conversationResponseUsage as { requests?: number; tokens?: number } | undefined;
     failure.context = { ...failure.context, conversationInterpretationUsage: { requests: (meaning.usage?.providerRequestCount ?? 0) + (responseUsage?.requests ?? 0), tokens: (meaning.usage?.totalTokens ?? 0) + (responseUsage?.tokens ?? 0) } };
