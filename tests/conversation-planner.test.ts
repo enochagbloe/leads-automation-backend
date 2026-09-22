@@ -1,3 +1,4 @@
+import { servicePurpose } from "./helpers/customer-purpose";
 import { responseOutput } from "./helpers/response-output";
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
@@ -28,6 +29,7 @@ function setup(t: TestContext, demo = false) {
   const save = (plan: ConversationPlan, content: string) => prisma.$transaction(tx => storeAiReply(tx, { ...scope, leadId: "lead-a", senderType: "AI", direction: "OUTBOUND", content, messageType: "TEXT", deliveryStatus: "INTERNAL" }, "AI_HANDLING", {}, { demoSessionId: scoped.demoSessionId, plan }));
   const booking = async (complete = false) => {
     await state.setActiveWorkflow(command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+    await state.setEntity(command(), "serviceId", { value: "service-a" });
     await state.setEntity(command(), "reason", { value: "painful/shaky tooth" });
     await state.setEntity(command(), "preferredTime", { value: "12 PM", kind: "TIME", normalizedValue: "12:00" });
     if (complete) { await state.setEntity(command(), "preferredDate", { value: "tomorrow", kind: "DATE", normalizedValue: "2026-09-12" }); await state.setEntity(command(), "serviceId", { value: "service-a" }); }
@@ -53,7 +55,8 @@ test("all required booking inputs request the existing booking boundary without 
 });
 test("missing catalog mapping asks a specific clarification, not the known reason", async t => {
   const f = setup(t); await f.booking(); await state.setEntity(f.command(), "preferredDate", { kind: "DATE", value: "2026-09-12", normalizedValue: "2026-09-12" });
-  const p = await f.plan(await f.add("Tomorrow")); assert.equal(p.move, "ASK_FOR_CLARIFICATION"); assert.equal(p.targetField, "service"); assert.equal(p.reasonCode, "SERVICE_MAPPING_REQUIRED");
+  await state.setEntity(f.command(), "serviceId", { value: "removed-service" });
+  const p = await f.plan(await f.add("Tomorrow")); assert.equal(p.move, "ASK_FOR_CLARIFICATION"); assert.equal(p.targetField, "serviceNeed"); assert.equal(p.reasonCode, "SERVICE_NEED_UNRESOLVED");
 });
 test("ambiguity has no request and never inspects a consequential workflow", async t => {
   const f = setup(t); await f.booking(true); mockMethod(t, workflows, "inspect", () => { assert.fail("ambiguity precedes workflow"); });
@@ -164,13 +167,13 @@ test("full dental sequence persists planner questions/options and consumes valid
   });
   const interpret = async (m: any, i: ConversationInterpretation) => {
     const snapshot = await conversationContextService.getSnapshot({ ...f.scoped, messageId: m.id });
-    const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: snapshot.state.revision, interpretation: i });
+    const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: snapshot.state.revision, interpretation: i, businessContext: f.context(m) });
     assert.equal(result.interpretation.needsClarification, false, result.interpretation.clarificationReason);
     return f.plan(m, result.interpretation);
   };
   const entity = (m: any, key: string, value: string, kind: "TEXT" | "TIME" | "DATE" = "TEXT"): any => ({ key, value, kind, ...(kind !== "TEXT" ? { normalizedValue: value } : {}), confidence: .99, certainty: "EXACT", source: "CURRENT_MESSAGE", evidence: [{ messageId: m.id, quote: m.content }] });
   const first = await f.add("My tooth aches badly and it's shaky.");
-  await interpret(first, meaning({ workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, topic: "APPOINTMENT", resolvedEntities: [entity(first, "reason", "painful/shaky tooth")] }));
+  await interpret(first, meaning({ workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, topic: "APPOINTMENT", customerPurpose: servicePurpose(first, f.context(first).services[0]!), resolvedEntities: [entity(first, "reason", "painful/shaky tooth")] }));
   const time = await f.add("Can I book at 12?"); const datePlan = await interpret(time, meaning({ resolvedEntities: [entity(time, "preferredTime", "12:00", "TIME")] }));
   assert.equal(datePlan.targetField, "preferredDate"); await f.save(datePlan, "What day would you like to come in?");
   const tomorrow = await f.add("Tomorrow."); tomorrow.createdAt = new Date("2026-09-11T12:00:00Z"); providerMode = "options";

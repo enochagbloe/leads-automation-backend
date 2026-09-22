@@ -1,3 +1,4 @@
+import { servicePurpose } from "./helpers/customer-purpose";
 
 import assert from "node:assert/strict";
 import test, { TestContext } from "node:test";
@@ -28,6 +29,7 @@ function setup(t: TestContext, demo = false) {
   const save = (plan: ConversationPlan, content: string) => prisma.$transaction(tx => storeAiReply(tx, { ...scope, leadId: "lead-a", senderType: "AI", direction: "OUTBOUND", content, messageType: "TEXT", deliveryStatus: "INTERNAL" }, "AI_HANDLING", {}, { demoSessionId: scoped.demoSessionId, plan }));
   const booking = async (complete = false) => {
     await state.setActiveWorkflow(command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+    await state.setEntity(command(), "serviceId", { value: "service-a" });
     await state.setEntity(command(), "reason", { value: "painful/shaky tooth" });
     await state.setEntity(command(), "preferredTime", { value: "12 PM", kind: "TIME", normalizedValue: "12:00" });
     if (complete) { await state.setEntity(command(), "preferredDate", { value: "tomorrow", kind: "DATE", normalizedValue: "2026-09-12" }); await state.setEntity(command(), "serviceId", { value: "service-a" }); }
@@ -177,13 +179,13 @@ test("exact dental sequence validates visible replies and preserves interrupted 
   };
   const interpret = async (m: any, i: ConversationInterpretation) => {
     const snapshot = await conversationContextService.getSnapshot({ ...f.scoped, messageId: m.id });
-    const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: snapshot.state.revision, interpretation: i });
+    const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: snapshot.state.revision, interpretation: i, businessContext: f.context(m) });
     assert.equal(result.interpretation.needsClarification, false, result.interpretation.clarificationReason);
     return f.plan(m, result.interpretation);
   };
   const entity = (m: any, key: string, value: string, kind: "TEXT" | "TIME" | "DATE" = "TEXT"): any => ({ key, value, kind, ...(kind !== "TEXT" ? { normalizedValue: value } : {}), confidence: .99, certainty: "EXACT", source: "CURRENT_MESSAGE", evidence: [{ messageId: m.id, quote: m.content }] });
   const first = await f.add("My tooth aches badly and it's shaky.");
-  const firstPlan = await interpret(first, meaning({ workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, topic: "APPOINTMENT", resolvedEntities: [entity(first, "reason", "painful/shaky tooth")] }));
+  const firstPlan = await interpret(first, meaning({ workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, topic: "APPOINTMENT", customerPurpose: servicePurpose(first, f.context(first).services[0]!), resolvedEntities: [entity(first, "reason", "painful/shaky tooth")] }));
   await speak(firstPlan, "That sounds uncomfortable. What day would you like to come in?");
   const time = await f.add("Can I book at 12?"); const datePlan = await interpret(time, meaning({ resolvedEntities: [entity(time, "preferredTime", "12:00", "TIME")] }));
   assert.equal(datePlan.targetField, "preferredDate"); await speak(datePlan, "What day would you like to come in?");

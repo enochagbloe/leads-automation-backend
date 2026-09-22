@@ -1,3 +1,4 @@
+import { bookingPurposeRequirement, resolvedConversationService } from "./conversation-purpose-policy";
 import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import type { WorkflowExecutionResult } from "./conversation-response.schema";
 import type { AiBusinessContext } from "./ai-context-builder.service";
@@ -26,11 +27,9 @@ export const appointmentConversationAdapter: ConversationWorkflowPlanningAdapter
     const context = input.businessContext;
     const known = Object.keys(input.conversationSnapshot.state.knownEntities);
     const requirements: WorkflowRequirement[] = known.map(key => ({ key, required: false, satisfied: true, priority: 100, source: "CONVERSATION_STATE" }));
-    const serviceId = text(input, "serviceId");
-    const serviceName = text(input, "serviceName") ?? text(input, "service");
-    const catalog = context.services ?? [];
-    const matches = catalog.filter(s => serviceId ? s.id === serviceId : serviceName ? s.name.toLocaleLowerCase() === serviceName.toLocaleLowerCase() : false);
-    const service = matches.length === 1 ? matches[0] : undefined;
+    const purpose = bookingPurposeRequirement(input.conversationSnapshot.state, context, input.interpretation);
+    if (purpose) return { status: purpose.move === "ASK_FOR_FIELD" ? "NEEDS_INPUT" : "NEEDS_CLARIFICATION", requirements: [{ key: "serviceNeed", required: true, satisfied: false, priority: 0, source: "WORKFLOW_PROVIDER" }], targetField: "serviceNeed", reasonCode: purpose.reasonCode };
+    const service = resolvedConversationService(input.conversationSnapshot.state, context);
     const preferredDate = text(input, "preferredDate"); const preferredTime = text(input, "preferredTime");
     // Reuse the actual booking boundary's minimum requirements. A reason is retained but is not a service ID.
     const missing = missingAiBookingFields({ serviceId: service?.id, preferredDate, preferredTime });

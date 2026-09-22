@@ -1,3 +1,5 @@
+import type { AiBusinessContext } from "./ai-context-builder.service";
+import { validateCustomerPurpose, purposeEntities, purposeEntityKeys, resolvedConversationService } from "./conversation-purpose-policy";
 import { env } from "../config/env";
 import { entitySchema, StateData, StatePatch } from "./conversation-state.schema";
 import { ConversationContextSnapshot } from "./conversation-context.service";
@@ -23,7 +25,7 @@ const workflowIntent: Record<string, string> = {
 };
 export const continuationIntent = (workflow: string | null) => workflowIntent[workflow ?? ""] ?? null;
 /** Pure validator. It builds a bounded patch; no AI-provided command or whole-state replacement is accepted. */
-export function planInterpretation(snapshot: ConversationContextSnapshot, proposed: ConversationInterpretation, now = Date.now()) {
+export function planInterpretation(snapshot: ConversationContextSnapshot, proposed: ConversationInterpretation, now = Date.now(), context?: AiBusinessContext) {
   const interpretation = structuredClone(proposed);
   const high = semanticConfidenceThreshold();
   // These structured provider codes describe operational incompleteness, not unclear meaning.
@@ -40,6 +42,15 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     delete interpretation.clarificationReason;
   }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
+  const checkedPurpose = validateCustomerPurpose(snapshot, interpretation, context);
+  if (checkedPurpose.error) return ambiguous(checkedPurpose.error);
+  const purpose = checkedPurpose.purpose;
+  const purposeAmbiguity = Boolean(purpose && ["AMBIGUOUS", "UNRESOLVED", "UNSUPPORTED", "UNSPECIFIED"].includes(purpose.resolution));
+  if (purpose) interpretation.customerPurpose = purpose;
+  if (purposeAmbiguity && ["SERVICE_NEED_AMBIGUOUS", "SERVICE_NEED_UNRESOLVED", "SERVICE_UNSUPPORTED", "CUSTOMER_PURPOSE_REQUIRED"].includes(interpretation.clarificationReason ?? "")) {
+    interpretation.needsClarification = false;
+    delete interpretation.clarificationReason;
+  }
   if (interpretation.needsClarification) return ambiguous(interpretation.clarificationReason ?? "INTERPRETATION_AMBIGUOUS");
   if (interpretation.confidence < high) return ambiguous("LOW_CONFIDENCE");
   const state = snapshot.state;
@@ -55,7 +66,15 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   const message = snapshot.currentMessage;
   if (!message) return ambiguous("SOURCE_MESSAGE_MISSING");
   const clock = localClock(message.createdAt, snapshot.timezone);
-  const known = { ...state.knownEntities };
+  let known = { ...state.knownEntities };
+  // Old receipts/clients may still send direct service entities. Accept only a literal catalog reference;
+  // semantic need mapping uses the bounded customerPurpose contract instead.
+  if (context && !purpose) for (const entity of interpretation.resolvedEntities.filter(e => purposeEntityKeys.has(e.key))) {
+    if (!["service", "serviceName", "serviceId"].includes(entity.key)) return ambiguous("PURPOSE_CONTRACT_REQUIRED");
+    const value = entity.normalizedValue ?? entity.value;
+    const matches = context.services.filter(s => entity.key === "serviceId" ? s.id === value : s.name.toLowerCase() === String(value).toLowerCase());
+    if (matches.length !== 1 || !entity.evidence.some(e => e.messageId === message.id && e.quote.toLowerCase().includes(matches[0]!.name.toLowerCase()))) return ambiguous("SERVICE_REFERENCE_INVALID");
+  }
   const commands: InterpretationCommand[] = [];
   const patch: StatePatch = { lastResolvedIntent: interpretation.intent };
   const pending = state.awaiting;
@@ -137,6 +156,14 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     known[entity.key] = parsed.data;
     commands.push({ type: "SET_ENTITY", key: entity.key });
   }
+  if (purpose && context) {
+    known = purposeEntities({ ...state, knownEntities: known }, purpose, context, message.id, now);
+    for (const key of purposeEntityKeys) commands.push({ type: "SET_ENTITY", key });
+  }
+  // Purpose answers are not generic entity writes: resolve this expectation only after catalog validation.
+  if (purpose && context && pending?.type === "FIELD" && ["serviceNeed", "service", "serviceName"].includes(pending.field ?? "") && resolvedConversationService({ ...state, knownEntities: known }, context)) {
+    interpretation.pendingExpectation = { resolved: true, field: pending.field };
+  }
   if (selected && pending?.field) {
     const resolved = interpretation.resolvedEntities.find(e => e.key === pending.field);
     // A choice needs an explicitly typed target. Never assume options are appointment times.
@@ -164,7 +191,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     if (!pending || pending.type === "SYSTEM_RESULT") return ambiguous("EXPECTATION_NOT_CUSTOMER_RESOLVABLE");
     if (interpretation.pendingExpectation.field === undefined && pending.field && interpretation.resolvedEntities.some(e => e.key === pending.field && e.source !== "CONVERSATION_CONTEXT")) interpretation.pendingExpectation.field = pending.field;
     if (pending.field !== interpretation.pendingExpectation.field) return ambiguous("EXPECTATION_FIELD_MISMATCH");
-    if (pending.type === "FIELD" && !interpretation.resolvedEntities.some(e => e.key === pending.field && e.source !== "CONVERSATION_CONTEXT")) return ambiguous("EXPECTATION_VALUE_MISSING");
+    if (pending.type === "FIELD" && !(purpose && context && ["serviceNeed", "service", "serviceName"].includes(pending.field ?? "") && resolvedConversationService({ ...state, knownEntities: known }, context)) && !interpretation.resolvedEntities.some(e => e.key === pending.field && e.source !== "CONVERSATION_CONTEXT")) return ambiguous("EXPECTATION_VALUE_MISSING");
     if (pending.type === "OPTION_SELECTION" && !selected) return ambiguous("OPTION_REFERENCE_MISSING");
     if (pending.type === "CONFIRMATION" && !interpretation.confirmation) return ambiguous("CONFIRMATION_MISSING");
     if (pending.type === "FREE_TEXT") return ambiguous("FREE_TEXT_REQUIRES_PLANNER");
@@ -172,13 +199,17 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     if (selected) patch.offeredOptions = [];
     commands.push({ type: "CLEAR_AWAITING" });
   }
+  if (interpretation.workflow?.name === "APPOINTMENT_BOOKING" && interpretation.workflow.action === "START" && context && !resolvedConversationService({ ...state, knownEntities: known }, context)) {
+    // Retain the goal/need and supplied temporal entities, but no workflow starts without purpose.
+    delete interpretation.workflow;
+  }
   const workflow = interpretation.workflow;
   if (workflow && workflow.action !== "NONE" && (!interruption || workflow.action === "CANCEL" && interpretation.intent === "CANCELLATION_INTENT")) {
     if (workflow.action === "START") {
       if (!workflow.name || state.activeWorkflow && state.activeWorkflow !== workflow.name) return ambiguous("ACTIVE_WORKFLOW_MUST_BE_PRESERVED");
       if (interpretation.topic && workflowTopic[workflow.name] !== interpretation.topic) return ambiguous("WORKFLOW_TOPIC_MISMATCH");
       // Starting requires current-message evidence, not memory or an isolated reference.
-      if (!interpretation.resolvedEntities.some(e => e.source === "CURRENT_MESSAGE")) return ambiguous("WORKFLOW_START_EVIDENCE_MISSING");
+      if (!purpose && !interpretation.resolvedEntities.some(e => e.source === "CURRENT_MESSAGE")) return ambiguous("WORKFLOW_START_EVIDENCE_MISSING");
       Object.assign(patch, { activeTopic: workflowTopic[workflow.name], activeWorkflow: workflow.name, workflowStatus: "ACTIVE", previousTopic: state.activeTopic });
     } else {
       if (!state.activeWorkflow || workflow.name && workflow.name !== state.activeWorkflow) return ambiguous("WORKFLOW_REFERENCE_MISMATCH");
@@ -193,7 +224,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     }
     commands.push({ type: "SET_WORKFLOW", name: workflow.name ?? state.activeWorkflow!, action: workflow.action });
   }
-  if (interpretation.resolvedEntities.length) patch.knownEntities = known;
+  if (interpretation.resolvedEntities.length || purpose) patch.knownEntities = known;
   commands.push({ type: "SET_INTENT", intent: interpretation.intent });
   return { interpretation, patch, commands };
 }

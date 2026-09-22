@@ -1,3 +1,4 @@
+import { servicePurpose } from "./helpers/customer-purpose";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fixture, scope } from "./helpers/conversation-state-fixture";
@@ -93,7 +94,7 @@ for (const entry of cases) test(`${entry.industry}: ${entry.message}`, async t =
     assert.deepEqual(data.business.services.map((s: any) => s.id), context.services.map(s => s.id));
     assert.equal(data.business.services[0].name, entry.services[0].name);
     const entity = (key: string, value: string, extra = {}) => ({ key, value, kind: "TEXT", confidence: .99, certainty: "EXACT", source: "CURRENT_MESSAGE", evidence: [{ messageId: m.id, quote: m.content }], ...extra });
-    const interpreted = { intent: entry.intent, confidence: .99, needsClarification: false, resolvedEntities: "booking" in entry ? [entity("reason", m.content), entity("serviceName", context.services[0]!.name), ...("tomorrow" in entry ? [entity("preferredDate", "tomorrow", { kind: "DATE", normalizedValue: offsetLocalDate(data.localClock.date, 1), dateBasis: { type: "DAY_OFFSET", offsetDays: 1 } })] : []), ...("complete" in entry ? [entity("preferredTime", "2pm", { kind: "TIME", normalizedValue: "14:00" })] : [])] : [], ...("booking" in entry ? { topic: "APPOINTMENT", workflow: { action: "START", name: "APPOINTMENT_BOOKING" } } : {}), ...("greeting" in entry ? { conversationAct: "GREETING" } : {}) };
+    const interpreted = { intent: entry.intent, confidence: .99, needsClarification: false, resolvedEntities: "booking" in entry ? [entity("reason", m.content), ...("tomorrow" in entry ? [entity("preferredDate", "tomorrow", { kind: "DATE", normalizedValue: offsetLocalDate(data.localClock.date, 1), dateBasis: { type: "DAY_OFFSET", offsetDays: 1 } })] : []), ...("complete" in entry ? [entity("preferredTime", "2pm", { kind: "TIME", normalizedValue: "14:00" })] : [])] : [], ...("booking" in entry ? { topic: "APPOINTMENT", customerPurpose: servicePurpose(m, context.services[0]!), workflow: { action: "START", name: "APPOINTMENT_BOOKING" } } : {}), ...("greeting" in entry ? { conversationAct: "GREETING" } : {}) };
     return { rawText: JSON.stringify(interpreted), provider: "OPENROUTER", model: "fixture", providerRequestCount: 1 };
   });
   const response = mockMethod(t, aiProvider, "generateReply", async (input: any) => {

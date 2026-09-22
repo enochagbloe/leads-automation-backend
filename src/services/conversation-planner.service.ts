@@ -1,3 +1,4 @@
+import { bookingPurposeRequirement } from "./conversation-purpose-policy";
 import { conversationTransactionOptions } from "./conversation-transaction";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
@@ -42,6 +43,12 @@ export const conversationPlannerService = {
     };
     // Safety, ambiguity, explicit intent, interruptions, lifecycle, provider requirements.
     if (context.conversation.humanTakeover || context.conversation.status === "NEEDS_HUMAN_REVIEW" || context.planCapabilities?.aiReplies === false) return finish("NO_ACTION", "HUMAN_OR_POLICY_CONTROL", "WAIT", { requiresHumanReview: true });
+    // Purpose precedes even old pending date/time questions, but never outranks human control.
+    const serviceChoice = meaning.customerPurpose && ["AMBIGUOUS", "UNRESOLVED"].includes(meaning.customerPurpose.resolution) && meaning.customerPurpose.goal === "SEEK_SERVICE";
+    if ((meaning.intent === "BOOKING_INTENT" || serviceChoice) && (!meaning.needsClarification || meaning.resolvedEntities.some(e => ["preferredDate", "preferredTime"].includes(e.key) && e.certainty !== "EXACT"))) {
+      const purpose = bookingPurposeRequirement(s, context, meaning);
+      if (purpose) return finish(purpose.move, purpose.reasonCode, purpose.move === "ASK_FOR_FIELD" ? "COLLECT_INFORMATION" : "CLARIFY", { targetField: "serviceNeed", serviceClarification: purpose.clarification, missingFields: ["serviceNeed"] });
+    }
     if (meaning.needsClarification) {
       // Ask about one explicitly evidenced uncertain temporal value, without applying it to state.
       const uncertain = meaning.resolvedEntities.filter(e => ["preferredDate", "preferredTime"].includes(e.key) && e.certainty !== "EXACT" && e.evidence.some(q => q.messageId === snapshot.currentMessage?.id && snapshot.currentMessage.text.includes(q.quote)));

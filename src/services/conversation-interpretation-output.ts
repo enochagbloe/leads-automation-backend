@@ -1,3 +1,4 @@
+import { customerGoals, serviceResolutions } from "./conversation-purpose.schema";
 import { AI_REPLY_INTENTS } from "./ai-decision-parser.service";
 import { workflowNames } from "./conversation-interpretation.schema";
 
@@ -13,6 +14,12 @@ const scalar = { anyOf: [text, number, boolean] };
 const topic = enumeration(["GENERAL_ENQUIRY", "SERVICE_ENQUIRY", "APPOINTMENT", "FOLLOW_UP", "COMPLAINT", "QUOTATION", "PAYMENT", "HUMAN_HANDOFF"]);
 export const interpretationOutputSchema = object({
   intent: enumeration(AI_REPLY_INTENTS),
+  customerPurpose: nullable(object({
+    goal: enumeration(customerGoals), need: nullable(text), resolution: enumeration(serviceResolutions), serviceId: nullable(text),
+    candidateServiceIds: { type: "array", items: text }, confidence: number,
+    evidence: { type: "array", items: object({ messageId: text, quote: text }) },
+    catalogEvidence: { type: "array", items: object({ serviceId: text, quote: text }) },
+  })),
   conversationAct: nullable(enumeration(["GREETING"])),
   topic: nullable(topic),
   workflow: nullable(object({ name: nullable(enumeration(workflowNames)), action: enumeration(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]) })),

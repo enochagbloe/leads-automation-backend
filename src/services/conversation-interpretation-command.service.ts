@@ -1,3 +1,4 @@
+import type { AiBusinessContext } from "./ai-context-builder.service";
 import { conversationTransactionOptions } from "./conversation-transaction";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
@@ -23,8 +24,10 @@ export const conversationInterpretationCommandService = {
       return receipt ? { interpretation: interpretationSchema.parse(receipt.result), appliedRevision: receipt.appliedRevision } : null;
     }, conversationTransactionOptions());
   },
-  async apply(input: InterpretationScope & { snapshotRevision: number; interpretation: unknown }) {
+  async apply(input: InterpretationScope & { snapshotRevision: number; interpretation: unknown; businessContext?: AiBusinessContext }) {
     z.number().int().nonnegative().parse(input.snapshotRevision);
+    const context = input.businessContext;
+    if (context && (context.business.id !== input.businessId || context.conversation.id !== input.conversationId || context.demoSessionId !== input.demoSessionId || context.triggerMessage.id !== input.sourceMessageId)) throw new AppError(403, "Purpose context scope mismatch", "CONVERSATION_STATE_FORBIDDEN");
     const interpretation = interpretationSchema.parse(input.interpretation);
     if (Buffer.byteLength(JSON.stringify(interpretation)) > 24000) throw new AppError(400, "Interpretation exceeds size limit", "CONVERSATION_INTERPRETATION_INVALID");
     const result = await prisma.$transaction(async tx => {
@@ -37,7 +40,7 @@ export const conversationInterpretationCommandService = {
       if (state.revision !== input.snapshotRevision) throw new AppError(409, "Conversation changed during interpretation; reload and reinterpret", "CONVERSATION_STATE_CONFLICT");
       // Reload evidence from the database: the model cannot supply its own transcript.
       const history = await tx.message.findMany({ where: { businessId: input.businessId, conversationId: input.conversationId, deletedAt: null, senderType: { in: ["CUSTOMER", "AI", "STAFF"] }, OR: [{ createdAt: { lt: message.createdAt } }, { createdAt: message.createdAt, id: { lte: message.id } }] }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 50, select: { id: true, content: true, createdAt: true, senderType: true, direction: true } });
-      const planned = planInterpretation({ state, timezone: conversation.business.timezone, currentMessage: { id: message.id, text: message.content, createdAt: message.createdAt.toISOString(), senderType: message.senderType }, recentMessages: history.reverse().map(m => ({ id: m.id, text: m.content, createdAt: m.createdAt.toISOString(), senderType: m.senderType, direction: m.direction })), customerMemorySummary: null }, interpretation);
+      const planned = planInterpretation({ state, timezone: conversation.business.timezone, currentMessage: { id: message.id, text: message.content, createdAt: message.createdAt.toISOString(), senderType: message.senderType }, recentMessages: history.reverse().map(m => ({ id: m.id, text: m.content, createdAt: m.createdAt.toISOString(), senderType: m.senderType, direction: m.direction })), customerMemorySummary: null }, interpretation, Date.now(), input.businessContext);
       const updated = planned.commands.length ? await conversationStateService.patch({ ...input, expectedRevision: input.snapshotRevision, source: "AI_INTERPRETATION", sourceEffectId: `interpretation:v1:${message.id}` }, planned.patch, tx) : state;
       await tx.conversationInterpretation.create({ data: { businessId: input.businessId, conversationId: input.conversationId, sourceMessageId: message.id, snapshotRevision: input.snapshotRevision, appliedRevision: updated.revision, result: planned.interpretation as Prisma.InputJsonObject } });
       return { interpretation: planned.interpretation, appliedRevision: updated.revision, commands: planned.commands, replayed: false };

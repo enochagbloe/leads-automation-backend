@@ -4,12 +4,12 @@ import { StateData } from "./conversation-state.schema";
 import { ConversationResponse, conversationResponseSchema, WorkflowExecutionResult, workflowExecutionResultSchema } from "./conversation-response.schema";
 export type ResponseFact = { id: string; value: string };
 export type ResponsePolicyInput = { plan: ConversationPlan; state: StateData; recentMessages: Array<{ senderType: string; text: string }>; trustedWorkflowResult?: WorkflowExecutionResult; facts: ResponseFact[]; existingIssueIds?: string[]; generatedResponse: unknown };
-export const fieldLabels: Record<string, string> = { preferredDate: "day", preferredTime: "time", customerName: "name", customerPhone: "phone number", customerLocation: "location", branch: "branch", service: "service", serviceName: "service", email: "email address" };
+export const fieldLabels: Record<string, string> = { serviceNeed: "help you need", preferredDate: "day", preferredTime: "time", customerName: "name", customerPhone: "phone number", customerLocation: "location", branch: "branch", service: "service", serviceName: "service", email: "email address" };
 export function clarificationOptions(plan: ConversationPlan, state: StateData) {
   return plan.move === "ASK_FOR_CLARIFICATION" && optionsAreFresh(state) && state.awaiting?.type === "OPTION_SELECTION" &&
     (plan.targetField ? plan.targetField === state.awaiting.field : /^(?:OPTION_|OPTIONS_)/.test(plan.reasonCode)) ? state.offeredOptions : [];
 }
-const fieldPatterns: Record<string, RegExp> = { preferredDate: /\b(day|date)\b/i, preferredTime: /\btime\b/i, customerName: /\bname\b/i, customerPhone: /\b(phone|number)\b/i, customerLocation: /\b(location|address)\b/i, branch: /\bbranch\b/i, service: /\bservice\b/i, email: /\bemail\b/i };
+const fieldPatterns: Record<string, RegExp> = { serviceNeed: /\b(help|need|for|service|appointment)\b/i, preferredDate: /\b(day|date)\b/i, preferredTime: /\btime\b/i, customerName: /\bname\b/i, customerPhone: /\b(phone|number)\b/i, customerLocation: /\b(location|address)\b/i, branch: /\bbranch\b/i, service: /\bservice\b/i, email: /\bemail\b/i };
 const positiveClaims: Array<[ConversationResponse["claims"][number], RegExp]> = [
   ["APPOINTMENT_CONFIRMED", /\b(?:appointment|booking|visit)\b.{0,35}\b(?:confirmed|booked|scheduled)\b|\b(?:confirmed|booked|scheduled)\b.{0,25}\b(?:appointment|booking|visit)\b/i],
   ["AVAILABILITY", /\b(?:slot|time|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b.{0,25}\b(?:is available|is free|is open)\b|\bwe have\b.{0,55}\bavailable\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\s+works[.!]?|\bavailable at \d/i],
@@ -41,15 +41,16 @@ export const conversationResponsePolicyService = {
     if (r.askedField !== expectedField) issues.add("WRONG_FIELD");
     if (p.responseDirective.askOneQuestion ? r.questionCount !== 1 || (text.match(/\?/g)?.length ?? 0) > 1 : r.questionCount !== 0 || text.includes("?")) issues.add("QUESTION_COUNT_INVALID");
     const clauses = text.match(/(?:what|which|when|please (?:provide|share|tell)|could you (?:share|tell)|can you (?:share|tell))[^?.!]*/gi) ?? [];
-    for (const clause of clauses) for (const [field, pattern] of Object.entries(fieldPatterns)) if (pattern.test(clause) && expectedField && field !== expectedField && !(expectedField === "serviceName" && field === "service")) issues.add("WRONG_FIELD_IN_TEXT");
+    for (const clause of clauses) for (const [field, pattern] of Object.entries(fieldPatterns)) if ((field !== "serviceNeed" || expectedField === "serviceNeed") && pattern.test(clause) && expectedField && field !== expectedField && !(["serviceName", "serviceNeed"].includes(expectedField) && field === "service")) issues.add("WRONG_FIELD_IN_TEXT");
     if (!p.responseDirective.askOneQuestion && clauses.length) issues.add("UNPLANNED_QUESTION");
     if (p.move === "ASK_FOR_CLARIFICATION" && /\b(?:I(?: will|'ll)|we(?: will|'ll)) (?:choose|select|go with|use)\b/i.test(text)) issues.add("CLARIFICATION_GUESSES");
     if (expectedField && input.state.knownEntities[expectedField] && p.move === "ASK_FOR_FIELD") issues.add("KNOWN_FIELD_REQUESTED");
     const options = p.options ?? clarificationOptions(p, input.state);
-    if (p.move === "ASK_FOR_CLARIFICATION" && !options.length && /\b(?:options?|choices?|(?:first|second|third|last|other)\s+(?:one|option|choice)|which\s+one)\b/i.test(text)) issues.add("UNGROUNDED_OPTION_CLARIFICATION");
+    if (p.move === "ASK_FOR_CLARIFICATION" && !options.length && !p.serviceClarification?.candidates.length && /\b(?:options?|choices?|(?:first|second|third|last|other)\s+(?:one|option|choice)|which\s+one)\b/i.test(text)) issues.add("UNGROUNDED_OPTION_CLARIFICATION");
     if (new Set(r.referencedOptionIds).size !== r.referencedOptionIds.length || r.referencedOptionIds.some(id => !options.some(o => o.id === id))) issues.add("OPTION_REFERENCE_INVALID");
     if (p.move === "ASK_FOR_OPTION" && (r.referencedOptionIds.length !== options.length || options.some(o => !r.referencedOptionIds.includes(o.id) || !text.includes(o.label)))) issues.add("OPTIONS_NOT_PRESERVED");
     if (p.move.startsWith("ASK_") && !["service", "serviceName"].includes(expectedField ?? "") && /\b(?:we offer[^.!?]*,|our services include)/i.test(text)) issues.add("UNPLANNED_SERVICE_MENU");
+    if (expectedField === "serviceNeed" && /\b(?:what|which|when|choose|share|tell me|prefer|would you like)[^?.!]*\b(?:day|date|time|morning|afternoon)\b/i.test(text)) issues.add("PURPOSE_BEFORE_SCHEDULE");
     const activeTime = input.state.knownEntities.preferredTime?.normalizedValue;
     const allowedTimes = new Set([...(typeof activeTime === "string" ? [activeTime] : []), ...options.map(o => String(o.value))]);
     if (p.move !== "ANSWER" && allowedTimes.size && mentionedTimes(text).some(time => !allowedTimes.has(time))) issues.add("UNSUPPORTED_TIME");

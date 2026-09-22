@@ -1,3 +1,4 @@
+import { servicePurpose } from "./helpers/customer-purpose";
 import { evaluatePremiumAppointmentAutoConfirmation, AppointmentAutoConfirmDecisionInput } from "../src/services/premium-appointment-auto-confirm.service";
 import { conversationPlannerService } from "../src/services/conversation-planner.service";
 import { responseOutput } from "./helpers/response-output";
@@ -36,7 +37,7 @@ function setup(t: TestContext) {
   let serial = 0;
   const context = (message: any, demoSessionId?: string) => ({
     business: { id: scope.businessId, name: "Test business", timezone: "must-use-database-timezone" }, conversation: { id: scope.conversationId },
-    demoSessionId, services: [], runtimeKnowledgeGuards: [], availability: null, policies: [], knowledgeArticles: [], knowledgeDocumentChunks: [], approvedKnowledgeFacts: [],
+    demoSessionId, services: [{ id: "service-a", name: "Dental examination", description: "Examination for tooth pain and loose teeth", isBookable: true, durationMinutes: 30 }], runtimeKnowledgeGuards: [], availability: null, policies: [], knowledgeArticles: [], knowledgeDocumentChunks: [], approvedKnowledgeFacts: [],
     recentMessages: [], existingCustomerIssues: [], pendingFollowUpContexts: [], customerMemory: { summary: "Preferred branch Tema" }, readiness: {}, lead: null,
     triggerMessage: { id: message.id, text: message.content, createdAt: message.createdAt.toISOString() }, planCapabilities: { tone: "PROFESSIONAL" }, safetyInstructions: {},
   } as unknown as AiBusinessContext);
@@ -254,7 +255,7 @@ test("demo uses real interpreter and shared reply runtime without production usa
 test("exact multi-turn fixture carries one reason/date/time through options, confirmation and correction", async t => {
   const f = setup(t);
   let m = await f.add("My tooth aches badly and it's shaky.");
-  f.next(base({ resolvedEntities: [entity(m, "reason", "painful/shaky tooth")] })); await f.run(m);
+  f.next(base({ intent: "SERVICE_INQUIRY", customerPurpose: servicePurpose(m, f.context(m).services[0]!, { goal: "SEEK_SERVICE" }), resolvedEntities: [entity(m, "reason", "painful/shaky tooth")] })); await f.run(m);
   await f.add("We can help arrange a dental appointment.", "AI");
   m = await f.add("Can I book at 12?");
   f.next(base({ topic: "APPOINTMENT", workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, resolvedEntities: [entity(m, "preferredTime", "12", { kind: "TIME", normalizedValue: "12:00" })] })); await f.run(m);
@@ -269,7 +270,7 @@ test("exact multi-turn fixture carries one reason/date/time through options, con
   m = await f.add("Actually make it 3."); f.next(base({ correction: { isCorrection: true, replacesEntity: "preferredTime" }, resolvedEntities: [entity(m, "preferredTime", "3", { kind: "TIME", normalizedValue: "15:00" })] })); await f.run(m);
   assert.equal(f.state().activeTopic, "APPOINTMENT"); assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING");
   assert.equal(f.state().knownEntities.reason.value, "painful/shaky tooth"); assert.equal(f.state().knownEntities.preferredDate.normalizedValue, date); assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "15:00");
-  assert.deepEqual(Object.keys(f.state().knownEntities).sort(), ["preferredDate", "preferredTime", "reason"]); assert.equal(f.receipts().length, 6);
+  assert.deepEqual(Object.keys(f.state().knownEntities).sort(), ["customerGoal", "preferredDate", "preferredTime", "reason", "serviceId", "serviceName", "serviceNeed", "serviceResolution"]); assert.equal(f.receipts().length, 6);
 });
 
 
@@ -294,7 +295,7 @@ test("database timeout retains a safe diagnostic code and no semantic state chan
 for (const confidence of [.75, .80, .84]) test(`semantic confidence ${confidence} does not require auto-confirm confidence`, async t => {
   const f = setup(t); env.AI_AUTO_CONFIRM_MIN_CONFIDENCE = .99;
   const m = await f.add("i wnt a consultation");
-  f.next(base({ confidence, topic: "APPOINTMENT", workflow: { action: "START", name: "APPOINTMENT_BOOKING" }, resolvedEntities: [entity(m, "reason", "consultation", { confidence })] }));
+  f.next(base({ confidence, customerPurpose: servicePurpose(m, f.context(m).services[0]!, { confidence }), topic: "APPOINTMENT", workflow: { action: "START", name: "APPOINTMENT_BOOKING" }, resolvedEntities: [entity(m, "reason", "consultation", { confidence })] }));
   const result = await f.run(m);
   assert.equal(result.interpretation.needsClarification, false);
   assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING");
@@ -304,17 +305,18 @@ for (const confidence of [.75, .80, .84]) test(`semantic confidence ${confidence
 
 for (const text of ["hrllo", "my toth hurts", "i dont know what is wrong but when can i come in", "my teeth is hurting bad i need someone to check it", "right its a typo my teeth hurts and i want to check on it\ni dont know what is actually wrong but when can i come in"]) test(`noisy language carries literal evidence through interpreter and planner: ${text}`, async t => {
   const f = setup(t); const m = await f.add(text);
-  const greeting = text === "hrllo"; const service = text === "my toth hurts";
+  const greeting = text === "hrllo"; const service = text === "my toth hurts"; const unspecified = text === "i dont know what is wrong but when can i come in";
   f.next(base({ confidence: .8, intent: greeting ? "GENERAL_QUESTION" : service ? "SERVICE_INQUIRY" : "BOOKING_INTENT", conversationAct: greeting ? "GREETING" : undefined,
     topic: greeting ? "GENERAL_ENQUIRY" : service ? "SERVICE_ENQUIRY" : "APPOINTMENT",
     workflow: !greeting && !service ? { action: "START", name: "APPOINTMENT_BOOKING" } : undefined,
-    resolvedEntities: greeting ? [] : [entity(m, "reason", "tooth pain", { confidence: .8 })] }));
+    customerPurpose: greeting || service ? undefined : unspecified ? { ...servicePurpose(m, f.context(m).services[0]!), need: null, resolution: "UNSPECIFIED", serviceId: null, catalogEvidence: [] } : servicePurpose(m, f.context(m).services[0]!, { confidence: .8 }),
+    resolvedEntities: greeting || unspecified ? [] : [entity(m, "reason", "tooth pain", { confidence: .8 })] }));
   const r = await f.run(m);
   assert.equal(r.interpretation.needsClarification, false);
   const snapshot = await conversationContextService.getSnapshot({ ...scope, messageId: m.id });
   const plan = await conversationPlannerService.plan({ businessContext: f.context(m), conversationSnapshot: snapshot, interpretation: r.interpretation });
   assert.equal(plan.move, greeting || service ? "ANSWER" : "ASK_FOR_FIELD");
-  if (!greeting && !service) { assert.equal(plan.targetField, "preferredDate"); assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.equal(f.state().activeTopic, "APPOINTMENT"); }
+  if (!greeting && !service) { assert.equal(plan.targetField, unspecified ? "serviceNeed" : "preferredDate"); assert.equal(f.state().activeWorkflow, unspecified ? null : "APPOINTMENT_BOOKING"); if (!unspecified) assert.equal(f.state().activeTopic, "APPOINTMENT"); }
   assert.match(f.requests[0].systemPrompt, /literal substring/);
   assert.equal(f.requests.length, 1);
   assert.equal(f.messages()[0].content, text);
@@ -338,7 +340,7 @@ test("typo date/time can normalize with explicit afternoon context and literal e
 });
 
 for (const text of ["can i com arnd 12", "I want come tomorrow maybe around two", "maybe morning or afternoon", "later"]) test(`uncertain time stays uncommitted and gets narrow clarification: ${text}`, async t => {
-  const f = setup(t); await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT"); const m = await f.add(text);
+  const f = setup(t); await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT"); await state.setEntity(f.command(), "serviceId", { value: "service-a" }); const m = await f.add(text);
   f.next(base({ resolvedEntities: [entity(m, "preferredTime", text, { kind: "TIME", certainty: "APPROXIMATE" })] }));
   const before = structuredClone(f.state()); const r = await f.run(m);
   assert.equal(r.interpretation.needsClarification, true); assert.deepEqual(f.state(), before);
@@ -409,7 +411,7 @@ test("unchanged historical date is not re-anchored or rewritten during a time co
 
 
 for (const variant of ["clear", "low-confidence", "approximate", "forged-evidence", "unknown-reason", "option-reference"] as const) test(`missing booking field consistency: ${variant}`, async t => {
-  const f = setup(t); await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  const f = setup(t); await state.setEntity(f.command(), "serviceId", { value: "service-a" }); await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
   await state.setAwaiting(f.command(), { type: "FIELD", field: "preferredDate" }); const m = await f.add("Actually make it 2 in the afternoon.");
   const proposal = base({ needsClarification: true, clarificationReason: "MISSING_DATE", workflow: { name: "APPOINTMENT_BOOKING", action: "CONTINUE" }, resolvedEntities: [entity(m, "preferredTime", "2 PM", { kind: "TIME", normalizedValue: "14:00" })] });
   if (variant === "low-confidence") proposal.confidence = .7;

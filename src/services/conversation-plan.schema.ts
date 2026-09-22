@@ -10,6 +10,7 @@ export const conversationPlanSchema = z.object({
   missingFields: z.array(entityKeySchema).max(32), knownFields: z.array(entityKeySchema).max(32), selectedOptionId: entityKeySchema.optional(),
   workflowRequest: z.object({ type: z.enum(["CREATE_BOOKING_REQUEST", "CHECK_APPOINTMENT_AVAILABILITY"]), serviceId: z.string().min(1).max(128).optional(), preferredDate: z.string().max(10), preferredTime: z.string().max(5), timezone: z.string().max(100) }).strict().optional(),
   options: optionsSchema.optional(),
+  serviceClarification: z.object({ need: z.string().max(1000).nullable(), candidates: z.array(z.object({ id: z.string().min(1).max(128), name: z.string().max(180), description: z.string().max(300).nullable() }).strict()).max(3) }).strict().optional(),
   suspendedContext: z.object({ workflow: entityKeySchema, stillAwaiting: entityKeySchema.optional() }).strict().optional(),
   responseDirective: z.object({ acknowledgeContext: z.boolean(), askOneQuestion: z.boolean(), purpose: z.enum(["ANSWER_CUSTOMER", "COLLECT_INFORMATION", "CLARIFY", "CONFIRM", "PRESENT_OPTIONS", "ACKNOWLEDGE", "HANDOFF", "WAIT", "WORKFLOW_RESULT"]) }).strict(),
   confidence: z.number().min(0).max(1), requiresHumanReview: z.boolean(), stateRevision: z.number().int().nonnegative(),

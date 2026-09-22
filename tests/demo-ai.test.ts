@@ -260,7 +260,7 @@ for (const change of ["expired", "setup"]) test(`in-flight ${change} change prev
 
 for (const intent of ["BOOKING_INTENT", "COMPLAINT", "HUMAN_REQUEST"]) test(`${intent} gets a conversational SEND_REPLY without action instructions`, async t => {
   const f = fixture(t); f.add({ content: intent === "BOOKING_INTENT" ? "I want to book roofing for Tuesday." : intent });
-  f.state.nextDecision = { ...decision, intent, replyText: intent === "HUMAN_REQUEST" ? "This is a demo; no human has been contacted." : intent === "BOOKING_INTENT" ? "What day would you like to come in?" : "I am sorry that happened." };
+  f.state.nextDecision = { ...decision, intent, replyText: intent === "HUMAN_REQUEST" ? "This is a demo; no human has been contacted." : intent === "BOOKING_INTENT" ? "Sure — what do you need help with?" : "I am sorry that happened." };
   const result = await processLatestDemoReply(actor); assert.equal(result.aiMessage.text, f.state.nextDecision.replyText);
   const prompt = f.requests[0].messages[0].content;
   assert.doesNotMatch(prompt, /CREATE_BOOKING_REQUEST|REQUEST_HUMAN_REVIEW|Complaint case matching/);
