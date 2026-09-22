@@ -6,6 +6,8 @@ export type AiSafetyInput = {
   businessReady: boolean;
   humanTakeover: boolean;
   minConfidence?: number;
+  replyOnlyDemo?: boolean;
+  validatedConversationClarification?: boolean;
 };
 
 export type AiSafetyResult = {
@@ -39,7 +41,9 @@ export const aiSafetyService = {
     if (decision.intent === "COMPLAINT" && decision.shouldReply && decision.replyText?.trim()) {
       return { allowed: true, decision, status: "SUCCESS" };
     }
-    if (decision.requiresHumanReview || HIGH_RISK_INTENTS.has(decision.intent)) {
+    const conversationalHumanRequest = input.replyOnlyDemo && decision.intent === "HUMAN_REQUEST" && decision.suggestedAction === "SEND_REPLY";
+    const safeClarification = input.validatedConversationClarification && decision.intent === "UNKNOWN" && decision.suggestedAction === "SEND_REPLY";
+    if (decision.requiresHumanReview || (HIGH_RISK_INTENTS.has(decision.intent) && !conversationalHumanRequest && !safeClarification)) {
       return { allowed: false, decision, blockedReason: decision.reason || "AI requested human review.", status: "BLOCKED_POLICY" };
     }
     if (decision.suggestedAction === "CREATE_BOOKING_REQUEST") {

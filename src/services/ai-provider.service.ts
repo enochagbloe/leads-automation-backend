@@ -4,6 +4,7 @@ import { AppError } from "../utils/errors";
 import { AI_DECISION_PARSE_FAILURE_REASON, AiReplyDecision, fallbackHumanReviewDecision, parseAiDecision } from "./ai-decision-parser.service";
 
 export type AiGenerateReplyInput = {
+  responseSchema?: Record<string, unknown>;
   businessId: string;
   conversationId: string;
   messageId: string;
@@ -12,9 +13,13 @@ export type AiGenerateReplyInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  maxAttempts?: number;
+  signal?: AbortSignal;
   metadata?: {
-    plan: PlanCode;
-    channel: "WHATSAPP" | "MANUAL";
+    plan?: PlanCode;
+    isDemo?: boolean;
+    demoSessionId?: string;
+    channel: "WHATSAPP" | "MANUAL" | "DEMO";
     source: "INBOUND_MESSAGE" | "SYSTEM_RETRY";
   };
 };
@@ -26,7 +31,9 @@ export type AiCompletionInput = {
   model?: string;
   temperature?: number;
   maxTokens?: number;
-  responseFormat?: { type: "json_object" };
+  responseFormat?: { type: "json_object" } | { type: "json_schema"; json_schema: { name: string; strict: true; schema: Record<string, unknown> } };
+  signal?: AbortSignal;
+  maxAttempts?: number;
   metadata?: Record<string, unknown>;
 };
 
@@ -132,6 +139,7 @@ function openRouterCompletionBody(input: AiCompletionInput, model: string, strea
     temperature: input.temperature ?? 0.2,
     max_tokens: input.maxTokens ?? 700,
     ...(input.responseFormat ? { response_format: input.responseFormat } : {}),
+    ...(input.responseFormat?.type === "json_schema" ? { provider: { require_parameters: true } } : {}),
     ...(stream ? { stream: true } : {}),
     messages: [
       { role: "system", content: input.systemPrompt },
@@ -155,17 +163,18 @@ export class OpenRouterProvider implements AiProvider {
     if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
 
     const startedAt = Date.now();
-    const models = attemptModels(primaryModel);
+    const models = attemptModels(primaryModel).slice(0, input.maxAttempts ?? Infinity);
     const fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }> = [];
 
     for (const model of models) {
+      if (input.signal?.aborted) break;
       const attemptStartedAt = Date.now();
       try {
         const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers: openRouterHeaders(),
           body: openRouterCompletionBody(input, model),
-          signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+          signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS)]) : AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
         });
         const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
         const rawText = raw?.choices?.[0]?.message?.content;
@@ -297,12 +306,13 @@ export class OpenRouterProvider implements AiProvider {
   }
 
   async generateReply(input: AiGenerateReplyInput): Promise<AiGenerateReplyResult> {
+    if (input.responseSchema) return this.generateCompletion({ ...input, maxAttempts: 1, responseFormat: { type: "json_schema", json_schema: { name: "conversation_response", strict: true, schema: input.responseSchema } }, metadata: { ...input.metadata, conversationId: input.conversationId, messageId: input.messageId, feature: "CONVERSATION_RESPONSE" } });
     if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR");
     const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
     if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR");
 
     const startedAt = Date.now();
-    const models = attemptModels(primaryModel);
+    const models = attemptModels(primaryModel).slice(0, input.maxAttempts ?? Infinity);
     const fallbackFailureReasons: Array<{ model: string; reason: string }> = [];
 
     for (const model of models) {
@@ -332,7 +342,7 @@ export class OpenRouterProvider implements AiProvider {
             ...input.metadata,
           } : undefined,
         }),
-        signal: AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
+        signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS)]) : AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
       });
       const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
       const rawText = raw?.choices?.[0]?.message?.content;

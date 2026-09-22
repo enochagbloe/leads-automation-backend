@@ -1,3 +1,4 @@
+import { hasGroundedPrice } from "../conversation-response-policy.service";
 import type { AiBusinessContext } from "../ai-context-builder.service";
 
 type ServiceContext = AiBusinessContext["services"][number];
@@ -33,7 +34,7 @@ export function redactGuardedContextPricing(context: AiBusinessContext): AiBusin
     services,
     safetyInstructions: {
       ...context.safetyInstructions,
-      canAnswerPricingQuestions: services.some((service) => service.priceType != null && service.priceType !== "NOT_SET"),
+      canAnswerPricingQuestions: services.some((service) => (service.priceType != null && service.priceType !== "NOT_SET") || (service.source === "WEBSITE" && Boolean(service.priceDescription))) || hasGroundedPrice(context.knowledgeDocumentChunks.map(chunk => ({ id: chunk.id, value: chunk.chunkText }))),
     },
   };
 }

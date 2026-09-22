@@ -44,7 +44,13 @@
     "test:waitlist-integration": "RUN_DATABASE_INTEGRATION_TESTS=true tsx --test tests/waitlist-lifecycle.integration.test.ts",
     "whatsapp:credentials:migrate": "tsx prisma/migrate-whatsapp-credentials.ts",
     "postinstall": "prisma generate",
-    "prepare": "husky"
+    "prepare": "husky",
+    "test:conversation-response": "tsx --test tests/conversation-response.test.ts",
+    "test:conversation-planner": "tsx --test tests/conversation-planner.test.ts",
+    "test:conversation-interpreter": "tsx --test tests/conversation-interpreter.test.ts",
+    "test:conversation-state": "tsx --test tests/conversation-state.test.ts tests/conversation-state.integration.test.ts",
+    "test:demo-context": "tsx --test tests/demo-runtime-context.test.ts tests/runtime-knowledge-provider.test.ts",
+    "test:demo": "tsx --test tests/demo-runtime-context.test.ts tests/runtime-knowledge-provider.test.ts tests/demo-session.test.ts tests/demo-website.test.ts tests/demo-setup.test.ts tests/demo-session.integration.test.ts tests/demo-message.test.ts tests/demo-message.integration.test.ts tests/demo-ai.test.ts tests/demo-ai.integration.test.ts tests/demo-realtime.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1100.0",
@@ -58,12 +64,15 @@
     "express-rate-limit": "^7.5.0",
     "fast-xml-parser": "^5.10.1",
     "helmet": "^8.1.0",
+    "htmlparser2": "^10.1.0",
+    "ipaddr.js": "^2.5.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.2.0",
     "pdf-parse": "^2.4.5",
     "pdfkit": "^0.19.1",
     "redis": "^6.0.1",
     "resend": "^6.0.2",
+    "robots-parser": "^3.0.1",
     "slugify": "^1.6.6",
     "yauzl": "3.2.0",
     "zod": "^3.25.42"

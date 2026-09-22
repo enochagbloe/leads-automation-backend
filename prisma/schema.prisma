@@ -104,6 +104,7 @@ enum LeadActivityAction {
 }
 
 enum ConversationChannel {
+  DEMO
   MANUAL
   WHATSAPP
   OTHER
@@ -1192,6 +1193,8 @@ enum DayOfWeek {
 }
 
 model User {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id                String          @id @default(cuid())
   firstName         String
   lastName          String
@@ -1236,6 +1239,8 @@ model User {
 }
 
 model BusinessAccount {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id        String   @id @default(cuid())
   name      String
   ownerId   String
@@ -1255,6 +1260,8 @@ model BusinessAccount {
 }
 
 model Business {
+  demoSessionId String? @unique
+  demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id                               String                      @id @default(cuid())
   businessAccountId                String
   name                             String
@@ -1860,6 +1867,9 @@ model Conversation {
   business                          Business                              @relation(fields: [businessId], references: [id], onDelete: Cascade)
   lead                              Lead                                  @relation(fields: [leadId], references: [id], onDelete: Cascade)
   assignedStaff                     BusinessMember?                       @relation("ConversationAssignee", fields: [assignedStaffId], references: [id], onDelete: SetNull)
+  state                             ConversationState?
+  stateEffects                      ConversationStateEffect[]
+  interpretations                   ConversationInterpretation[]
   messages                          Message[]
   appointments                      Appointment[]
   appointmentRescheduleRequests     AppointmentRescheduleRequest[]
@@ -1875,6 +1885,7 @@ model Conversation {
   premiumFollowUpMessageGenerations PremiumFollowUpMessageGeneration[]
   premiumFollowUpExecutions         PremiumFollowUpExecution[]
 
+  @@unique([id, businessId])
   @@index([businessId])
   @@index([businessId, leadId])
   @@index([businessId, assignedStaffId])
@@ -3488,4 +3499,97 @@ model BusinessNotification {
   @@index([businessId, type, createdAt])
   @@index([businessId, entityType, entityId])
   @@index([businessAccountId, createdAt])
+}
+
+
+enum DemoSessionStatus {
+  ACTIVE
+  EXPIRED
+  DESTROYED
+}
+
+enum DemoSetupStatus {
+  WAITING_FOR_BUSINESS
+  PROCESSING_WEBSITE
+  READY
+  READY_PARTIAL
+  FAILED
+}
+
+model DemoSession {
+  setupStatus DemoSetupStatus @default(WAITING_FOR_BUSINESS)
+  setupAttemptId String?
+  setupStartedAt DateTime?
+  setupCompletedAt DateTime?
+  demoContext Json?
+
+  id String @id @default(cuid())
+  tokenHash String @unique
+  ipHash String
+  idempotencyHash String? @unique
+  status DemoSessionStatus @default(ACTIVE)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  lastActivityAt DateTime @default(now())
+  destroyedAt DateTime?
+  business Business?
+  account BusinessAccount?
+  owner User?
+  @@index([status, expiresAt])
+  @@index([ipHash, status, expiresAt])
+}
+
+
+model ConversationState {
+  id                    String @id @default(cuid())
+  businessId            String
+  conversationId        String @unique
+  activeTopic           String?
+  previousTopic         String?
+  activeWorkflow        String?
+  workflowStatus        String @default("IDLE")
+  awaiting              Json?
+  knownEntities         Json @default("{}")
+  offeredOptions        Json @default("[]")
+  offeredOptionsCreatedAt DateTime?
+  lastAssistantQuestion String?
+  lastResolvedIntent    String?
+  revision              Int @default(0)
+  lastActivityAt        DateTime @default(now())
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationState_scope_fkey")
+  @@unique([conversationId, businessId])
+  @@index([businessId, lastActivityAt])
+}
+
+model ConversationStateEffect {
+  id              String @id @default(cuid())
+  businessId      String
+  conversationId  String
+  effectKey       String
+  commandHash     String
+  source          String
+  sourceMessageId String?
+  revisionBefore  Int
+  revisionAfter   Int
+  changedFields   Json
+  createdAt       DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationStateEffect_scope_fkey")
+  @@unique([businessId, conversationId, effectKey], map: "ConversationStateEffect_scope_key")
+  @@index([businessId, conversationId, createdAt])
+}
+
+model ConversationInterpretation {
+  id String @id @default(cuid())
+  businessId String
+  conversationId String
+  sourceMessageId String
+  snapshotRevision Int
+  appliedRevision Int
+  result Json
+  createdAt DateTime @default(now())
+  conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationInterpretation_scope_fkey")
+  @@unique([businessId, conversationId, sourceMessageId], map: "ConversationInterpretation_source_key")
+  @@index([businessId, conversationId, createdAt])
 }

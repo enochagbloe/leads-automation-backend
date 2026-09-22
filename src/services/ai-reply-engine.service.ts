@@ -1,3 +1,10 @@
+import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
+import { conversationTransactionOptions } from "./conversation-transaction";
+import { ConversationPlan } from "./conversation-plan.schema";
+import { assertPlanCurrent } from "./conversation-planner.service";
+import { missingAiBookingFields } from "./appointment/appointment-conversation-requirements";
+import { generateContextReply } from "./ai-reply-runtime.service";
+import { storeAiReply, logConversationResponsePersisted } from "./ai-message-store.service";
 import {
   BusinessRole,
   ConversationChannel,
@@ -220,7 +227,7 @@ function normalizeName(value?: string | null) {
 
 function resolveAiBookingLocationType(service: AiBusinessContext["services"][number], requested?: AppointmentLocationType) {
   if (service.defaultLocationType) return service.defaultLocationType;
-  if (!service.allowAiToChooseLocationType) return AppointmentLocationType.TO_BE_CONFIRMED;
+  if (!service.allowAiToChooseLocationType || !service.allowedLocationTypes) return AppointmentLocationType.TO_BE_CONFIRMED;
   if (
     requested
     && requested !== AppointmentLocationType.TO_BE_CONFIRMED
@@ -232,13 +239,7 @@ function resolveAiBookingLocationType(service: AiBusinessContext["services"][num
   return AppointmentLocationType.TO_BE_CONFIRMED;
 }
 
-function validDate(value?: string) {
-  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
-}
 
-function validTime(value?: string) {
-  return Boolean(value && /^([01]\d|2[0-3]):[0-5]\d$/.test(value));
-}
 
 function confirmedAppointmentReply(appointment: { service?: { name: string } | null; title: string; startTime: Date; timezone: string }) {
   const when = new Intl.DateTimeFormat("en-US", {
@@ -287,6 +288,7 @@ export async function createAiBookingRequest(input: {
   leadId: string;
   messageId: string;
   decision: NonNullable<AiSafetyResult["decision"]>;
+  conversationPlan?: ConversationPlan;
 }): Promise<AiBookingAppointment> {
   const key = bookingIdempotencyKey({
     businessId: input.context.business.id,
@@ -304,10 +306,7 @@ export async function createAiBookingRequest(input: {
 
 
   const intent = input.decision.appointmentIntent;
-  const missing = new Set(intent?.missingFields ?? []);
-  if (!intent?.serviceId && !intent?.serviceName) missing.add("service");
-  if (!validDate(intent?.preferredDate)) missing.add("preferredDate");
-  if (!validTime(intent?.preferredTime)) missing.add("preferredTime");
+  const missing = new Set(missingAiBookingFields(intent));
   if (missing.size) {
     throw new AppError(422, "AI booking request is missing required details.", "AI_BOOKING_MISSING_FIELDS", { missingFields: [...missing] });
   }
@@ -347,6 +346,7 @@ export async function createAiBookingRequest(input: {
     );
   }
 
+  if (input.conversationPlan) await assertPlanCurrent(input.conversationPlan);
   const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
   const customerLocation = intent?.customerLocation?.trim() || null;
   const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
@@ -395,6 +395,7 @@ export async function createAiBookingRequest(input: {
     locationType,
     location: customerLocation,
     source: AppointmentSource.AI_CONVERSATION,
+    conversationPlan: input.conversationPlan,
     aiDecision: {
       confidence: input.decision.confidence,
       intent: input.decision.intent,
@@ -554,6 +555,11 @@ export const aiReplyEngine = {
     if (message.senderType !== MessageSenderType.CUSTOMER || message.direction !== MessageDirection.INBOUND) {
       throw new AppError(422, "AI only processes inbound customer messages.", "AI_MESSAGE_NOT_FOUND");
     }
+    const plannedReply = await prisma.message.findFirst({ where: { businessId: conversation.businessId, conversationId: conversation.id, senderType: "AI", direction: "OUTBOUND", deletedAt: null, metadata: { path: ["conversationPlan", "sourceMessageId"], equals: message.id } } });
+    if (plannedReply) {
+      console.info("conversation_plan.replayed", { businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id });
+      return { status: "REPLAYED", blocked: false, message: plannedReply, decision: undefined };
+    }
     if (message.messageType !== MessageType.TEXT && message.messageType !== MessageType.SYSTEM) {
       const decision = fallbackHumanReviewDecision("Customer sent media that AI image understanding does not support yet.");
       const notifications = await markConversationNeedsHumanReview({
@@ -709,30 +715,29 @@ export const aiReplyEngine = {
       select: { id: true },
     });
 
-    let providerResult: AiGenerateReplyResult | null = null;
+    const timing = new ConversationRuntimeTiming();
+    let providerResult: Awaited<ReturnType<typeof generateContextReply>> | null = null;
     try {
-      const context = await aiBusinessContextService.buildBusinessContextForAi({
+      const context = await timing.measure("contextBuildMs", () => aiBusinessContextService.buildBusinessContextForAi({
         businessId: conversation.businessId,
         conversationId: conversation.id,
         messageId: message.id,
         plan: usage.subscription.plan.code,
         maxMessages: env.AI_MAX_CONTEXT_MESSAGES,
         maxContextTokens: env.AI_MAX_BUSINESS_CONTEXT_TOKENS,
-      });
+      }));
       const providerInput = {
         businessId: conversation.businessId,
         conversationId: conversation.id,
         messageId: message.id,
-        systemPrompt: aiPromptContextFormatter.buildSystemPrompt(context),
-        userPrompt: aiPromptContextFormatter.buildUserPrompt(context),
         metadata: {
           plan: usage.subscription.plan.code,
           channel: conversation.channel === ConversationChannel.WHATSAPP ? "WHATSAPP" as const : "MANUAL" as const,
           source: "INBOUND_MESSAGE" as const,
         },
       };
-      providerResult = await aiProvider.generateReply(providerInput);
-      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens });
+      providerResult = await generateContextReply(context, providerInput, timing);
+      await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, tokens: providerResult.totalTokens, requests: providerResult.providerRequestCount });
       if (providerResult.fallbackExhausted) {
         const fallbackDecision = providerResult.parsedDecision ?? fallbackHumanReviewDecision("AI provider failed after fallback attempts.");
         const notifications = await markConversationNeedsHumanReview({
@@ -782,7 +787,9 @@ export const aiReplyEngine = {
         });
         return { status: "AI_FALLBACK_EXHAUSTED", blocked: true, decision: fallbackDecision };
       }
+      await assertPlanCurrent(providerResult.conversationPlan);
       const safety = aiSafetyService.evaluate({
+        validatedConversationClarification: providerResult!.conversationPlan.move === "ASK_FOR_CLARIFICATION",
         decision: providerResult.parsedDecision,
         businessReady: businessReadyForAi(context.readiness),
         humanTakeover: conversation.humanTakeover,
@@ -851,20 +858,21 @@ export const aiReplyEngine = {
       let successStatus: AiExecutionStatus = "SUCCESS_AUTO_REPLIED";
       if (safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
         try {
-          bookingAppointment = await createAiBookingRequest({
+          bookingAppointment = await timing.measure("workflowMs", () => createAiBookingRequest({
+            conversationPlan: providerResult!.conversationPlan,
             context,
             businessAccountId: conversation.business.businessAccountId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
             messageId: message.id,
             decision: safety.decision,
-          });
+          }));
           bookingRequestCreated = true;
           successStatus = "SUCCESS_BOOKING_REQUEST_CREATED";
           replyText = bookingAppointment.status === AppointmentStatus.CONFIRMED
             && bookingAppointment.confirmationSource === AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM
             ? confirmedAppointmentReply(bookingAppointment)
-            : "Thanks. I’ve sent your appointment request to the business team for confirmation. They’ll confirm the final appointment shortly.";
+            : "Your appointment request has been saved for the business to review.";
           await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id });
           realtimeService.publish({
             type: "business.ai.booking_request.created",
@@ -881,6 +889,7 @@ export const aiReplyEngine = {
           });
         } catch (error) {
           const code = error instanceof AppError ? error.code : "AI_BOOKING_REQUEST_FAILED";
+          if (code === "CONVERSATION_STATE_CONFLICT" || code === "CONVERSATION_PLAN_CONTROL_CHANGED") throw error;
           bookingBlockedReason = code;
           if (code === "AI_BOOKING_MISSING_FIELDS") {
             replyText = safety.decision.replyText
@@ -959,9 +968,7 @@ export const aiReplyEngine = {
       let providerMessageId: string | null = null;
       let sendError: string | null = null;
 
-      const aiMessage = await prisma.$transaction(async (tx) => {
-        const created = await tx.message.create({
-          data: {
+      const aiMessage = await timing.measure("persistenceMs", () => prisma.$transaction(tx => storeAiReply(tx, {
             businessId: conversation.businessId,
             conversationId: conversation.id,
             leadId: conversation.leadId,
@@ -986,38 +993,15 @@ export const aiReplyEngine = {
               bookingRequestCreated,
               bookingBlockedReason,
               appointmentId: bookingAppointment?.id ?? null,
+              workflowExecutionResult: bookingRequestCreated ? {
+                businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id,
+                stateRevision: providerResult!.conversationPlan.stateRevision, status: "SUCCEEDED",
+                claims: bookingAppointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [],
+              } : providerResult!.trustedWorkflowResult,
             }),
-          },
-        });
-        await tx.conversation.update({
-          where: { id: conversation.id },
-          data: {
-            lastMessagePreview: replyText.slice(0, 240),
-            lastMessageAt: created.createdAt,
-            status: conversation.status === ConversationStatus.OPEN ? ConversationStatus.AI_HANDLING : conversation.status,
-          },
-        });
-        await tx.leadActivity.create({
-          data: {
-            businessId: conversation.businessId,
-            leadId: conversation.leadId,
-            action: LeadActivityAction.MESSAGE_CREATED,
-            metadata: {
-              source: "AI_REPLY_ENGINE",
-              conversationId: conversation.id,
-              messageId: created.id,
-              senderType: MessageSenderType.AI,
-              direction: MessageDirection.OUTBOUND,
-              intent: safety.decision.intent,
-              confidence: safety.decision.confidence,
-              bookingRequestCreated,
-              appointmentId: bookingAppointment?.id ?? null,
-            },
-          },
-        });
-        return created;
-      });
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }), conversationTransactionOptions()));
 
+      logConversationResponsePersisted(aiMessage);
       if (conversation.channel === ConversationChannel.WHATSAPP) {
         try {
           const integration = await getWhatsAppIntegration(conversation.businessId);
@@ -1152,6 +1136,10 @@ export const aiReplyEngine = {
       return { status: finalStatus, blocked: false, message: settledMessage, decision: safety.decision, customerIssue: customerIssueResult };
     } catch (error) {
       const errorCode = safeProviderError(error);
+      const interpretationUsage = error instanceof AppError ? error.context?.conversationInterpretationUsage as { requests?: number; tokens?: number } | undefined : undefined;
+      if (!providerResult && interpretationUsage && Number.isFinite(interpretationUsage.requests) && (interpretationUsage.requests ?? 0) > 0) {
+        await aiUsageService.trackRequest({ accountUsageId: usage.usage.id, requests: interpretationUsage.requests, tokens: interpretationUsage.tokens }).catch(() => console.error("Interpretation usage tracking failed", { businessId: conversation.businessId, conversationId: conversation.id, messageId: message.id }));
+      }
       await logInteraction({
         businessId: conversation.businessId,
         businessAccountId: conversation.business.businessAccountId,
@@ -1175,6 +1163,8 @@ export const aiReplyEngine = {
         payload: { conversationId: conversation.id, messageId: message.id, errorCode },
       });
       throw error instanceof AppError ? error : new AppError(500, "AI reply processing failed.", "AI_PROVIDER_ERROR");
+    } finally {
+      timing.report({ businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id });
     }
   },
 

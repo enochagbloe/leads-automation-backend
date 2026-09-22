@@ -12,6 +12,12 @@ const credentialKeyId = z.string().regex(/^[A-Za-z0-9_-]+$/).default("primary");
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DEPLOYMENT_ENVIRONMENT: z.enum(STORAGE_ENVIRONMENTS).optional(),
+  CONVERSATION_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().min(5000).max(60000).default(20000),
+  DEMO_AI_PROCESSING_TIMEOUT_MS: z.coerce.number().int().min(30000).max(180000).default(90000),
+  DEMO_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  DEMO_SESSION_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(60),
+  DEMO_MAX_ACTIVE_SESSIONS_PER_IP: z.coerce.number().int().min(1).max(20).default(3),
+  DEMO_CLEANUP_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(3600).default(60),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1),
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(3),
@@ -57,6 +63,7 @@ const schema = z.object({
   OPENROUTER_APP_NAME: z.string().min(1).default("BizReply AI"),
   OPENROUTER_APP_URL: optionalString,
   AI_REPLY_ENABLED: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  CONVERSATION_OPTIONS_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
   AI_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.75),
   AI_AUTO_CONFIRM_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.85),
   PREMIUM_APPOINTMENT_AUTO_CONFIRM_ENABLED: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
@@ -264,6 +271,7 @@ export const env = {
 };
 export const corsOrigins = [...new Set([
   ...env.CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
+  "https://app.bizreplyhq.com",
   "https://bizreplyhq.com",
   "https://www.bizreplyhq.com",
 ])];

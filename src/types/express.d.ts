@@ -3,6 +3,7 @@ import { BusinessRole, PlatformRole } from "@prisma/client";
 declare global {
   namespace Express {
     interface Request {
+      demo?: import("../services/demo.service").DemoActor;
       rawBody?: Buffer;
       auth?: {
         userId: string;

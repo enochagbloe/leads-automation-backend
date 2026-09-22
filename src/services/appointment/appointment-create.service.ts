@@ -1,3 +1,4 @@
+import { assertPlanCurrent } from "../conversation-planner.service";
 import { PlanCode, AppointmentConfirmationMode, AppointmentSource, BusinessNotificationType, BusinessNotificationPriority, BusinessNotificationStatus, ServiceCapacityMode, AppointmentStatus, AppointmentHumanConfirmationReason, AppointmentConfirmationSource, AppointmentActivityType, AuditAction, LeadActivityAction, LeadStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { AppError } from "../../utils/errors";
@@ -58,6 +59,14 @@ export async function createAppointmentFromValidatedInput(actor: AppointmentActo
   let assignmentNotifications: Array<{ id: string; recipientMembershipId: string; recipientUserId: string; type: BusinessNotificationType; priority: BusinessNotificationPriority; status: BusinessNotificationStatus; title: string; message: string; createdAt: Date }> = [];
   const appointment = await prisma.$transaction(async (tx) => {
     await validateBusiness(actor, tx);
+    if (input.conversationPlan) {
+      if (input.conversationPlan.businessId !== actor.businessId || input.conversationPlan.conversationId !== input.conversationId || input.conversationPlan.demoSessionId || input.conversationPlan.workflowRequest?.type !== "CREATE_BOOKING_REQUEST") throw new AppError(403, "Booking plan scope mismatch", "CONVERSATION_STATE_FORBIDDEN");
+      const request = input.conversationPlan.workflowRequest;
+      if (request.serviceId !== input.serviceId || request.preferredDate !== input.date || request.preferredTime !== input.time || request.timezone !== input.timezone) throw new AppError(403, "Booking input differs from plan", "CONVERSATION_PLAN_ACTION_MISMATCH");
+      await tx.$queryRaw`SELECT "id" FROM "Conversation" WHERE "businessId" = ${actor.businessId} AND "id" = ${input.conversationId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT "id" FROM "ConversationState" WHERE "businessId" = ${actor.businessId} AND "conversationId" = ${input.conversationId} FOR UPDATE`;
+      await assertPlanCurrent(input.conversationPlan, tx);
+    }
     let transactionAssignedStaffId = initialAssignedStaffId;
     if (transactionAssignedStaffId) {
       await lockAppointmentAvailabilityScope(tx, { businessId: actor.businessId, assignedStaffId: transactionAssignedStaffId, date: input.date });
