@@ -1,5 +1,5 @@
 import { optionsAreFresh } from "./conversation-interpretation-policy";
-import { ConversationPlan } from "./conversation-plan.schema";
+import { ConversationPlan, plannedAskedField } from "./conversation-plan.schema";
 import { StateData } from "./conversation-state.schema";
 import { ConversationResponse, conversationResponseSchema, WorkflowExecutionResult, workflowExecutionResultSchema } from "./conversation-response.schema";
 export type ResponseFact = { id: string; value: string };
@@ -35,8 +35,12 @@ export const conversationResponsePolicyService = {
     if (p.demoSessionId && p.intent === "BOOKING_INTENT" && /confirm(ed|ation)?/i.test(text)) issues.add("BOOKING_CONFIRMATION_WORDING");
     if (r.requiresHumanReview !== p.requiresHumanReview) issues.add("REVIEW_POLICY_MISMATCH");
     if (r.fulfilledPurpose !== p.responseDirective.purpose) issues.add("PURPOSE_MISMATCH");
-    const expectedField = ["ASK_FOR_FIELD", "ASK_FOR_OPTION", "ASK_FOR_CLARIFICATION"].includes(p.move) ? p.targetField ?? null : null;
-    if (p.move === "ASK_FOR_FIELD" && expectedField && fieldPatterns[expectedField] && !fieldPatterns[expectedField]!.test(text) && !(expectedField === "preferredDate" && /\bwhen\b/i.test(text))) issues.add("PLANNED_FIELD_NOT_ASKED");
+    const expectedField = plannedAskedField(p);
+    if (p.continuation) {
+      if (!r.answerText || !r.continuationQuestion || text !== `${r.answerText} ${r.continuationQuestion}` || r.answerText.includes("?") || !r.continuationQuestion.includes("?")) issues.add("ANSWER_CONTINUATION_INVALID");
+      if (r.answerText && /^(?:what|which|when|would|could|can)\b/i.test(r.answerText)) issues.add("SIDE_ANSWER_MISSING");
+    } else if (r.answerText != null || r.continuationQuestion != null) issues.add("UNPLANNED_CONTINUATION");
+    if ((p.move === "ASK_FOR_FIELD" || p.continuation) && expectedField && fieldPatterns[expectedField] && !fieldPatterns[expectedField]!.test(p.continuation ? r.continuationQuestion ?? "" : text) && !(expectedField === "preferredDate" && /\b(?:when|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(p.continuation ? r.continuationQuestion ?? "" : text))) issues.add("PLANNED_FIELD_NOT_ASKED");
     if (p.responseDirective.askOneQuestion && !text.includes("?") && !/\b(?:please|tell me|share|choose|select)\b/i.test(text)) issues.add("QUESTION_MISSING");
     if (r.askedField !== expectedField) issues.add("WRONG_FIELD");
     if (p.responseDirective.askOneQuestion ? r.questionCount !== 1 || (text.match(/\?/g)?.length ?? 0) > 1 : r.questionCount !== 0 || text.includes("?")) issues.add("QUESTION_COUNT_INVALID");
@@ -44,7 +48,7 @@ export const conversationResponsePolicyService = {
     for (const clause of clauses) for (const [field, pattern] of Object.entries(fieldPatterns)) if ((field !== "serviceNeed" || expectedField === "serviceNeed") && pattern.test(clause) && expectedField && field !== expectedField && !(["serviceName", "serviceNeed"].includes(expectedField) && field === "service")) issues.add("WRONG_FIELD_IN_TEXT");
     if (!p.responseDirective.askOneQuestion && clauses.length) issues.add("UNPLANNED_QUESTION");
     if (p.move === "ASK_FOR_CLARIFICATION" && /\b(?:I(?: will|'ll)|we(?: will|'ll)) (?:choose|select|go with|use)\b/i.test(text)) issues.add("CLARIFICATION_GUESSES");
-    if (expectedField && input.state.knownEntities[expectedField] && p.move === "ASK_FOR_FIELD") issues.add("KNOWN_FIELD_REQUESTED");
+    if (expectedField && input.state.knownEntities[expectedField] && (p.move === "ASK_FOR_FIELD" || p.continuation)) issues.add("KNOWN_FIELD_REQUESTED");
     const options = p.options ?? clarificationOptions(p, input.state);
     if (p.move === "ASK_FOR_CLARIFICATION" && !options.length && !p.serviceClarification?.candidates.length && /\b(?:options?|choices?|(?:first|second|third|last|other)\s+(?:one|option|choice)|which\s+one)\b/i.test(text)) issues.add("UNGROUNDED_OPTION_CLARIFICATION");
     if (new Set(r.referencedOptionIds).size !== r.referencedOptionIds.length || r.referencedOptionIds.some(id => !options.some(o => o.id === id))) issues.add("OPTION_REFERENCE_INVALID");

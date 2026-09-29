@@ -1,3 +1,4 @@
+import { shouldPreservePurpose, topicDriftError } from "./conversation-continuity-policy";
 import type { AiBusinessContext } from "./ai-context-builder.service";
 import { validateCustomerPurpose, purposeEntities, purposeEntityKeys, resolvedConversationService } from "./conversation-purpose-policy";
 import { env } from "../config/env";
@@ -42,6 +43,19 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     delete interpretation.clarificationReason;
   }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
+  const driftError = topicDriftError(snapshot, interpretation);
+  if (driftError) return ambiguous(driftError);
+  if (shouldPreservePurpose(snapshot, interpretation)) {
+    if (interpretation.intent === "UNKNOWN") return ambiguous("CONTEXT_INSUFFICIENT");
+    if (interpretation.needsClarification) return ambiguous(interpretation.clarificationReason ?? "INTERPRETATION_AMBIGUOUS");
+    if (interpretation.confidence < high) return ambiguous("LOW_CONFIDENCE");
+    if (interpretation.topicShift?.from && interpretation.topicShift.from !== snapshot.state.activeTopic) return ambiguous("TOPIC_REFERENCE_MISMATCH");
+    // The current question may have its own purpose, but cannot replace the main one.
+    // Validate references without authorizing any proposed state, workflow or expectation changes.
+    const checked = validateCustomerPurpose({ ...snapshot, state: { ...snapshot.state, activeWorkflow: null } }, interpretation, context);
+    if (checked.error) return ambiguous(checked.error);
+    return { interpretation, patch: { lastResolvedIntent: interpretation.intent } as StatePatch, commands: [{ type: "SET_INTENT", intent: interpretation.intent }] as InterpretationCommand[] };
+  }
   const checkedPurpose = validateCustomerPurpose(snapshot, interpretation, context);
   if (checkedPurpose.error) return ambiguous(checkedPurpose.error);
   const purpose = checkedPurpose.purpose;

@@ -19,6 +19,7 @@ export const responseComplaintSchema = z.object({
 export const conversationResponseSchema = z.object({
   complaints: z.array(responseComplaintSchema).max(5).default([]),
   text: z.string().trim().min(1).max(1000).nullable(),
+  answerText: z.string().trim().min(1).max(800).nullish(), continuationQuestion: z.string().trim().min(1).max(300).nullish(),
   acknowledgedContext: z.boolean(), fulfilledPurpose: conversationPlanSchema.innerType().shape.responseDirective.shape.purpose,
   askedField: entityKeySchema.nullable(), questionCount: z.number().int().min(0).max(4),
   referencedOptionIds: z.array(entityKeySchema).max(12), referencedFactIds: z.array(z.string().min(1).max(128)).max(12),
@@ -35,12 +36,13 @@ export const responseOutputSchema = {
       summary: string, requiresInternalAction: boolean, suggestedStaffSpecialtyTags: { type: "array", items: string },
       matchType: { type: "string", enum: responseComplaintSchema.shape.matchType.options }, matchedIssueId: { anyOf: [string, { type: "null" }] },
     }, required: ["category", "severity", "summary", "requiresInternalAction", "suggestedStaffSpecialtyTags", "matchType", "matchedIssueId"] } },
+    answerText: { anyOf: [string, { type: "null" }] }, continuationQuestion: { anyOf: [string, { type: "null" }] },
     text: { anyOf: [string, { type: "null" }] }, acknowledgedContext: boolean,
     fulfilledPurpose: { type: "string", enum: ["ANSWER_CUSTOMER", "COLLECT_INFORMATION", "CLARIFY", "CONFIRM", "PRESENT_OPTIONS", "ACKNOWLEDGE", "HANDOFF", "WAIT", "WORKFLOW_RESULT"] },
     askedField: { anyOf: [string, { type: "null" }] }, questionCount: { type: "integer" },
     referencedOptionIds: { type: "array", items: string }, referencedFactIds: { type: "array", items: string }, claimsActionCompleted: boolean,
     claims: { type: "array", items: { type: "string", enum: responseClaims } }, confidence: { type: "number" }, requiresHumanReview: boolean,
   },
-  required: ["complaints", "text", "acknowledgedContext", "fulfilledPurpose", "askedField", "questionCount", "referencedOptionIds", "referencedFactIds", "claimsActionCompleted", "claims", "confidence", "requiresHumanReview"],
+  required: ["complaints", "text", "answerText", "continuationQuestion", "acknowledgedContext", "fulfilledPurpose", "askedField", "questionCount", "referencedOptionIds", "referencedFactIds", "claimsActionCompleted", "claims", "confidence", "requiresHumanReview"],
 };
 export type ResponseValidationMetadata = { validationVersion: 1; source: "MODEL" | "PLAN_FALLBACK" | "WORKFLOW_RESULT" | "NO_ACTION"; fulfilledPurpose: ConversationResponse["fulfilledPurpose"]; askedField: string | null; referencedOptionIds: string[]; claimsActionCompleted: boolean; regenerationCount: number; fallbackUsed: boolean };

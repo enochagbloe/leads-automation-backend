@@ -16,13 +16,23 @@ export type WorkflowPlanningResult = {
   status: "NEEDS_INPUT" | "NEEDS_CLARIFICATION" | "READY_FOR_ACTION" | "NEEDS_CONFIRMATION" | "OPTIONS" | "WAITING" | "HUMAN_REQUIRED";
   requirements: WorkflowRequirement[]; reasonCode: string; targetField?: string; options?: ConversationPlan["options"]; action?: ConversationPlan["workflowRequest"];
 };
-export interface ConversationWorkflowPlanningAdapter { supports(workflow: string): boolean; inspect(input: PlanningInput): Promise<WorkflowPlanningResult>; }
+export interface ConversationWorkflowPlanningAdapter { supports(workflow: string): boolean; inspect(input: PlanningInput): Promise<WorkflowPlanningResult>; continuationField?(input: PlanningInput): "preferredDate" | "preferredTime" | undefined; }
 const value = (input: PlanningInput, key: string) => { const e = input.conversationSnapshot.state.knownEntities[key]; return e?.normalizedValue ?? e?.value; };
 const text = (input: PlanningInput, key: string) => typeof value(input, key) === "string" ? value(input, key) as string : undefined;
 
 /** Reads existing catalog configuration; actual validation/availability/creation stays in appointment module. */
 export const appointmentConversationAdapter: ConversationWorkflowPlanningAdapter = {
   supports: workflow => workflow === "APPOINTMENT_BOOKING",
+  continuationField(input) {
+    // Pure requirements only: a side question must never check slots or execute a workflow.
+    const { businessContext: context, conversationSnapshot: snapshot } = input;
+    const service = resolvedConversationService(snapshot.state, context);
+    if (!service || context.safetyInstructions?.canDetectBookingIntent === false) return undefined;
+    if (context.runtimeKnowledgeGuards?.some(g => ["SERVICE", "BUSINESS_AVAILABILITY", "APPOINTMENT_SETTINGS"].includes(g.canonicalEntityType) && (!g.canonicalEntityId || g.canonicalEntityType !== "SERVICE" || g.canonicalEntityId === service.id))) return undefined;
+    if (!context.demoSessionId && (!service.isBookable || !service.durationMinutes || !snapshot.timezone)) return undefined;
+    const missing = missingAiBookingFields({ serviceId: service.id, preferredDate: text(input, "preferredDate"), preferredTime: text(input, "preferredTime") });
+    return ["preferredDate", "preferredTime"].find(key => missing.includes(key) && !snapshot.state.knownEntities[key]) as "preferredDate" | "preferredTime" | undefined;
+  },
   async inspect(input) {
     const context = input.businessContext;
     const known = Object.keys(input.conversationSnapshot.state.knownEntities);
@@ -52,6 +62,9 @@ export const appointmentConversationAdapter: ConversationWorkflowPlanningAdapter
 };
 export const conversationWorkflowPlanningService = {
   adapters: [appointmentConversationAdapter] as readonly ConversationWorkflowPlanningAdapter[],
+  continuationField(workflow: string, input: PlanningInput) {
+    return this.adapters.find(a => a.supports(workflow))?.continuationField?.(input);
+  },
   async inspect(workflow: string, input: PlanningInput) {
     const adapter = this.adapters.find(a => a.supports(workflow));
     return adapter ? input.timing ? input.timing.measure("workflowMs", () => adapter.inspect(input)) : adapter.inspect(input) : null;

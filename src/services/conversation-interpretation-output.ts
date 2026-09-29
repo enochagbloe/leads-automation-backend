@@ -42,6 +42,6 @@ export const interpretationOutputSchema = object({
   pendingExpectation: nullable(object({ resolved: boolean, field: nullable(text) })),
   confirmation: nullable(object({ type: enumeration(["YES", "NO", "UNCLEAR"]), confidence: number })),
   correction: nullable(object({ isCorrection: boolean, replacesEntity: nullable(text) })),
-  topicShift: nullable(object({ detected: boolean, from: nullable(topic), to: nullable(topic) })),
+  topicShift: nullable(object({ detected: boolean, kind: nullable(enumeration(["SIDE_QUESTION", "NEW_PRIMARY_GOAL"])), evidence: nullable({ type: "array", items: object({ messageId: text, quote: text }) }), from: nullable(topic), to: nullable(topic) })),
   confidence: number, needsClarification: { ...boolean, description: "True only for unresolved meaning or ambiguous supplied values. False for a clear booking request with missing date/time, or a clear correction that leaves another field unanswered. Missing workflow fields are collected by the planner." }, clarificationReason: nullable(text),
 });

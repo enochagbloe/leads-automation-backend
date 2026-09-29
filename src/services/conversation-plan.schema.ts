@@ -11,10 +11,12 @@ export const conversationPlanSchema = z.object({
   workflowRequest: z.object({ type: z.enum(["CREATE_BOOKING_REQUEST", "CHECK_APPOINTMENT_AVAILABILITY"]), serviceId: z.string().min(1).max(128).optional(), preferredDate: z.string().max(10), preferredTime: z.string().max(5), timezone: z.string().max(100) }).strict().optional(),
   options: optionsSchema.optional(),
   serviceClarification: z.object({ need: z.string().max(1000).nullable(), candidates: z.array(z.object({ id: z.string().min(1).max(128), name: z.string().max(180), description: z.string().max(300).nullable() }).strict()).max(3) }).strict().optional(),
+  continuation: z.object({ kind: z.literal("ASK_FOR_FIELD"), workflow: entityKeySchema, field: z.enum(["preferredDate", "preferredTime"]) }).strict().optional(),
   suspendedContext: z.object({ workflow: entityKeySchema, stillAwaiting: entityKeySchema.optional() }).strict().optional(),
   responseDirective: z.object({ acknowledgeContext: z.boolean(), askOneQuestion: z.boolean(), purpose: z.enum(["ANSWER_CUSTOMER", "COLLECT_INFORMATION", "CLARIFY", "CONFIRM", "PRESENT_OPTIONS", "ACKNOWLEDGE", "HANDOFF", "WAIT", "WORKFLOW_RESULT"]) }).strict(),
   confidence: z.number().min(0).max(1), requiresHumanReview: z.boolean(), stateRevision: z.number().int().nonnegative(),
 }).strict().superRefine((p, ctx) => {
+  if (p.continuation && (p.move !== "ANSWER" || p.responseDirective.purpose !== "ANSWER_CUSTOMER" || !p.responseDirective.askOneQuestion || p.requiresHumanReview || p.workflowRequest || p.targetField || p.workflow !== p.continuation.workflow || p.suspendedContext?.workflow !== p.continuation.workflow || p.suspendedContext.stillAwaiting !== p.continuation.field || p.knownFields.includes(p.continuation.field) || !p.missingFields.includes(p.continuation.field))) ctx.addIssue({ code: "custom", message: "Continuation requires an answer and one still-missing field in the preserved workflow" });
   if ((p.move === "ASK_FOR_FIELD" || p.move === "ASK_FOR_OPTION") && !p.targetField) ctx.addIssue({ code: "custom", message: "A target field is required" });
   if (p.move === "ASK_FOR_OPTION" && !p.options?.length) ctx.addIssue({ code: "custom", message: "Trusted options are required" });
   if (p.options?.length && p.move !== "ASK_FOR_OPTION") ctx.addIssue({ code: "custom", message: "Options belong to an option move" });
@@ -22,3 +24,5 @@ export const conversationPlanSchema = z.object({
   if (p.demoSessionId && p.workflowRequest?.type === "CREATE_BOOKING_REQUEST") ctx.addIssue({ code: "custom", message: "Demo cannot request production mutation" });
 });
 export type ConversationPlan = z.infer<typeof conversationPlanSchema>;
+
+export const plannedAskedField = (plan: ConversationPlan) => plan.continuation?.field ?? (["ASK_FOR_FIELD", "ASK_FOR_OPTION", "ASK_FOR_CLARIFICATION"].includes(plan.move) ? plan.targetField ?? null : null);

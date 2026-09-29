@@ -36,7 +36,7 @@ export const interpretationSchema = z.object({
   optionResolution: z.object({ basis: z.enum(["POSITION", "EXACT_VALUE", "ORDER", "CONTEXT_FOCUS", "AMBIGUOUS"]), candidateOptionIds: z.array(entityKeySchema).max(12).refine(ids => new Set(ids).size === ids.length), anchorMessageId: z.string().min(1).max(128).nullish().transform(v => v ?? undefined) }).strict().nullish().transform(v => v ?? undefined),
   confirmation: z.object({ type: z.enum(["YES", "NO", "UNCLEAR"]), confidence }).strict().nullish().transform(v => v ?? undefined),
   correction: z.object({ isCorrection: z.boolean(), replacesEntity: entityKeySchema.nullish().transform(v => v ?? undefined) }).strict().nullish().transform(v => v ?? undefined),
-  topicShift: z.object({ detected: z.boolean(), from: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined), to: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined) }).strict().nullish().transform(v => v ?? undefined),
+  topicShift: z.object({ detected: z.boolean(), kind: z.enum(["SIDE_QUESTION", "NEW_PRIMARY_GOAL"]).nullish().transform(v => v ?? undefined), evidence: z.array(z.object({ messageId: z.string().min(1).max(128), quote: z.string().min(1).max(300) }).strict()).min(1).max(3).nullish().transform(v => v ?? undefined), from: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined), to: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined) }).strict().nullish().transform(v => v ?? undefined),
   confidence,
   needsClarification: z.boolean(),
   clarificationReason: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).nullish().transform(v => v ?? undefined),

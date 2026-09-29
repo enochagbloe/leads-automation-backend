@@ -1,3 +1,4 @@
+import { topicDriftError } from "./conversation-continuity-policy";
 import { bookingPurposeRequirement } from "./conversation-purpose-policy";
 import { conversationTransactionOptions } from "./conversation-transaction";
 import { Prisma } from "@prisma/client";
@@ -7,7 +8,7 @@ import { conversationPlanSchema, ConversationPlan } from "./conversation-plan.sc
 import { conversationWorkflowPlanningService, PlanningInput } from "./conversation-workflow-planning.service";
 import { assertConversationScope, conversationStateService } from "./conversation-state.service";
 import { interpretationSchema } from "./conversation-interpretation.schema";
-import { optionsAreFresh } from "./conversation-interpretation-policy";
+import { optionsAreFresh, semanticConfidenceThreshold } from "./conversation-interpretation-policy";
 import { StatePatch } from "./conversation-state.schema";
 
 export async function assertPlanCurrent(plan: ConversationPlan, transaction?: Prisma.TransactionClient): Promise<void> {
@@ -21,6 +22,7 @@ export async function assertPlanCurrent(plan: ConversationPlan, transaction?: Pr
   const source = await tx.message.findFirst({ where: { id: plan.sourceMessageId, businessId: plan.businessId, conversationId: plan.conversationId, senderType: "CUSTOMER", direction: "INBOUND", deletedAt: null }, select: { id: true } });
   if (!source) throw new AppError(403, "Plan source forbidden", "CONVERSATION_STATE_FORBIDDEN");
   const state = await conversationStateService.get(plan, tx);
+  if (plan.continuation && (state.activeWorkflow !== plan.continuation.workflow || !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(state.workflowStatus) || state.knownEntities[plan.continuation.field] || state.awaiting && state.awaiting.type !== "FIELD")) throw new AppError(409, "Workflow no longer permits the planned continuation", "CONVERSATION_PLAN_CONTINUATION_CHANGED");
   if (state.revision !== plan.stateRevision) {
     console.warn("conversation_plan.conflict", { businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, stateRevision: plan.stateRevision });
     throw new AppError(409, "Conversation changed; reload and re-plan", "CONVERSATION_STATE_CONFLICT");
@@ -38,7 +40,7 @@ export const conversationPlannerService = {
     const finish = async (move: ConversationPlan["move"], reasonCode: string, purpose: ConversationPlan["responseDirective"]["purpose"], extra: Partial<ConversationPlan> = {}) => {
       const plan = conversationPlanSchema.parse({ ...base, move, reasonCode, responseDirective: { acknowledgeContext: true, askOneQuestion: move.startsWith("ASK_"), purpose }, ...extra });
       await assertPlanCurrent(plan); // An asynchronous adapter may have outlived this revision.
-      console.info(move === "ASK_FOR_CLARIFICATION" ? "conversation_plan.clarification" : plan.workflowRequest ? "conversation_plan.workflow_ready" : "conversation_plan.created", { businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, stateRevision: plan.stateRevision, intent: plan.intent, move, workflow: plan.workflow, targetField: plan.targetField, reasonCode, requiresHumanReview: plan.requiresHumanReview });
+      console.info(move === "ASK_FOR_CLARIFICATION" ? "conversation_plan.clarification" : plan.workflowRequest ? "conversation_plan.workflow_ready" : "conversation_plan.created", { businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, stateRevision: plan.stateRevision, intent: plan.intent, move, workflow: plan.workflow, targetField: plan.targetField, continuationField: plan.continuation?.field, reasonCode, requiresHumanReview: plan.requiresHumanReview });
       return plan;
     };
     // Safety, ambiguity, explicit intent, interruptions, lifecycle, provider requirements.
@@ -58,7 +60,21 @@ export const conversationPlannerService = {
     if (meaning.intent === "HUMAN_REQUEST") return finish("REQUEST_HUMAN", "CUSTOMER_REQUESTED_HUMAN", "HANDOFF", { requiresHumanReview: !context.demoSessionId });
     if (meaning.intent === "COMPLAINT") return finish("REQUEST_HUMAN", "EXISTING_COMPLAINT_POLICY", "HANDOFF", { requiresHumanReview: !context.demoSessionId });
     const interrupted = meaning.topicShift?.detected || ["GENERAL_QUESTION", "SERVICE_INQUIRY", "PRICING_INQUIRY", "AVAILABILITY_INQUIRY", "PAYMENT_QUESTION"].includes(meaning.intent);
-    if (interrupted) return finish("ANSWER", "CURRENT_QUESTION_FIRST", "ANSWER_CUSTOMER", { ...(s.activeWorkflow ? { suspendedContext: { workflow: s.activeWorkflow, ...(s.awaiting?.field ? { stillAwaiting: s.awaiting.field } : {}) } } : {}) });
+    if (interrupted) {
+      const preserve = s.activeWorkflow ? { suspendedContext: { workflow: s.activeWorkflow, ...(s.awaiting?.field ? { stillAwaiting: s.awaiting.field } : {}) } } : {};
+      const lifecycleAllows = s.activeWorkflow && ["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(s.workflowStatus) && (!s.awaiting || s.awaiting.type === "FIELD");
+      const semanticAllows = meaning.topicShift?.kind === "SIDE_QUESTION" && !topicDriftError(snapshot, meaning) && meaning.confidence >= semanticConfidenceThreshold() &&
+        !meaning.correction?.isCorrection && !meaning.confirmation && !meaning.selectedOption && (!meaning.workflow || meaning.workflow.action === "NONE") &&
+        (!meaning.customerPurpose || ["INQUIRE_SERVICE", "GENERAL_INQUIRY"].includes(meaning.customerPurpose.goal));
+      // This uses the existing adapter's pure requirements, never its availability/action inspection.
+      const field = lifecycleAllows && semanticAllows ? conversationWorkflowPlanningService.continuationField(s.activeWorkflow!, input) : undefined;
+      if (field) return finish("ANSWER", "ANSWER_THEN_CONTINUE", "ANSWER_CUSTOMER", {
+        continuation: { kind: "ASK_FOR_FIELD", workflow: s.activeWorkflow!, field },
+        suspendedContext: { workflow: s.activeWorkflow!, stillAwaiting: field }, missingFields: [field],
+        responseDirective: { purpose: "ANSWER_CUSTOMER", acknowledgeContext: true, askOneQuestion: true },
+      });
+      return finish("ANSWER", "CURRENT_QUESTION_FIRST", "ANSWER_CUSTOMER", preserve);
+    }
     if (meaning.workflow?.action === "CANCEL" || meaning.intent === "CANCELLATION_INTENT") return finish("CANCEL_WORKFLOW", "CUSTOMER_CANCELLED_WORKFLOW", "ACKNOWLEDGE");
     if (meaning.workflow?.action === "PAUSE" || s.workflowStatus === "PAUSED") return finish("PAUSE_WORKFLOW", "WORKFLOW_PAUSED", "ACKNOWLEDGE");
     if (s.workflowStatus === "WAITING_FOR_SYSTEM" || s.awaiting?.type === "SYSTEM_RESULT") return finish("WAIT_FOR_SYSTEM", "BACKEND_RESULT_PENDING", "WAIT");
@@ -95,8 +111,9 @@ export const conversationPlannerService = {
 export function assistantPlanPatch(plan: ConversationPlan, text: string): StatePatch {
   conversationPlanSchema.parse(plan);
   const question = text.trim();
-  if (plan.move.startsWith("ASK_") && (!question || question.length > 1000)) throw new AppError(422, "Planned question exceeds state bounds", "CONVERSATION_PLAN_REPLY_INVALID");
+  if ((plan.move.startsWith("ASK_") || plan.continuation) && (!question || question.length > 1000)) throw new AppError(422, "Planned question exceeds state bounds", "CONVERSATION_PLAN_REPLY_INVALID");
   const active = { ...(plan.workflow ? { activeWorkflow: plan.workflow, activeTopic: plan.topic ?? null } : {}), workflowStatus: "WAITING_FOR_CUSTOMER" as const };
+  if (plan.continuation) return { workflowStatus: "WAITING_FOR_CUSTOMER", awaiting: { type: "FIELD", field: plan.continuation.field, question }, lastAssistantQuestion: question, offeredOptions: [] };
   if (plan.move === "ASK_FOR_FIELD") return { ...active, awaiting: { type: "FIELD", field: plan.targetField!, question }, lastAssistantQuestion: question, offeredOptions: [] };
   if (plan.move === "ASK_FOR_CONFIRMATION") return { ...active, awaiting: { type: "CONFIRMATION", question }, lastAssistantQuestion: question, offeredOptions: [] };
   if (plan.move === "ASK_FOR_OPTION") return { ...active, awaiting: { type: "OPTION_SELECTION", field: plan.targetField!, question }, lastAssistantQuestion: question, offeredOptions: plan.options! };
