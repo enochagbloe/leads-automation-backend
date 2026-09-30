@@ -43,6 +43,18 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     delete interpretation.clarificationReason;
   }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
+  const correctionKey = interpretation.correction?.isCorrection ? interpretation.correction.replacesEntity : undefined;
+  const temporalCorrection = correctionKey === "preferredDate" || correctionKey === "preferredTime";
+  if (temporalCorrection) {
+    const state = snapshot.state;
+    if (interpretation.intent !== "BOOKING_INTENT" || interpretation.topicShift?.detected || interpretation.customerPurpose || interpretation.confirmation || interpretation.selectedOption || interpretation.optionResolution) return ambiguous("CORRECTION_SCOPE_INVALID");
+    if (!state.knownEntities[correctionKey] || !interpretation.resolvedEntities.some(e => e.key === correctionKey && e.source === "CURRENT_MESSAGE")) return ambiguous("CORRECTION_TARGET_INVALID");
+    if (state.activeWorkflow && (state.activeWorkflow !== "APPOINTMENT_BOOKING" || !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(state.workflowStatus))) return ambiguous("CORRECTION_WORKFLOW_INVALID");
+    if (interpretation.workflow && (interpretation.workflow.name && interpretation.workflow.name !== state.activeWorkflow || !["NONE", "START", "CONTINUE", "UPDATE"].includes(interpretation.workflow.action))) return ambiguous("CORRECTION_WORKFLOW_INVALID");
+    // A correction cannot replace another entity or rewrite its provenance.
+    if (interpretation.resolvedEntities.some(e => e.key !== correctionKey && (e.source !== "CONVERSATION_CONTEXT" || !state.knownEntities[e.key] || (e.normalizedValue ?? e.value) !== (state.knownEntities[e.key]!.normalizedValue ?? state.knownEntities[e.key]!.value)))) return ambiguous("CORRECTION_UNRELATED_ENTITY");
+    interpretation.workflow = state.activeWorkflow ? { name: "APPOINTMENT_BOOKING", action: "UPDATE" } : undefined;
+  }
   const driftError = topicDriftError(snapshot, interpretation);
   if (driftError) return ambiguous(driftError);
   if (shouldPreservePurpose(snapshot, interpretation)) {
@@ -94,7 +106,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   const pending = state.awaiting;
   // A model may resolve the target value without repeating its option ID. Match only one exact,
   // current offered value; never infer a time, position or entity target from language here.
-  if (!interpretation.selectedOption && pending?.type === "OPTION_SELECTION" && pending.field && optionsAreFresh(state, now)) {
+  if (!temporalCorrection && !interpretation.selectedOption && pending?.type === "OPTION_SELECTION" && pending.field && optionsAreFresh(state, now)) {
     const target = interpretation.resolvedEntities.find(e => e.key === pending.field && e.source !== "CONVERSATION_CONTEXT" && e.certainty === "EXACT" && e.confidence >= high);
     const matches = target ? state.offeredOptions.filter(o => o.value === (target.normalizedValue ?? target.value)) : [];
     if (matches.length === 1) interpretation.selectedOption = { optionId: matches[0]!.id, position: matches[0]!.position, value: matches[0]!.value, confidence: target!.confidence };
@@ -186,6 +198,20 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   if (interpretation.correction?.isCorrection) {
     const key = interpretation.correction.replacesEntity;
     if (!key || !state.knownEntities[key] || !interpretation.resolvedEntities.some(e => e.key === key && e.source !== "CONVERSATION_CONTEXT")) return ambiguous("CORRECTION_TARGET_INVALID");
+  }
+  if (temporalCorrection) {
+    // All evidence, confidence, normalization and target checks above succeeded. Persist only
+    // the replacement; never replay START or treat the correction as confirmation of old details.
+    patch.knownEntities = { ...state.knownEntities, [correctionKey]: known[correctionKey]! };
+    patch.offeredOptions = [];
+    const outdatedExpectation = pending?.type === "CONFIRMATION" || pending?.type === "OPTION_SELECTION" || pending?.type === "FIELD" && pending.field === correctionKey;
+    if (outdatedExpectation) {
+      Object.assign(patch, { awaiting: null, lastAssistantQuestion: null, workflowStatus: state.activeWorkflow ? "ACTIVE" : state.workflowStatus });
+      commands.push({ type: "CLEAR_AWAITING" });
+    }
+    interpretation.pendingExpectation = pending ? { resolved: Boolean(outdatedExpectation), ...(pending.field ? { field: pending.field } : {}) } : undefined;
+    commands.push({ type: "SET_INTENT", intent: interpretation.intent });
+    return { interpretation, patch, commands };
   }
   // Some JSON models emit the inactive optional branch as UNCLEAR/0. It conveys no confirmation.
   if (pending?.type !== "CONFIRMATION" && interpretation.confirmation?.type === "UNCLEAR" && interpretation.confirmation.confidence === 0) delete interpretation.confirmation;

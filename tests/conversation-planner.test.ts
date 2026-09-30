@@ -224,3 +224,25 @@ test("demo production automation stays disabled while replies work; takeover sti
   f.human();
   await assert.rejects(f.save(next, "Hello"), (e: any) => e.code === "CONVERSATION_PLAN_CONTROL_CHANGED");
 });
+
+
+for (const demo of [false, true]) for (const key of ["preferredDate", "preferredTime"] as const) test(`planner uses corrected ${key} without restarting: demo=${demo}`, async t => {
+  const f = setup(t, demo); await f.booking(true);
+  await state.setAwaiting(f.command(), { type: "CONFIRMATION", question: "Continue with the old details?" });
+  await state.setOptions(f.command(), [{ id: "old_option", label: "12 PM", value: "12:00", position: 1 }]);
+  const m = await f.add(key === "preferredDate" ? "Tuesday instead" : "Actually make it 2pm"); m.createdAt = new Date("2026-10-05T10:00:00Z");
+  const input = await f.input(m);
+  const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: input.conversationSnapshot.state.revision, businessContext: f.context(m), interpretation: meaning({ correction: { isCorrection: true, replacesEntity: key }, workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, resolvedEntities: [{ key, kind: key === "preferredDate" ? "DATE" : "TIME", value: m.content, normalizedValue: key === "preferredDate" ? "2026-10-06" : "14:00", source: "CURRENT_MESSAGE", confidence: .99, certainty: "EXACT", evidence: [{ messageId: m.id, quote: m.content }], ...(key === "preferredDate" ? { dateBasis: { type: "DAY_OFFSET", offsetDays: 1 } } : {}) }] }) });
+  assert.equal(result.interpretation.needsClarification, false); assert.equal(f.state().awaiting, null); assert.deepEqual(f.state().offeredOptions, []);
+  const p = await f.plan(m, result.interpretation); assert.equal(p.targetField, undefined); assert.equal(p.move, "CONTINUE_WORKFLOW");
+  assert.equal(p.workflowRequest?.[key], key === "preferredDate" ? "2026-10-06" : "14:00"); assert.equal(p.workflowRequest?.serviceId, "service-a");
+  assert.equal(p.workflowRequest?.type, demo ? "CHECK_APPOINTMENT_AVAILABILITY" : "CREATE_BOOKING_REQUEST");
+  assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING");
+});
+
+test("time correction preserves the unanswered date and asks only that missing field", async t => {
+  const f = setup(t); await f.booking(); await state.setAwaiting(f.command(), { type: "FIELD", field: "preferredDate" });
+  const m = await f.add("Actually 2pm"); const input = await f.input(m);
+  const r = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: input.conversationSnapshot.state.revision, businessContext: f.context(m), interpretation: meaning({ correction: { isCorrection: true, replacesEntity: "preferredTime" }, resolvedEntities: [{ key: "preferredTime", kind: "TIME", value: "2pm", normalizedValue: "14:00", source: "CURRENT_MESSAGE", certainty: "EXACT", confidence: .99, evidence: [{messageId:m.id,quote:m.content}] }] }) });
+  const p = await f.plan(m, r.interpretation); assert.equal(p.targetField, "preferredDate"); assert.equal(p.workflowRequest, undefined); assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "14:00");
+});

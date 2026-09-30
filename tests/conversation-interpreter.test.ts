@@ -427,3 +427,45 @@ for (const variant of ["clear", "low-confidence", "approximate", "forged-evidenc
     assert.equal(plan.move, "ASK_FOR_FIELD"); assert.equal(plan.targetField, "preferredDate"); assert.equal(plan.workflowRequest, undefined);
   } else assert.deepEqual(f.state(), before);
 });
+
+
+for (const demo of [false, true]) for (const [text, key, value] of [
+  ["Actually make it 2pm.", "preferredTime", "14:00"],
+  ["No, 4pm works better.", "preferredTime", "16:00"],
+  ["I meant Tuesday, not Monday.", "preferredDate", "2026-10-06"],
+  ["Tomorrow instead.", "preferredDate", "2026-10-06"],
+] as const) test(`booking correction preserves purpose: ${text} demo=${demo}`, async t => {
+  const f = setup(t); if (demo) f.demo();
+  const command = () => ({ ...f.command(), ...(demo ? { demoSessionId: "demo-a" } : {}) });
+  await state.setActiveWorkflow(command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  for (const [field, fieldValue] of [["serviceId", "service-a"], ["customerGoal", "ARRANGE_SERVICE"], ["serviceNeed", "existing need"]]) await state.setEntity(command(), field!, { value: fieldValue! });
+  await state.setEntity(command(), "preferredDate", { kind: "DATE", value: "Monday", normalizedValue: "2026-10-05" });
+  await state.setEntity(command(), "preferredTime", { kind: "TIME", value: "12pm", normalizedValue: "12:00" });
+  await state.setAwaiting(command(), { type: key === "preferredTime" ? "OPTION_SELECTION" : "FIELD", field: key });
+  if (key === "preferredTime") await state.setOptions(command(), [{ id: "offered_time", label: text, value, position: 1 }]);
+  const before = structuredClone(f.state()); const m = await f.add(text); m.createdAt = new Date("2026-10-05T10:00:00Z");
+  f.next(base({ correction: { isCorrection: true, replacesEntity: key }, workflow: { name: "APPOINTMENT_BOOKING", action: "START" }, resolvedEntities: [entity(m, key, text, { kind: key === "preferredDate" ? "DATE" : "TIME", normalizedValue: value, ...(key === "preferredDate" ? { dateBasis: { type: "DAY_OFFSET", offsetDays: 1 } } : {}) })] }));
+  const r = await f.run(m, demo ? "demo-a" : undefined);
+  assert.equal(r.interpretation.needsClarification, false); assert.equal(f.state().knownEntities[key].normalizedValue, value);
+  for (const field of Object.keys(before.knownEntities).filter(k => k !== key)) assert.deepEqual(f.state().knownEntities[field], before.knownEntities[field]);
+  assert.equal(f.state().activeWorkflow, before.activeWorkflow); assert.equal(f.state().previousTopic, before.previousTopic);
+  assert.equal(f.state().awaiting, null); assert.ok(!r.commands.some(c => c.type === "SET_WORKFLOW"));
+  const revision = f.state().revision; assert.equal((await f.run(m, demo ? "demo-a" : undefined)).replayed, true); assert.equal(f.state().revision, revision); assert.equal(f.requests.length, 1);
+});
+
+for (const invalid of ["ambiguous", "missing-target", "unrelated-change", "forged-evidence", "stale"]) test(`date/time correction fails safely: ${invalid}`, async t => {
+  const f = setup(t); await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "12pm", normalizedValue: "12:00" });
+  await state.setEntity(f.command(), "serviceId", { value: "service-a" });
+  const m = await f.add("Actually make it 2");
+  const proposed = base({ correction: { isCorrection: true, replacesEntity: "preferredTime" }, resolvedEntities: [entity(m, "preferredTime", "2", { kind: "TIME", normalizedValue: "14:00" })] });
+  if (invalid === "ambiguous") { proposed.needsClarification = true; proposed.resolvedEntities[0]!.certainty = "AMBIGUOUS"; }
+  if (invalid === "missing-target") delete proposed.correction!.replacesEntity;
+  if (invalid === "unrelated-change") proposed.resolvedEntities.push(entity(m, "branch", "another branch"));
+  if (invalid === "forged-evidence") proposed.resolvedEntities[0]!.evidence[0]!.quote = "not in message";
+  f.next(proposed); const before = structuredClone(f.state());
+  if (invalid === "stale") {
+    f.before(async () => { await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "4pm", normalizedValue: "16:00" }); });
+    await assert.rejects(f.run(m), { code: "CONVERSATION_STATE_CONFLICT" }); assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "16:00");
+  } else { const r = await f.run(m); assert.equal(r.interpretation.needsClarification, true); assert.deepEqual(f.state(), before); }
+});
