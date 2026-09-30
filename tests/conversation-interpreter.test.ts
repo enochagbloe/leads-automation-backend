@@ -87,6 +87,7 @@ for (const [text, type] of [["Yeah that works", "YES"], ["No, not that one", "NO
 
 test("correction replaces one active time; explicit branch outranks memory and prior state", async t => {
   const f = setup(t); await state.setEntity(f.command(), "preferredTime", { value: "12 PM", kind: "TIME", normalizedValue: "12:00" });
+  await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
   let m = await f.add("Actually make it 2.");
   f.next(base({ correction: { isCorrection: true, replacesEntity: "preferredTime" }, resolvedEntities: [entity(m, "preferredTime", "2", { kind: "TIME", normalizedValue: "14:00" })] })); await f.run(m);
   assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "14:00");
@@ -451,6 +452,23 @@ for (const demo of [false, true]) for (const [text, key, value] of [
   assert.equal(f.state().activeWorkflow, before.activeWorkflow); assert.equal(f.state().previousTopic, before.previousTopic);
   assert.equal(f.state().awaiting, null); assert.ok(!r.commands.some(c => c.type === "SET_WORKFLOW"));
   const revision = f.state().revision; assert.equal((await f.run(m, demo ? "demo-a" : undefined)).replayed, true); assert.equal(f.state().revision, revision); assert.equal(f.requests.length, 1);
+});
+
+for (const status of ["IDLE", "CANCELLED", "COMPLETED"] as const) test(`time correction cannot mutate an inactive booking: ${status}`, async t => {
+  const f = setup(t);
+  await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "12pm", normalizedValue: "12:00" });
+  if (status !== "IDLE") {
+    await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+    await state.patch(f.command(), { activeWorkflow: null, workflowStatus: status });
+  }
+  const m = await f.add("actually 2pm");
+  const before = structuredClone(f.state());
+  f.next(base({ correction: { isCorrection: true, replacesEntity: "preferredTime" }, resolvedEntities: [entity(m, "preferredTime", "2pm", { kind: "TIME", normalizedValue: "14:00" })] }));
+  const result = await f.run(m);
+  assert.equal(result.interpretation.needsClarification, true);
+  assert.equal(result.interpretation.clarificationReason, "CORRECTION_WORKFLOW_INVALID");
+  assert.deepEqual(result.commands, []);
+  assert.deepEqual(f.state(), before);
 });
 
 for (const invalid of ["ambiguous", "missing-target", "unrelated-change", "forged-evidence", "stale"]) test(`date/time correction fails safely: ${invalid}`, async t => {

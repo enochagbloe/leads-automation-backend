@@ -49,7 +49,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     const state = snapshot.state;
     if (interpretation.intent !== "BOOKING_INTENT" || interpretation.topicShift?.detected || interpretation.customerPurpose || interpretation.confirmation || interpretation.selectedOption || interpretation.optionResolution) return ambiguous("CORRECTION_SCOPE_INVALID");
     if (!state.knownEntities[correctionKey] || !interpretation.resolvedEntities.some(e => e.key === correctionKey && e.source === "CURRENT_MESSAGE")) return ambiguous("CORRECTION_TARGET_INVALID");
-    if (state.activeWorkflow && (state.activeWorkflow !== "APPOINTMENT_BOOKING" || !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(state.workflowStatus))) return ambiguous("CORRECTION_WORKFLOW_INVALID");
+    if (state.activeWorkflow !== "APPOINTMENT_BOOKING" || !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(state.workflowStatus)) return ambiguous("CORRECTION_WORKFLOW_INVALID");
     if (interpretation.workflow && (interpretation.workflow.name && interpretation.workflow.name !== state.activeWorkflow || !["NONE", "START", "CONTINUE", "UPDATE"].includes(interpretation.workflow.action))) return ambiguous("CORRECTION_WORKFLOW_INVALID");
     // A correction cannot replace another entity or rewrite its provenance.
     if (interpretation.resolvedEntities.some(e => e.key !== correctionKey && (e.source !== "CONVERSATION_CONTEXT" || !state.knownEntities[e.key] || (e.normalizedValue ?? e.value) !== (state.knownEntities[e.key]!.normalizedValue ?? state.knownEntities[e.key]!.value)))) return ambiguous("CORRECTION_UNRELATED_ENTITY");
