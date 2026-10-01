@@ -12,11 +12,13 @@ export type InterpretationCommand =
   | { type: "SET_WORKFLOW"; name: string; action: string }
   | { type: "SET_INTENT"; intent: string };
 export const semanticConfidenceThreshold = () => env.AI_MIN_CONFIDENCE;
-export const isExplicitBookingCancellation = (meaning: ConversationInterpretation) =>
+export const isExplicitBookingCancellation = (meaning: ConversationInterpretation, message: ConversationContextSnapshot["currentMessage"]) =>
   meaning.intent === "CANCELLATION_INTENT" && meaning.workflow?.action === "CANCEL" &&
   meaning.workflow.name === "APPOINTMENT_BOOKING" && !meaning.needsClarification && meaning.confidence >= semanticConfidenceThreshold() &&
   !meaning.confirmation && !meaning.customerPurpose && !meaning.correction?.isCorrection &&
-  !meaning.selectedOption && !meaning.optionResolution && meaning.resolvedEntities.length === 0;
+  !meaning.selectedOption && !meaning.optionResolution && meaning.resolvedEntities.length === 0 &&
+  Boolean(message && meaning.workflow.evidence?.length && meaning.workflow.evidence.length <= 3 &&
+    meaning.workflow.evidence.every(e => e.messageId === message.id && e.quote.length > 0 && message.text.includes(e.quote)));
 export function optionsAreFresh(state: StateData, now = Date.now()) {
   const issued = state.offeredOptionsCreatedAt ? Date.parse(state.offeredOptionsCreatedAt) : NaN;
   return state.offeredOptions.length > 0 && Number.isFinite(issued) && issued <= now && now - issued <= env.CONVERSATION_OPTIONS_TTL_MINUTES * 60_000;
@@ -49,7 +51,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
   if (interpretation.intent === "CANCELLATION_INTENT" || interpretation.workflow?.action === "CANCEL") {
-    if (!isExplicitBookingCancellation(interpretation) || snapshot.state.activeWorkflow !== "APPOINTMENT_BOOKING" ||
+    if (!isExplicitBookingCancellation(interpretation, snapshot.currentMessage) || snapshot.state.activeWorkflow !== "APPOINTMENT_BOOKING" ||
         !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(snapshot.state.workflowStatus) || !snapshot.currentMessage || topicDriftError(snapshot, interpretation)) return ambiguous("BOOKING_CANCELLATION_INVALID");
     const knownEntities = { ...snapshot.state.knownEntities };
     delete knownEntities.preferredDate; delete knownEntities.preferredTime;

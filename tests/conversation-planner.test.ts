@@ -87,7 +87,7 @@ test("confident cancellation plus a current question answers after the semantic 
 for (const invalid of ["uncommitted", "intent-only", "action-only", "other-message"] as const) test(`planner rejects unvalidated cancellation: ${invalid}`, async t => {
   const f = setup(t); await f.booking();
   const m = await f.add("Forget the booking");
-  const cancellation = meaning({ intent: "CANCELLATION_INTENT", workflow: { action: "CANCEL", name: "APPOINTMENT_BOOKING" } });
+  const cancellation = meaning({ intent: "CANCELLATION_INTENT", workflow: { action: "CANCEL", name: "APPOINTMENT_BOOKING", evidence: [{ messageId: m.id, quote: m.content }] } });
   if (invalid === "intent-only") delete cancellation.workflow;
   if (invalid === "action-only") cancellation.intent = "BOOKING_INTENT";
   if (invalid === "other-message") await conversationInterpretationCommandService.apply({ ...scope, sourceMessageId: m.id, snapshotRevision: f.state().revision, interpretation: cancellation });
@@ -95,6 +95,22 @@ for (const invalid of ["uncommitted", "intent-only", "action-only", "other-messa
   const plan = await f.plan(invalid === "other-message" ? await f.add("Forget the booking") : m, cancellation);
   assert.equal(plan.move, "ASK_FOR_CLARIFICATION"); assert.equal(plan.workflowRequest, undefined); assert.deepEqual(f.state(), before);
 });
+for (const demo of [false, true]) for (const invalid of ["missing", "fabricated", "foreign", "historical"] as const) test(`planner validates cancellation receipt evidence: ${invalid} demo=${demo}`, async t => {
+  const f = setup(t, demo); await f.booking();
+  const old = await f.add("Forget the booking"); const m = await f.add("Forget the booking");
+  const cancellation = meaning({ intent: "CANCELLATION_INTENT", workflow: { action: "CANCEL", name: "APPOINTMENT_BOOKING", evidence: [{ messageId: m.id, quote: m.content }] } });
+  const result = await conversationInterpretationCommandService.apply({ ...f.scoped, sourceMessageId: m.id, snapshotRevision: f.state().revision, interpretation: cancellation });
+  assert.equal((await f.plan(m, result.interpretation)).move, "CANCEL_WORKFLOW");
+  const receipt = f.receipts().find(r => r.sourceMessageId === m.id)!;
+  if (invalid === "missing") delete receipt.result.workflow.evidence;
+  if (invalid === "fabricated") receipt.result.workflow.evidence[0].quote = "Fabricated cancellation";
+  if (invalid === "foreign") receipt.result.workflow.evidence[0].messageId = "foreign-message";
+  if (invalid === "historical") receipt.result.workflow.evidence[0].messageId = old.id;
+  const before = structuredClone(f.state());
+  const plan = await f.plan(m, cancellation);
+  assert.equal(plan.move, "ASK_FOR_CLARIFICATION"); assert.equal(plan.reasonCode, "BOOKING_CANCELLATION_INVALID"); assert.deepEqual(f.state(), before);
+});
+
 test("confirmation and corrected/selected time continue from updated state", async t => {
   const f = setup(t); await f.booking(true); await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "2 PM", normalizedValue: "14:00" });
   for (const i of [meaning({ confirmation: { type: "YES", confidence: 1 } }), meaning({ correction: { isCorrection: true, replacesEntity: "preferredTime" } }), meaning({ selectedOption: { optionId: "option_2", confidence: 1 } })]) {
@@ -208,7 +224,7 @@ test("full dental sequence persists planner questions/options and consumes valid
 
 test("explicit canonical cancellation plus topic shift clears only the conversational workflow", async t => {
   const f = setup(t); await f.booking(); await state.setAwaiting(f.command(), { type: "FIELD", field: "preferredDate" }); const m = await f.add("Forget the booking. What are your hours?");
-  const result = await conversationInterpretationCommandService.apply({ ...scope, sourceMessageId: m.id, snapshotRevision: f.state().revision, interpretation: meaning({ intent: "CANCELLATION_INTENT", workflow: { action: "CANCEL", name: "APPOINTMENT_BOOKING" }, topicShift: { detected: true, from: "APPOINTMENT", to: "GENERAL_ENQUIRY" } }) });
+  const result = await conversationInterpretationCommandService.apply({ ...scope, sourceMessageId: m.id, snapshotRevision: f.state().revision, interpretation: meaning({ intent: "CANCELLATION_INTENT", workflow: { action: "CANCEL", name: "APPOINTMENT_BOOKING", evidence: [{ messageId: m.id, quote: "Forget the booking." }] }, topicShift: { detected: true, from: "APPOINTMENT", to: "GENERAL_ENQUIRY" } }) });
   assert.equal(result.interpretation.needsClarification, false); assert.equal(f.state().activeWorkflow, null); assert.equal(f.state().awaiting, null);
   const p = await f.plan(m, result.interpretation); assert.equal(p.move, "ANSWER"); assert.equal(p.workflowRequest, undefined); assert.equal(p.suspendedContext, undefined);
 });

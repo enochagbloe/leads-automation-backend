@@ -454,7 +454,7 @@ for (const demo of [false, true]) for (const [text, key, value] of [
   const revision = f.state().revision; assert.equal((await f.run(m, demo ? "demo-a" : undefined)).replayed, true); assert.equal(f.state().revision, revision); assert.equal(f.requests.length, 1);
 });
 
-for (const demo of [false, true]) for (const variant of ["valid", "no", "ambiguous", "low-confidence", "inactive", "paused", "intent-only", "action-only", "wrong-workflow", "stale"] as const) test(`booking cancellation ${variant}: demo=${demo}`, async t => {
+for (const demo of [false, true]) for (const variant of ["valid", "no", "ambiguous", "low-confidence", "inactive", "paused", "intent-only", "action-only", "wrong-workflow", "stale", "missing-evidence", "null-evidence", "fabricated-quote", "foreign-message", "historical-evidence"] as const) test(`booking cancellation ${variant}: demo=${demo}`, async t => {
   const f = setup(t); if (demo) f.demo();
   const scoped = { ...scope, ...(demo ? { demoSessionId: "demo-a" } : {}) };
   const command = () => ({ ...f.command(), ...scoped });
@@ -468,8 +468,14 @@ for (const demo of [false, true]) for (const variant of ["valid", "no", "ambiguo
     await state.setAwaiting(command(), { type: "CONFIRMATION", question: "Use these details?" });
   }
   if (variant === "paused") await state.pauseWorkflow(command());
+  const oldMessage = await f.add("Forget the booking");
   const m = await f.add(variant === "no" ? "No" : "Forget the booking");
-  const proposed = base({ intent: "CANCELLATION_INTENT", workflow: { name: "APPOINTMENT_BOOKING", action: "CANCEL" } });
+  const proposed = base({ intent: "CANCELLATION_INTENT", workflow: { name: "APPOINTMENT_BOOKING", action: "CANCEL", evidence: [{ messageId: m.id, quote: m.content }] } });
+  if (variant === "missing-evidence") delete proposed.workflow!.evidence;
+  if (variant === "null-evidence") (proposed.workflow as any).evidence = null;
+  if (variant === "fabricated-quote") proposed.workflow!.evidence![0]!.quote = "Cancel this appointment now";
+  if (variant === "foreign-message") proposed.workflow!.evidence![0]!.messageId = "foreign-message";
+  if (variant === "historical-evidence") proposed.workflow!.evidence![0]!.messageId = oldMessage.id;
   if (variant === "no") { proposed.intent = "BOOKING_INTENT"; delete proposed.workflow; proposed.confirmation = { type: "NO", confidence: .99 }; }
   if (variant === "ambiguous") proposed.needsClarification = true;
   if (variant === "low-confidence") proposed.confidence = .1;
@@ -492,7 +498,7 @@ for (const demo of [false, true]) for (const variant of ["valid", "no", "ambiguo
     const revision = f.state().revision; assert.equal((await f.run(m, scoped.demoSessionId)).replayed, true); assert.equal(f.state().revision, revision);
   } else if (variant === "no") {
     assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.deepEqual(f.state().knownEntities, before.knownEntities);
-  } else { assert.equal(r.interpretation.needsClarification, true); assert.deepEqual(f.state(), before); }
+  } else { assert.equal(r.interpretation.needsClarification, true); assert.equal(r.interpretation.clarificationReason, "BOOKING_CANCELLATION_INVALID"); assert.deepEqual(f.state(), before); }
   const plan = await conversationPlannerService.plan({ businessContext: f.context(m, scoped.demoSessionId), conversationSnapshot: await conversationContextService.getSnapshot({ ...scoped, messageId: m.id }), interpretation: r.interpretation });
   assert.equal(plan.move, variant === "valid" ? "CANCEL_WORKFLOW" : "ASK_FOR_CLARIFICATION"); assert.equal(plan.workflowRequest, undefined);
 });

@@ -10,7 +10,7 @@ export const interpretationSchema = z.object({
   customerPurpose: customerPurposeSchema.nullish().transform(v => v ?? undefined),
   conversationAct: z.enum(["GREETING"]).nullish().transform(v => v ?? undefined),
   topic: stateDataSchema.shape.activeTopic.nullish().transform(v => v ?? undefined),
-  workflow: z.object({ name: z.enum(workflowNames).nullish().transform(v => v ?? undefined), action: z.enum(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]) }).strict().nullish().transform(v => v ?? undefined),
+  workflow: z.object({ name: z.enum(workflowNames).nullish().transform(v => v ?? undefined), action: z.enum(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]), evidence: z.array(z.object({ messageId: z.string().min(1).max(128), quote: z.string().min(1).max(300) }).strict()).min(1).max(3).nullish().transform(v => v ?? undefined) }).strict().nullish().transform(v => v ?? undefined),
   resolvedEntities: z.array(z.object({
     key: entityKeySchema,
     value: entityScalarSchema,

@@ -22,7 +22,7 @@ export const interpretationOutputSchema = object({
   })),
   conversationAct: nullable(enumeration(["GREETING"])),
   topic: nullable(topic),
-  workflow: nullable(object({ name: nullable(enumeration(workflowNames)), action: enumeration(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]) })),
+  workflow: nullable(object({ name: nullable(enumeration(workflowNames)), action: enumeration(["START", "CONTINUE", "UPDATE", "CONFIRM", "CANCEL", "PAUSE", "RESUME", "NONE"]), evidence: nullable({ type: "array", minItems: 1, maxItems: 3, items: object({ messageId: text, quote: text }) }) })),
   optionResolution: { anyOf: [
     { type: "null" },
     object({ basis: enumeration(["POSITION", "EXACT_VALUE", "ORDER", "AMBIGUOUS"]), candidateOptionIds: { type: "array", items: text }, anchorMessageId: { type: "null" } }),
