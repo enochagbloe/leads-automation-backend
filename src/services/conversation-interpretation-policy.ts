@@ -1,6 +1,6 @@
 import { shouldPreservePurpose, topicDriftError } from "./conversation-continuity-policy";
 import type { AiBusinessContext } from "./ai-context-builder.service";
-import { validateCustomerPurpose, purposeEntities, purposeEntityKeys, resolvedConversationService } from "./conversation-purpose-policy";
+import { validateCustomerPurpose, purposeEntities, purposeEntityKeys, resolvedConversationService, isActiveBookingServiceSwitch } from "./conversation-purpose-policy";
 import { env } from "../config/env";
 import { entitySchema, StateData, StatePatch } from "./conversation-state.schema";
 import { ConversationContextSnapshot } from "./conversation-context.service";
@@ -57,7 +57,13 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   }
   const driftError = topicDriftError(snapshot, interpretation);
   if (driftError) return ambiguous(driftError);
-  if (shouldPreservePurpose(snapshot, interpretation)) {
+  const switchAttempt = interpretation.topicShift?.kind === "NEW_PRIMARY_GOAL" && interpretation.intent === "BOOKING_INTENT";
+  const serviceSwitch = switchAttempt && isActiveBookingServiceSwitch(snapshot, interpretation, context);
+  if (switchAttempt && !serviceSwitch) return ambiguous("SERVICE_SWITCH_REQUIRES_CLARIFICATION");
+  if (serviceSwitch && (interpretation.confirmation || interpretation.selectedOption || interpretation.optionResolution || interpretation.correction?.isCorrection ||
+      interpretation.workflow && (interpretation.workflow.name && interpretation.workflow.name !== "APPOINTMENT_BOOKING" || !["NONE", "START", "CONTINUE", "UPDATE"].includes(interpretation.workflow.action)) ||
+      interpretation.resolvedEntities.some(e => !["preferredDate", "preferredTime"].includes(e.key) || e.source !== "CURRENT_MESSAGE" || e.reference))) return ambiguous("SERVICE_SWITCH_SCOPE_INVALID");
+  if (!serviceSwitch && shouldPreservePurpose(snapshot, interpretation)) {
     if (interpretation.intent === "UNKNOWN") return ambiguous("CONTEXT_INSUFFICIENT");
     if (interpretation.needsClarification) return ambiguous(interpretation.clarificationReason ?? "INTERPRETATION_AMBIGUOUS");
     if (interpretation.confidence < high) return ambiguous("LOW_CONFIDENCE");
@@ -93,6 +99,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   if (!message) return ambiguous("SOURCE_MESSAGE_MISSING");
   const clock = localClock(message.createdAt, snapshot.timezone);
   let known = { ...state.knownEntities };
+  if (serviceSwitch) for (const key of ["preferredDate", "preferredTime", "reason"]) delete known[key];
   // Old receipts/clients may still send direct service entities. Accept only a literal catalog reference;
   // semantic need mapping uses the bounded customerPurpose contract instead.
   if (context && !purpose) for (const entity of interpretation.resolvedEntities.filter(e => purposeEntityKeys.has(e.key))) {
@@ -103,7 +110,7 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   }
   const commands: InterpretationCommand[] = [];
   const patch: StatePatch = { lastResolvedIntent: interpretation.intent };
-  const pending = state.awaiting;
+  const pending = serviceSwitch ? null : state.awaiting;
   // A model may resolve the target value without repeating its option ID. Match only one exact,
   // current offered value; never infer a time, position or entity target from language here.
   if (!temporalCorrection && !interpretation.selectedOption && pending?.type === "OPTION_SELECTION" && pending.field && optionsAreFresh(state, now)) {
@@ -185,6 +192,15 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
   if (purpose && context) {
     known = purposeEntities({ ...state, knownEntities: known }, purpose, context, message.id, now);
     for (const key of purposeEntityKeys) commands.push({ type: "SET_ENTITY", key });
+  }
+  if (serviceSwitch) {
+    interpretation.workflow = { name: "APPOINTMENT_BOOKING", action: "UPDATE" };
+    // The validated purpose change is applied; downstream planning continues this booking.
+    delete interpretation.topicShift;
+    delete interpretation.pendingExpectation;
+    Object.assign(patch, { knownEntities: known, workflowStatus: "ACTIVE", awaiting: null, offeredOptions: [], lastAssistantQuestion: null });
+    commands.push({ type: "CLEAR_AWAITING" }, { type: "SET_INTENT", intent: interpretation.intent });
+    return { interpretation, patch, commands };
   }
   // Purpose answers are not generic entity writes: resolve this expectation only after catalog validation.
   if (purpose && context && pending?.type === "FIELD" && ["serviceNeed", "service", "serviceName"].includes(pending.field ?? "") && resolvedConversationService({ ...state, knownEntities: known }, context)) {

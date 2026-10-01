@@ -12,6 +12,18 @@ export const entityText = (state: StateData, key: string) => {
   return typeof value === "string" ? value : undefined;
 };
 const folded = (value: string) => value.trim().toLocaleLowerCase();
+/** Eligibility only; catalog and current-message evidence still require purpose validation. */
+export function isActiveBookingServiceSwitch(snapshot: ConversationContextSnapshot, meaning: ConversationInterpretation, context?: AiBusinessContext) {
+  const purpose = meaning.customerPurpose;
+  const current = context && resolvedConversationService(snapshot.state, context);
+  return Boolean(current && snapshot.state.activeWorkflow === "APPOINTMENT_BOOKING" &&
+    ["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(snapshot.state.workflowStatus) &&
+    meaning.topicShift?.detected && meaning.topicShift.kind === "NEW_PRIMARY_GOAL" &&
+    meaning.intent === "BOOKING_INTENT" && !meaning.needsClarification && meaning.confidence >= env.AI_MIN_CONFIDENCE &&
+    purpose?.goal === "ARRANGE_SERVICE" && purpose.confidence >= env.AI_MIN_CONFIDENCE &&
+    ["EXACT", "INFERRED"].includes(purpose.resolution) && purpose.serviceId && purpose.serviceId !== current.id &&
+    purpose.candidateServiceIds.every(id => id === purpose.serviceId));
+}
 /** One catalog lookup shared by the planner and workflow adapter. No language matching here. */
 export function resolvedConversationService(state: StateData, context: Pick<AiBusinessContext, "services">) {
   const resolution = entityText(state, "serviceResolution");
@@ -44,11 +56,11 @@ export function validateCustomerPurpose(snapshot: ConversationContextSnapshot, m
   if (purpose.resolution === "INFERRED" && !purpose.catalogEvidence.some(e => e.serviceId === purpose.serviceId)) return { error: "SERVICE_MAPPING_EVIDENCE_MISSING" };
   if (purpose.resolution === "AMBIGUOUS" && purpose.candidateServiceIds.length < 2) return { error: "SERVICE_CANDIDATES_MISSING" };
   if (resolved && purpose.confidence < env.AI_MIN_CONFIDENCE) { purpose.resolution = "UNRESOLVED"; purpose.serviceId = null; }
-  // A generic continuation cannot erase an established purpose. Switching an active purpose is a later sprint.
+  // Only the narrow active-booking switch can replace an established purpose.
   const current = resolvedConversationService(snapshot.state, context);
   if (snapshot.state.activeWorkflow && current) {
     if (purpose.resolution === "UNSPECIFIED" && !purpose.need) return { purpose };
-    if (meaning.topicShift?.detected || purpose.serviceId !== current.id) return { error: "PURPOSE_CHANGE_REQUIRES_CLARIFICATION" };
+    if ((meaning.topicShift?.detected || purpose.serviceId !== current.id) && !isActiveBookingServiceSwitch(snapshot, meaning, context)) return { error: "PURPOSE_CHANGE_REQUIRES_CLARIFICATION" };
   }
   return { purpose };
 }

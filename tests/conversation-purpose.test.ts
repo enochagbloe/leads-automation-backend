@@ -18,6 +18,7 @@ import { adaptDemoRuntimeContext } from "../src/services/demo-runtime-context.ad
 import { emptyDemoFacts } from "../src/services/demo-extraction.service";
 import { conversationResponsePolicyService } from "../src/services/conversation-response-policy.service";
 import { responseFacts } from "../src/services/conversation-response.service";
+import { conversationPlannerService } from "../src/services/conversation-planner.service";
 
 const catalogs = {
   consultancy: [{ name: "Strategy consultation", description: "Advice on business strategy and planning" }],
@@ -25,6 +26,53 @@ const catalogs = {
   plumbing: [{ name: "Plumbing inspection", description: "Inspect and repair leaking sinks and pipes" }],
   photography: [{ name: "Residential Photography", description: "Photograph homes and properties" }, { name: "Wedding Photography", description: "Photograph weddings" }, { name: "Corporate Photography", description: "Business events and corporate portraits" }],
 };
+
+for (const demo of [false, true]) for (const variant of ["switch", "replacement-time", "replacement-date-time", "ambiguous", "unsupported", "non-catalog", "low-confidence", "forged-evidence", "paused", "stale"] as const) test(`active booking service switch ${variant}: demo=${demo}`, async t => {
+  const f = await setup(t, "photography", demo);
+  await state.setActiveWorkflow(f.command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  for (const [key, value] of Object.entries({ serviceId: f.services[0]!.id, serviceName: f.services[0]!.name, serviceResolution: "EXACT", customerGoal: "ARRANGE_SERVICE", serviceNeed: "old purpose", reason: "old reason" })) await state.setEntity(f.command(), key, { value });
+  await state.setEntity(f.command(), "preferredDate", { value: "2026-10-05", kind: "DATE", normalizedValue: "2026-10-05" });
+  await state.setEntity(f.command(), "preferredTime", { value: "14:00", kind: "TIME", normalizedValue: "14:00" });
+  await state.setOptions(f.command(), [{ id: "old_time", label: "2 PM", value: "14:00", position: 1 }]);
+  await state.setAwaiting(f.command(), { type: "OPTION_SELECTION", field: "preferredTime", question: "Use the old time?" });
+  if (variant === "paused") await state.pauseWorkflow(f.command());
+  const m = await f.add(`Actually I want ${f.services[1]!.name} instead${variant.startsWith("replacement") ? " tomorrow at 16:00" : ""}`);
+  m.createdAt = new Date("2026-10-01T10:00:00Z");
+  const i = f.meaning(m, "EXACT", "ARRANGE_SERVICE", 1);
+  i.topicShift = { detected: true, kind: "NEW_PRIMARY_GOAL", from: "APPOINTMENT", to: "APPOINTMENT", evidence: [{ messageId: m.id, quote: m.content }] };
+  if (variant.startsWith("replacement")) i.resolvedEntities.push(temporal(m, "preferredTime", "16:00"));
+  if (variant === "replacement-date-time") i.resolvedEntities.push(temporal(m, "preferredDate", "2026-10-02"));
+  if (variant === "ambiguous") Object.assign(i.customerPurpose!, { resolution: "AMBIGUOUS", serviceId: null, candidateServiceIds: f.services.map(s => s.id) });
+  if (variant === "unsupported") Object.assign(i.customerPurpose!, { resolution: "UNSUPPORTED", serviceId: null });
+  if (variant === "non-catalog") i.customerPurpose!.serviceId = "invented-service";
+  if (variant === "low-confidence") i.customerPurpose!.confidence = .1;
+  if (variant === "forged-evidence") i.topicShift.evidence![0]!.quote = "not in the message";
+  const before = structuredClone(f.state());
+  const input = { ...f.scoped, sourceMessageId: m.id, snapshotRevision: before.revision, interpretation: i, businessContext: f.context(m) };
+  if (variant === "stale") {
+    await state.setEntity(f.command(), "preferredTime", { value: "17:00", kind: "TIME", normalizedValue: "17:00" });
+    const newer = structuredClone(f.state());
+    await assert.rejects(commands.apply(input), { code: "CONVERSATION_STATE_CONFLICT" });
+    assert.deepEqual(f.state(), newer); return;
+  }
+  const result = await commands.apply(input);
+  if (!["switch", "replacement-time", "replacement-date-time"].includes(variant)) {
+    assert.equal(result.interpretation.needsClarification, true); assert.deepEqual(result.commands, []); assert.deepEqual(f.state(), before); return;
+  }
+  assert.equal(result.interpretation.needsClarification, false);
+  assert.equal(f.state().knownEntities.serviceId.value, f.services[1]!.id);
+  assert.equal(f.state().knownEntities.serviceNeed.value, m.content);
+  assert.equal(f.state().knownEntities.customerGoal.value, "ARRANGE_SERVICE");
+  assert.equal(f.state().knownEntities.reason, undefined);
+  assert.equal(f.state().knownEntities.preferredTime?.normalizedValue, variant.startsWith("replacement") ? "16:00" : undefined);
+  assert.equal(f.state().knownEntities.preferredDate?.normalizedValue, variant === "replacement-date-time" ? "2026-10-02" : undefined);
+  assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.equal(f.state().workflowStatus, "ACTIVE");
+  assert.equal(f.state().awaiting, null); assert.equal(f.state().lastAssistantQuestion, null); assert.deepEqual(f.state().offeredOptions, []);
+  const plan = await conversationPlannerService.plan({ businessContext: f.context(m), conversationSnapshot: await conversationContextService.getSnapshot({ ...f.scoped, messageId: m.id }), interpretation: result.interpretation });
+  if (variant === "replacement-date-time") { assert.equal(plan.targetField, undefined); assert.equal(plan.workflowRequest?.serviceId, f.services[1]!.id); }
+  else assert.equal(plan.targetField, "preferredDate");
+  const revision = f.state().revision; assert.equal((await commands.apply(input)).replayed, true); assert.equal(f.state().revision, revision);
+});
 type Catalog = keyof typeof catalogs;
 async function setup(t: TestContext, catalog: Catalog, demo = false) {
   const f = fixture(t); if (demo) f.demo();
