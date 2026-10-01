@@ -12,13 +12,15 @@ export type InterpretationCommand =
   | { type: "SET_WORKFLOW"; name: string; action: string }
   | { type: "SET_INTENT"; intent: string };
 export const semanticConfidenceThreshold = () => env.AI_MIN_CONFIDENCE;
+const hasCurrentWorkflowEvidence = (meaning: ConversationInterpretation, message: ConversationContextSnapshot["currentMessage"]) =>
+  Boolean(message && meaning.workflow?.evidence?.length && meaning.workflow.evidence.length <= 3 &&
+    meaning.workflow.evidence.every(e => e.messageId === message.id && e.quote.length > 0 && message.text.includes(e.quote)));
 export const isExplicitBookingCancellation = (meaning: ConversationInterpretation, message: ConversationContextSnapshot["currentMessage"]) =>
   meaning.intent === "CANCELLATION_INTENT" && meaning.workflow?.action === "CANCEL" &&
   meaning.workflow.name === "APPOINTMENT_BOOKING" && !meaning.needsClarification && meaning.confidence >= semanticConfidenceThreshold() &&
   !meaning.confirmation && !meaning.customerPurpose && !meaning.correction?.isCorrection &&
   !meaning.selectedOption && !meaning.optionResolution && meaning.resolvedEntities.length === 0 &&
-  Boolean(message && meaning.workflow.evidence?.length && meaning.workflow.evidence.length <= 3 &&
-    meaning.workflow.evidence.every(e => e.messageId === message.id && e.quote.length > 0 && message.text.includes(e.quote)));
+  hasCurrentWorkflowEvidence(meaning, message);
 export function optionsAreFresh(state: StateData, now = Date.now()) {
   const issued = state.offeredOptionsCreatedAt ? Date.parse(state.offeredOptionsCreatedAt) : NaN;
   return state.offeredOptions.length > 0 && Number.isFinite(issued) && issued <= now && now - issued <= env.CONVERSATION_OPTIONS_TTL_MINUTES * 60_000;
@@ -50,6 +52,28 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     delete interpretation.clarificationReason;
   }
   const ambiguous = (reason: string) => ({ interpretation: { ...interpretation, needsClarification: true, clarificationReason: reason }, patch: {} as StatePatch, commands: [] as InterpretationCommand[] });
+  // Handoff intents retain their existing priority; they are not permission to pause/resume.
+  if (["HUMAN_REQUEST", "COMPLAINT"].includes(interpretation.intent) && ["PAUSE", "RESUME"].includes(interpretation.workflow?.action ?? "")) delete interpretation.workflow;
+  const resuming = interpretation.workflow?.action === "RESUME";
+  if (interpretation.workflow?.action === "PAUSE" || resuming) {
+    if (snapshot.state.activeWorkflow !== "APPOINTMENT_BOOKING" || interpretation.workflow?.name !== "APPOINTMENT_BOOKING" ||
+        interpretation.needsClarification || interpretation.confidence < high || !hasCurrentWorkflowEvidence(interpretation, snapshot.currentMessage) ||
+        interpretation.correction?.isCorrection) return ambiguous("BOOKING_CONTINUITY_INVALID");
+    if (!resuming) {
+      if (!["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(snapshot.state.workflowStatus) ||
+          interpretation.topicShift?.kind !== "NEW_PRIMARY_GOAL" || topicDriftError(snapshot, interpretation) ||
+          ["BOOKING_INTENT", "CANCELLATION_INTENT", "UNKNOWN"].includes(interpretation.intent) ||
+          interpretation.confirmation || interpretation.selectedOption || interpretation.optionResolution || interpretation.resolvedEntities.length) return ambiguous("BOOKING_PAUSE_INVALID");
+      const checked = validateCustomerPurpose({ ...snapshot, state: { ...snapshot.state, activeWorkflow: null } }, interpretation, context);
+      if (checked.error) return ambiguous(checked.error);
+      return { interpretation, patch: { workflowStatus: "PAUSED", lastResolvedIntent: interpretation.intent } as StatePatch,
+        commands: [{ type: "SET_WORKFLOW", name: "APPOINTMENT_BOOKING", action: "PAUSE" }] as InterpretationCommand[] };
+    }
+    if (snapshot.state.workflowStatus !== "PAUSED" || interpretation.intent !== "BOOKING_INTENT" || interpretation.topicShift?.detected ||
+        interpretation.customerPurpose || interpretation.resolvedEntities.some(e => e.key !== snapshot.state.awaiting?.field || purposeEntityKeys.has(e.key))) return ambiguous("BOOKING_RESUME_INVALID");
+  } else if (snapshot.state.activeWorkflow === "APPOINTMENT_BOOKING" && snapshot.state.workflowStatus === "PAUSED" && interpretation.intent === "BOOKING_INTENT") {
+    return ambiguous("BOOKING_RESUME_REQUIRED");
+  }
   if (interpretation.intent === "CANCELLATION_INTENT" || interpretation.workflow?.action === "CANCEL") {
     if (!isExplicitBookingCancellation(interpretation, snapshot.currentMessage) || snapshot.state.activeWorkflow !== "APPOINTMENT_BOOKING" ||
         !["ACTIVE", "WAITING_FOR_CUSTOMER"].includes(snapshot.state.workflowStatus) || !snapshot.currentMessage || topicDriftError(snapshot, interpretation)) return ambiguous("BOOKING_CANCELLATION_INVALID");
@@ -251,11 +275,14 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
     if (pending?.type !== "CONFIRMATION") return ambiguous("CONFIRMATION_NOT_PENDING");
   }
   const interruption = interpretation.topicShift?.detected === true;
+  if (resuming && pending?.type === "FIELD" && interpretation.resolvedEntities.some(e => e.key === pending.field && e.source !== "CONVERSATION_CONTEXT")) {
+    interpretation.pendingExpectation = { resolved: true, field: pending.field };
+  }
   if (!interruption && pending?.type === "CONFIRMATION" && interpretation.confirmation && interpretation.confirmation.type !== "UNCLEAR") {
     if (interpretation.pendingExpectation?.field !== undefined && interpretation.pendingExpectation.field !== pending.field) return ambiguous("EXPECTATION_FIELD_MISMATCH");
     interpretation.pendingExpectation = { resolved: true, ...(pending.field ? { field: pending.field } : {}) };
   }
-  if (!interruption && pending?.type === "OPTION_SELECTION" && !selected && interpretation.resolvedEntities.length === 0 && interpretation.intent === continuationIntent(state.activeWorkflow)) return ambiguous("OPTION_REFERENCE_AMBIGUOUS");
+  if (!resuming && !interruption && pending?.type === "OPTION_SELECTION" && !selected && interpretation.resolvedEntities.length === 0 && interpretation.intent === continuationIntent(state.activeWorkflow)) return ambiguous("OPTION_REFERENCE_AMBIGUOUS");
 
   if (interruption && interpretation.topicShift?.from && interpretation.topicShift.from !== state.activeTopic) return ambiguous("TOPIC_REFERENCE_MISMATCH");
   if (interpretation.pendingExpectation?.resolved && !interruption) {
@@ -290,7 +317,8 @@ export function planInterpretation(snapshot: ConversationContextSnapshot, propos
       if (workflow.action === "PAUSE") patch.workflowStatus = "PAUSED";
       if (workflow.action === "RESUME") {
         if (state.workflowStatus !== "PAUSED") return ambiguous("WORKFLOW_NOT_PAUSED");
-        patch.workflowStatus = pending ? pending.type === "SYSTEM_RESULT" ? "WAITING_FOR_SYSTEM" : "WAITING_FOR_CUSTOMER" : "ACTIVE";
+        const remaining = patch.awaiting === undefined ? pending : patch.awaiting;
+        patch.workflowStatus = remaining ? remaining.type === "SYSTEM_RESULT" ? "WAITING_FOR_SYSTEM" : "WAITING_FOR_CUSTOMER" : "ACTIVE";
       }
     }
     commands.push({ type: "SET_WORKFLOW", name: workflow.name ?? state.activeWorkflow!, action: workflow.action });

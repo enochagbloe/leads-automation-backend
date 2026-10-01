@@ -64,6 +64,94 @@ function temporal(m: any, key: "preferredDate" | "preferredTime", value: string)
 function side(m: any, intent: ConversationInterpretation["intent"] = "PRICING_INQUIRY"): ConversationInterpretation {
   return { intent, confidence: .98, needsClarification: false, resolvedEntities: [], topicShift: { detected: true, kind: "SIDE_QUESTION", from: "APPOINTMENT", to: "SERVICE_ENQUIRY", evidence: [{messageId:m.id,quote:m.content}] } };
 }
+
+for (const demo of [false, true]) for (const variant of ["valid", "active", "confirmation", "side", "ambiguous", "low", "missing-workflow-evidence", "missing-topic-evidence", "HUMAN_REQUEST", "COMPLAINT", "stale"] as const) test(`booking pause ${variant}: demo=${demo}`, async t => {
+  const f = await booked(t, "repair", demo, true);
+  await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "14:00", normalizedValue: "14:00" });
+  await state.setOptions(f.command(), [{ id: "old_option", label: "2 PM", value: "14:00", position: 1 }]);
+  if (variant === "confirmation") await state.setAwaiting(f.command(), { type: "CONFIRMATION", question: "Continue with these details?" });
+  if (variant === "active") await state.patch(f.command(), { workflowStatus: "ACTIVE" });
+  const m = await f.add("I want to learn about installation instead");
+  const i = side(m, "SERVICE_INQUIRY"); i.topicShift!.kind = variant === "side" ? "SIDE_QUESTION" : "NEW_PRIMARY_GOAL";
+  i.workflow = { name: "APPOINTMENT_BOOKING", action: "PAUSE", evidence: [{ messageId: m.id, quote: m.content }] };
+  if (variant === "ambiguous") i.needsClarification = true;
+  if (variant === "low") i.confidence = .1;
+  if (variant === "missing-workflow-evidence") delete i.workflow.evidence;
+  if (variant === "missing-topic-evidence") delete i.topicShift!.evidence;
+  if (variant === "HUMAN_REQUEST" || variant === "COMPLAINT") i.intent = variant;
+  const before = structuredClone(f.state());
+  const input = { ...f.scoped, sourceMessageId: m.id, snapshotRevision: before.revision, interpretation: i, businessContext: f.context(m) };
+  if (variant === "stale") {
+    await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "16:00", normalizedValue: "16:00" });
+    const newer = structuredClone(f.state()); await assert.rejects(commands.apply(input), { code: "CONVERSATION_STATE_CONFLICT" }); assert.deepEqual(f.state(), newer); return;
+  }
+  const r = await commands.apply(input);
+  const valid = ["valid", "active", "confirmation"].includes(variant);
+  assert.equal(f.state().workflowStatus, valid ? "PAUSED" : before.workflowStatus);
+  for (const field of ["knownEntities", "awaiting", "offeredOptions", "offeredOptionsCreatedAt", "lastAssistantQuestion", "activeWorkflow"] as const) assert.deepEqual(f.state()[field], before[field]);
+  if (!valid && !["HUMAN_REQUEST", "COMPLAINT"].includes(variant)) assert.deepEqual(f.state(), before);
+  const p = await conversationPlannerService.plan({ businessContext: f.context(m), conversationSnapshot: await conversationContextService.getSnapshot({ ...f.scoped, messageId: m.id }), interpretation: r.interpretation });
+  assert.equal(p.move, valid ? "ANSWER" : ["HUMAN_REQUEST", "COMPLAINT"].includes(variant) ? "REQUEST_HUMAN" : "ASK_FOR_CLARIFICATION");
+  assert.equal(p.continuation, undefined); assert.equal(p.workflowRequest, undefined);
+  const revision = f.state().revision; assert.equal((await commands.apply(input)).replayed, true); assert.equal(f.state().revision, revision);
+});
+
+for (const demo of [false, true]) test(`shared runtime persists pause and resumes from the pending date: demo=${demo}`, async t => {
+  const f = await booked(t, "repair", demo); const before = structuredClone(f.state());
+  const m = await f.add("Tell me about installation instead"); const i = side(m, "SERVICE_INQUIRY"); i.topicShift!.kind = "NEW_PRIMARY_GOAL";
+  i.workflow = { name: "APPOINTMENT_BOOKING", action: "PAUSE", evidence: [{ messageId: m.id, quote: m.content }] };
+  const reply = await f.run(m, i, "We offer installation of new units."); await f.save(reply);
+  assert.equal(reply.providerRequestCount, 2); assert.equal(reply.conversationPlan.move, "ANSWER"); assert.equal(reply.conversationPlan.continuation, undefined);
+  assert.equal(f.state().workflowStatus, "PAUSED"); assert.deepEqual(f.state().knownEntities, before.knownEntities); assert.deepEqual(f.state().awaiting, before.awaiting); assert.equal(f.state().lastAssistantQuestion, before.lastAssistantQuestion);
+  const uncertain = await f.add("Maybe continue");
+  const clarification = await f.run(uncertain, { intent: "BOOKING_INTENT", confidence: .4, needsClarification: true, resolvedEntities: [], workflow: { name: "APPOINTMENT_BOOKING", action: "RESUME", evidence: [{ messageId: uncertain.id, quote: uncertain.content }] } }, "Could you clarify what you mean?");
+  await f.save(clarification); assert.equal(f.state().workflowStatus, "PAUSED"); assert.deepEqual(f.state().awaiting, before.awaiting); assert.equal(f.state().lastAssistantQuestion, before.lastAssistantQuestion);
+  const next = await f.add("Tomorrow"); next.createdAt = new Date("2026-10-01T10:00:00Z");
+  const resumed = await f.run(next, { intent: "BOOKING_INTENT", confidence: .98, needsClarification: false, resolvedEntities: [temporal(next, "preferredDate", "2026-10-02")], workflow: { name: "APPOINTMENT_BOOKING", action: "RESUME", evidence: [{ messageId: next.id, quote: next.content }] } }, "What time would work for you?");
+  await f.save(resumed); assert.equal(resumed.providerRequestCount, 2); assert.equal(resumed.conversationPlan.targetField, "preferredTime");
+  assert.equal(f.state().awaiting.field, "preferredTime"); assert.equal(f.state().knownEntities.preferredDate.normalizedValue, "2026-10-02"); assert.deepEqual(f.state().knownEntities.serviceId, before.knownEntities.serviceId);
+});
+
+for (const demo of [false, true]) for (const variant of ["explicit", "answer", "confirmation", "system", "no-expectation", "stale-options", "not-paused", "wrong-workflow", "missing", "fabricated", "foreign", "ambiguous", "low", "stale"] as const) test(`booking resume ${variant}: demo=${demo}`, async t => {
+  const f = await booked(t, "consultancy", demo);
+  if (variant === "confirmation") await state.setAwaiting(f.command(), { type: "CONFIRMATION", question: "Use these details?" });
+  if (variant === "system") await state.setAwaiting(f.command(), { type: "SYSTEM_RESULT" });
+  if (variant === "no-expectation") await state.clearAwaiting(f.command());
+  if (variant === "stale-options") {
+    await state.setOptions(f.command(), [{ id: "old_option", label: "2 PM", value: "14:00", position: 1 }]);
+    await state.setAwaiting(f.command(), { type: "OPTION_SELECTION", field: "preferredTime" });
+    f.state().offeredOptionsCreatedAt = "2000-01-01T00:00:00Z";
+  }
+  if (variant !== "not-paused") await state.pauseWorkflow(f.command());
+  const m = await f.add(variant === "answer" ? "Tomorrow" : "Let's continue the booking"); m.createdAt = new Date("2026-10-01T10:00:00Z");
+  const i: ConversationInterpretation = { intent: "BOOKING_INTENT", confidence: .98, needsClarification: false, resolvedEntities: variant === "answer" ? [temporal(m, "preferredDate", "2026-10-02")] : [], workflow: { name: "APPOINTMENT_BOOKING", action: "RESUME", evidence: [{ messageId: m.id, quote: m.content }] } };
+  if (variant === "wrong-workflow") i.workflow!.name = "APPOINTMENT_RESCHEDULE";
+  if (variant === "missing") delete i.workflow!.evidence;
+  if (variant === "fabricated") i.workflow!.evidence![0]!.quote = "not in message";
+  if (variant === "foreign") i.workflow!.evidence![0]!.messageId = "another-message";
+  if (variant === "ambiguous") i.needsClarification = true;
+  if (variant === "low") i.confidence = .1;
+  const before = structuredClone(f.state());
+  const input = { ...f.scoped, sourceMessageId: m.id, snapshotRevision: before.revision, interpretation: i, businessContext: f.context(m) };
+  if (variant === "stale") {
+    await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "16:00", normalizedValue: "16:00" });
+    const newer = structuredClone(f.state()); await assert.rejects(commands.apply(input), { code: "CONVERSATION_STATE_CONFLICT" }); assert.deepEqual(f.state(), newer); return;
+  }
+  const r = await commands.apply(input);
+  const valid = ["explicit", "answer", "confirmation", "system", "no-expectation", "stale-options"].includes(variant);
+  assert.equal(r.interpretation.needsClarification, !valid);
+  if (!valid) assert.deepEqual(f.state(), before);
+  else {
+    assert.equal(f.state().workflowStatus, variant === "system" ? "WAITING_FOR_SYSTEM" : ["answer", "no-expectation"].includes(variant) ? "ACTIVE" : "WAITING_FOR_CUSTOMER");
+    for (const [key, value] of Object.entries(before.knownEntities)) assert.deepEqual(f.state().knownEntities[key], value);
+    if (variant === "answer") { assert.equal(f.state().knownEntities.preferredDate.normalizedValue, "2026-10-02"); assert.equal(f.state().awaiting, null); }
+    else assert.deepEqual(f.state().awaiting, before.awaiting);
+  }
+  const p = await conversationPlannerService.plan({ businessContext: f.context(m), conversationSnapshot: await conversationContextService.getSnapshot({ ...f.scoped, messageId: m.id }), interpretation: r.interpretation });
+  assert.equal(p.move, !valid || variant === "stale-options" ? "ASK_FOR_CLARIFICATION" : variant === "confirmation" ? "ASK_FOR_CONFIRMATION" : variant === "system" ? "WAIT_FOR_SYSTEM" : "ASK_FOR_FIELD");
+  if (["explicit", "answer", "no-expectation"].includes(variant)) assert.equal(p.targetField, variant === "answer" ? "preferredTime" : "preferredDate");
+  const revision = f.state().revision; assert.equal((await commands.apply(input)).replayed, true); assert.equal(f.state().revision, revision);
+});
 async function booked(t: TestContext, catalog: Catalog = "consultancy", demo = false, dateKnown = false) {
   const f = await setup(t, catalog, demo);
   const m = await f.add(`I want to book ${f.services[0]!.name}${dateKnown ? " tomorrow" : ""}`);

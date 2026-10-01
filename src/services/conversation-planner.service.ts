@@ -52,6 +52,7 @@ export const conversationPlannerService = {
       if (purpose) return finish(purpose.move, purpose.reasonCode, purpose.move === "ASK_FOR_FIELD" ? "COLLECT_INFORMATION" : "CLARIFY", { targetField: "serviceNeed", serviceClarification: purpose.clarification, missingFields: ["serviceNeed"] });
     }
     if (meaning.needsClarification) {
+      if (s.workflowStatus === "PAUSED" && s.activeWorkflow === "APPOINTMENT_BOOKING") return finish("ASK_FOR_CLARIFICATION", meaning.clarificationReason ?? "INTERPRETATION_AMBIGUOUS", "CLARIFY", { suspendedContext: { workflow: s.activeWorkflow, ...(s.awaiting?.field ? { stillAwaiting: s.awaiting.field } : {}) } });
       // Ask about one explicitly evidenced uncertain temporal value, without applying it to state.
       const uncertain = meaning.resolvedEntities.filter(e => ["preferredDate", "preferredTime"].includes(e.key) && e.certainty !== "EXACT" && e.evidence.some(q => q.messageId === snapshot.currentMessage?.id && snapshot.currentMessage.text.includes(q.quote)));
       return finish("ASK_FOR_CLARIFICATION", meaning.clarificationReason ?? "INTERPRETATION_AMBIGUOUS", "CLARIFY", uncertain.length === 1 ? { targetField: uncertain[0]!.key } : {});
@@ -129,6 +130,7 @@ export function assistantPlanPatch(plan: ConversationPlan, text: string): StateP
   if (plan.move === "WAIT_FOR_SYSTEM") return { workflowStatus: "WAITING_FOR_SYSTEM", awaiting: { type: "SYSTEM_RESULT" }, lastAssistantQuestion: null, offeredOptions: [] };
   if (plan.move === "CANCEL_WORKFLOW") return { activeWorkflow: null, workflowStatus: "CANCELLED", awaiting: null, lastAssistantQuestion: null, offeredOptions: [] };
   // Clarification preserves unresolved typed expectation/options; interruptions preserve all workflow context.
+  if (plan.move === "ASK_FOR_CLARIFICATION" && plan.suspendedContext) return {};
   if (plan.move === "ASK_FOR_CLARIFICATION") return plan.targetField
     ? { ...active, awaiting: { type: "FIELD", field: plan.targetField, question }, lastAssistantQuestion: question, offeredOptions: [] }
     : { ...(!plan.workflow ? { workflowStatus: "IDLE" as const } : {}), lastAssistantQuestion: question };
