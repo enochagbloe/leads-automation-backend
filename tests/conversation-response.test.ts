@@ -230,15 +230,15 @@ test("demo cannot authorize completion claims even with a forged success result"
   const r = f.output({ text: "Your booking is confirmed.", askedField: null, questionCount: 0, fulfilledPurpose: "ANSWER_CUSTOMER", claimsActionCompleted: true, claims: ["APPOINTMENT_CONFIRMED"] });
   assert.equal(f.check(r, { plan, trustedWorkflowResult: { ...scope, sourceMessageId: f.m.id, stateRevision: plan.stateRevision, status: "SUCCEEDED", claims: ["APPOINTMENT_CONFIRMED"] } }).valid, false);
 });
-test("only actual appointment availability checks provide grounded availability metadata", async t => {
+test("successful availability check leaves appointment creation REQUESTED until backend execution", async t => {
   const f = setup(t); await f.booking(true); const m = await f.add("Continue");
   mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: meaning(), commands: [], appliedRevision: f.state().revision }) as any);
   mockMethod(t, aiProvider, "generateReply", async (input: any) => {
-    const prompt = JSON.parse(input.userPrompt); assert.equal(prompt.trustedWorkflowResult.status, "SUCCEEDED"); assert.deepEqual(prompt.trustedWorkflowResult.claims, ["AVAILABILITY"]);
-    return { rawText: JSON.stringify({ ...responseOutput(input, "12 PM is available."), claims: ["AVAILABILITY"] }), providerRequestCount: 1 } as any;
+    const prompt = JSON.parse(input.userPrompt); assert.equal(prompt.trustedWorkflowResult.status, "REQUESTED"); assert.deepEqual(prompt.trustedWorkflowResult.claims, []);
+    return { rawText: JSON.stringify(responseOutput(input, "I can request that appointment.")), providerRequestCount: 1 } as any;
   });
   const r = await generateContextReply(f.context(m), { businessId: scope.businessId, conversationId: scope.conversationId, messageId: m.id });
-  assert.deepEqual(r.trustedWorkflowResult.claims, ["AVAILABILITY"]); assert.equal(f.messages().length, 1, "reply stage cannot create appointments or messages");
+  assert.equal(r.trustedWorkflowResult.status, "REQUESTED"); assert.deepEqual(r.trustedWorkflowResult.claims, []); assert.equal(f.messages().length, 1, "reply stage cannot create appointments or messages");
 });
 test("NO_ACTION validates ownership and makes no response-provider request", async t => {
   const f = await prepared(t); f.context.conversationPlan = { ...f.plan, move: "NO_ACTION", responseDirective: { ...f.plan.responseDirective, purpose: "WAIT", askOneQuestion: false } };

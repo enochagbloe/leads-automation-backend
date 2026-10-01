@@ -67,6 +67,7 @@ test("a governance-blocked booking never reserves the message", async (t) => {
   const input = {
     context: { business: { id: "business" }, services: [{ id: "service", name: "Consultation", isBookable: true }] },
     businessAccountId: "account", conversationId: "conversation", leadId: "lead", messageId: "message",
+    conversationPlan: { businessId: "business", conversationId: "conversation", sourceMessageId: "message", workflowRequest: { type: "CREATE_BOOKING_REQUEST" } },
     decision: { appointmentIntent: { serviceId: "service", preferredDate: "2030-01-01", preferredTime: "10:00", missingFields: [] } },
   } as unknown as Parameters<typeof createAiBookingRequest>[0];
   await assert.rejects(createAiBookingRequest(input), { code: "KNOWLEDGE_CONFLICT" });

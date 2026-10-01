@@ -20,6 +20,8 @@ export async function generateContextReply(context: AiBusinessContext, options: 
   let trustedWorkflowResult: WorkflowExecutionResult | undefined;
   const workflowBefore = timing.stages.workflowMs;
   const conversationPlan = await timing.measure("plannerMs", () => conversationPlannerService.plan({ timing, conversationSnapshot: snapshot, interpretation: meaning.interpretation, businessContext: context, onWorkflowResult: result => { trustedWorkflowResult = result; } })).finally(() => { timing.stages.plannerMs = Math.max(0, timing.stages.plannerMs - (timing.stages.workflowMs - workflowBefore)); });
+  // A successful slot check is not successful appointment creation.
+  if (conversationPlan.workflowRequest?.type === "CREATE_BOOKING_REQUEST") trustedWorkflowResult = { businessId: conversationPlan.businessId, conversationId: conversationPlan.conversationId, sourceMessageId: conversationPlan.sourceMessageId, stateRevision: conversationPlan.stateRevision, status: "REQUESTED", claims: [] };
   context = { ...context, trustedWorkflowResult, conversationPlan, conversationSnapshot: snapshot, recentMessages: snapshot.recentMessages, conversationInterpretation: meaning.interpretation };
   const result = await timing.measure("responseMs", () => conversationResponseService.generate(context, options)).catch(error => {
     const failure = error instanceof AppError ? error : new AppError(503, "AI reply unavailable", "AI_PROVIDER_ERROR");

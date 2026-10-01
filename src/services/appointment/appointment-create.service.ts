@@ -398,6 +398,11 @@ export async function createAppointmentFromValidatedInput(actor: AppointmentActo
         metadata: json({ appointmentId: created.id, type: "APPOINTMENT_CREATED" }),
       }, tx);
     }
+    if (input.bookingIdempotencyKey) {
+      if (!input.conversationPlan || input.source !== AppointmentSource.AI_CONVERSATION) throw new AppError(403, "Booking receipt requires an AI plan", "CONVERSATION_STATE_FORBIDDEN");
+      const linked = await tx.aiInteractionLog.updateMany({ where: { bookingIdempotencyKey: input.bookingIdempotencyKey, businessId: actor.businessId, conversationId: input.conversationPlan.conversationId, messageId: input.conversationPlan.sourceMessageId, appointmentId: null }, data: { appointmentId: created.id, bookingRequestCreated: true, status: "BOOKING_REQUEST_CREATED" } });
+      if (linked.count !== 1) throw new AppError(409, "Booking receipt changed", "CONVERSATION_STATE_CONFLICT");
+    }
     return created;
   }, TRANSACTION_OPTIONS);
 

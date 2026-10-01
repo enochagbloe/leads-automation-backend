@@ -2,6 +2,8 @@ import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import { conversationTransactionOptions } from "./conversation-transaction";
 import { ConversationPlan } from "./conversation-plan.schema";
 import { assertPlanCurrent } from "./conversation-planner.service";
+import { workflowExecutionResultSchema, WorkflowExecutionResult } from "./conversation-response.schema";
+import type { StatePatch } from "./conversation-state.schema";
 import { missingAiBookingFields } from "./appointment/appointment-conversation-requirements";
 import { generateContextReply } from "./ai-reply-runtime.service";
 import { storeAiReply, logConversationResponsePersisted } from "./ai-message-store.service";
@@ -10,7 +12,6 @@ import {
   ConversationChannel,
   ConversationStatus,
   LeadActivityAction,
-  AppointmentConfirmationSource,
   AppointmentLocationType,
   AppointmentSource,
   AppointmentStatus,
@@ -290,6 +291,8 @@ export async function createAiBookingRequest(input: {
   decision: NonNullable<AiSafetyResult["decision"]>;
   conversationPlan?: ConversationPlan;
 }): Promise<AiBookingAppointment> {
+  if (input.context.demoSessionId || input.conversationPlan?.demoSessionId) throw new AppError(403, "Demo booking execution is disabled", "DEMO_PRODUCTION_EFFECT_FORBIDDEN");
+  if (!input.conversationPlan || input.conversationPlan.businessId !== input.context.business.id || input.conversationPlan.conversationId !== input.conversationId || input.conversationPlan.sourceMessageId !== input.messageId || input.conversationPlan.workflowRequest?.type !== "CREATE_BOOKING_REQUEST") throw new AppError(403, "Booking requires a scoped creation plan", "CONVERSATION_STATE_FORBIDDEN");
   const key = bookingIdempotencyKey({
     businessId: input.context.business.id,
     conversationId: input.conversationId,
@@ -346,7 +349,7 @@ export async function createAiBookingRequest(input: {
     );
   }
 
-  if (input.conversationPlan) await assertPlanCurrent(input.conversationPlan);
+  await assertPlanCurrent(input.conversationPlan);
   const actor = await ownerActorForBusiness({ businessId: input.context.business.id, businessAccountId: input.businessAccountId });
   const customerLocation = intent?.customerLocation?.trim() || null;
   const locationNote = customerLocation ? ` Customer location mentioned: ${customerLocation}.` : "";
@@ -377,33 +380,46 @@ export async function createAiBookingRequest(input: {
     }
     throw error;
   }
-  const appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
-    leadId: input.leadId,
-    conversationId: input.conversationId,
-    serviceId: service.id,
-    assignedStaffId: null,
-    customerName: intent?.customerName ?? input.context.lead?.name ?? null,
-    customerPhone: intent?.customerPhone ?? input.context.lead?.phone ?? null,
-    customerEmail: input.context.lead?.email ?? null,
-    title: `${service.name} request`,
-    description: "Appointment request created from AI-detected booking intent.",
-    notes: `${intent?.notes ?? input.decision.reason}${locationNote}`,
-    date: intent!.preferredDate!,
-    time: intent!.preferredTime!,
-    timezone: intent?.timezone ?? input.context.business.timezone ?? "Africa/Accra",
-    durationMinutes: service.durationMinutes ?? undefined,
-    locationType,
-    location: customerLocation,
-    source: AppointmentSource.AI_CONVERSATION,
-    conversationPlan: input.conversationPlan,
-    aiDecision: {
-      confidence: input.decision.confidence,
-      intent: input.decision.intent,
-      reason: input.decision.reason,
-      requiresHumanReview: input.decision.requiresHumanReview,
-      suggestedAction: input.decision.suggestedAction,
-    },
-  }, { ipAddress: undefined, userAgent: undefined });
+  let appointment: AiBookingAppointment;
+  try {
+    appointment = await appointmentInternalService.createAppointmentFromValidatedInput(actor, {
+      leadId: input.leadId,
+      conversationId: input.conversationId,
+      serviceId: service.id,
+      assignedStaffId: null,
+      customerName: intent?.customerName ?? input.context.lead?.name ?? null,
+      customerPhone: intent?.customerPhone ?? input.context.lead?.phone ?? null,
+      customerEmail: input.context.lead?.email ?? null,
+      title: `${service.name} request`,
+      description: "Appointment request created from AI-detected booking intent.",
+      notes: `${intent?.notes ?? input.decision.reason}${locationNote}`,
+      date: intent!.preferredDate!,
+      time: intent!.preferredTime!,
+      timezone: intent?.timezone ?? input.context.business.timezone ?? "Africa/Accra",
+      durationMinutes: service.durationMinutes ?? undefined,
+      locationType,
+      location: customerLocation,
+      source: AppointmentSource.AI_CONVERSATION,
+      conversationPlan: input.conversationPlan,
+      bookingIdempotencyKey: key,
+      aiDecision: {
+        confidence: input.decision.confidence,
+        intent: input.decision.intent,
+        reason: input.decision.reason,
+        requiresHumanReview: input.decision.requiresHumanReview,
+        suggestedAction: input.decision.suggestedAction,
+      },
+    }, { ipAddress: undefined, userAgent: undefined });
+  } catch (error) {
+    if (error instanceof AppError && ["CONVERSATION_STATE_CONFLICT", "CONVERSATION_PLAN_CONTROL_CHANGED"].includes(error.code)) throw error;
+    // Creation may have committed before a notification failed. Its atomic receipt is authoritative.
+    const saved = await prisma.aiInteractionLog.findUnique({ where: { bookingIdempotencyKey: key }, select: { appointmentId: true } });
+    if (saved?.appointmentId) {
+      const existing = await appointmentFromBookingLog(saved.appointmentId, input.context.business.id);
+      if (existing) return existing;
+    }
+    throw error;
+  }
   await prisma.aiInteractionLog.update({
     where: { bookingIdempotencyKey: key },
     data: {
@@ -417,8 +433,28 @@ export async function createAiBookingRequest(input: {
       blockedReason: null,
       status: "BOOKING_REQUEST_CREATED",
     },
-  });
+  }).catch(() => console.warn("booking_receipt.metadata_update_failed", { businessId: input.context.business.id, conversationId: input.conversationId, sourceMessageId: input.messageId }));
   return appointment;
+}
+
+export async function executeAiBookingRequest(input: Parameters<typeof createAiBookingRequest>[0] & { conversationPlan: ConversationPlan }) {
+  const plan = input.conversationPlan;
+  const result = (status: WorkflowExecutionResult["status"], appointment?: AiBookingAppointment): WorkflowExecutionResult => workflowExecutionResultSchema.parse({ businessId: plan.businessId, conversationId: plan.conversationId, sourceMessageId: plan.sourceMessageId, stateRevision: plan.stateRevision, status, claims: status === "SUCCEEDED" && appointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [] });
+  if (input.context.demoSessionId || plan.demoSessionId) return { appointment: null, trustedWorkflowResult: result("NOT_EXECUTED"), replyText: "This demo cannot create a real appointment.", errorCode: "DEMO_PRODUCTION_EFFECT_FORBIDDEN" };
+  try {
+    const appointment = await createAiBookingRequest(input);
+    return { appointment, trustedWorkflowResult: result("SUCCEEDED", appointment), replyText: appointment.status === AppointmentStatus.CONFIRMED ? confirmedAppointmentReply(appointment) : "Your appointment request has been saved for the business to review.", errorCode: null };
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : "AI_BOOKING_REQUEST_FAILED";
+    if (["CONVERSATION_STATE_CONFLICT", "CONVERSATION_PLAN_CONTROL_CHANGED", "CONVERSATION_STATE_FORBIDDEN", "CONVERSATION_PLAN_ACTION_MISMATCH", "AI_BOOKING_REQUEST_IN_PROGRESS"].includes(code)) throw error;
+    return { appointment: null, trustedWorkflowResult: result("FAILED"), replyText: ["APPOINTMENT_SLOT_UNAVAILABLE", "APPOINTMENT_OUTSIDE_BUSINESS_HOURS", "APPOINTMENT_OVERLAPS_BREAK_TIME", "APPOINTMENT_STAFF_UNAVAILABLE", "BUSINESS_CLOSED"].includes(code) ? "That time is no longer available. What other time would work for you?" : "I couldn't save the appointment request. Please try again or contact the business.", errorCode: code };
+  }
+}
+
+export function bookingCompletionPatch(result: WorkflowExecutionResult, appointment: Pick<AiBookingAppointment, "id"> | null): StatePatch | undefined {
+  return result.status === "SUCCEEDED" && appointment?.id
+    ? { activeWorkflow: null, workflowStatus: "COMPLETED", awaiting: null, lastAssistantQuestion: null, offeredOptions: [] }
+    : undefined;
 }
 
 async function logInteraction(input: {
@@ -854,11 +890,13 @@ export const aiReplyEngine = {
       let bookingAppointment: AiBookingAppointment | null = null;
       let bookingRequestCreated = false;
       let bookingBlockedReason: string | null = null;
+      let trustedWorkflowResult = providerResult.trustedWorkflowResult;
       let replyText = safety.decision.replyText ?? "";
       let successStatus: AiExecutionStatus = "SUCCESS_AUTO_REPLIED";
       if (safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST") {
+        trustedWorkflowResult = workflowExecutionResultSchema.parse({ businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id, stateRevision: providerResult.conversationPlan.stateRevision, status: "REQUESTED", claims: [] });
         try {
-          bookingAppointment = await timing.measure("workflowMs", () => createAiBookingRequest({
+          const execution = await timing.measure("workflowMs", () => executeAiBookingRequest({
             conversationPlan: providerResult!.conversationPlan,
             context,
             businessAccountId: conversation.business.businessAccountId,
@@ -867,14 +905,15 @@ export const aiReplyEngine = {
             messageId: message.id,
             decision: safety.decision,
           }));
+          trustedWorkflowResult = execution.trustedWorkflowResult;
+          providerResult.trustedWorkflowResult = execution.trustedWorkflowResult;
+          replyText = execution.replyText;
+          if (!execution.appointment) throw new AppError(422, "Booking was not executed", execution.errorCode ?? "AI_BOOKING_REQUEST_FAILED");
+          bookingAppointment = execution.appointment;
           bookingRequestCreated = true;
           successStatus = "SUCCESS_BOOKING_REQUEST_CREATED";
-          replyText = bookingAppointment.status === AppointmentStatus.CONFIRMED
-            && bookingAppointment.confirmationSource === AppointmentConfirmationSource.AI_PREMIUM_AUTO_CONFIRM
-            ? confirmedAppointmentReply(bookingAppointment)
-            : "Your appointment request has been saved for the business to review.";
-          await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id });
-          realtimeService.publish({
+          await aiUsageService.trackBookingRequest({ accountUsageId: usage.usage.id }).catch(() => console.warn("booking_usage.update_failed", { appointmentId: bookingAppointment?.id }));
+          await Promise.resolve().then(() => realtimeService.publish({
             type: "business.ai.booking_request.created",
             businessId: conversation.businessId,
             conversationId: conversation.id,
@@ -882,20 +921,19 @@ export const aiReplyEngine = {
             assignedStaffId: conversation.assignedStaffId,
             payload: {
               conversationId: conversation.id,
-              appointmentId: bookingAppointment.id,
-              appointmentStatus: bookingAppointment.status,
+              appointmentId: execution.appointment!.id,
+              appointmentStatus: execution.appointment!.status,
               sourceMessageId: message.id,
             },
-          });
+          })).catch(() => console.warn("booking_event.publish_failed", { appointmentId: bookingAppointment?.id }));
         } catch (error) {
           const code = error instanceof AppError ? error.code : "AI_BOOKING_REQUEST_FAILED";
-          if (code === "CONVERSATION_STATE_CONFLICT" || code === "CONVERSATION_PLAN_CONTROL_CHANGED") throw error;
+          if (["CONVERSATION_STATE_CONFLICT", "CONVERSATION_PLAN_CONTROL_CHANGED", "CONVERSATION_STATE_FORBIDDEN", "CONVERSATION_PLAN_ACTION_MISMATCH", "AI_BOOKING_REQUEST_IN_PROGRESS"].includes(code)) throw error;
           bookingBlockedReason = code;
           if (code === "AI_BOOKING_MISSING_FIELDS") {
-            replyText = safety.decision.replyText
-              ?? "I can help request that appointment. Please share the service, preferred date, and preferred time.";
-          } else if (safety.decision.replyText && ["APPOINTMENT_SLOT_UNAVAILABLE", "APPOINTMENT_OUTSIDE_BUSINESS_HOURS", "APPOINTMENT_OVERLAPS_BREAK_TIME"].includes(code)) {
-            replyText = safety.decision.replyText;
+            replyText = "I can help request that appointment. Please share the service, preferred date, and preferred time.";
+          } else if (["APPOINTMENT_SLOT_UNAVAILABLE", "APPOINTMENT_OUTSIDE_BUSINESS_HOURS", "APPOINTMENT_OVERLAPS_BREAK_TIME", "APPOINTMENT_STAFF_UNAVAILABLE", "BUSINESS_CLOSED"].includes(code)) {
+            replyText = "That time is no longer available. What other time would work for you?";
             successStatus = "BLOCKED_UNAVAILABLE_SLOT";
           } else {
             const fallbackDecision = fallbackHumanReviewDecision(code);
@@ -993,13 +1031,9 @@ export const aiReplyEngine = {
               bookingRequestCreated,
               bookingBlockedReason,
               appointmentId: bookingAppointment?.id ?? null,
-              workflowExecutionResult: bookingRequestCreated ? {
-                businessId: conversation.businessId, conversationId: conversation.id, sourceMessageId: message.id,
-                stateRevision: providerResult!.conversationPlan.stateRevision, status: "SUCCEEDED",
-                claims: bookingAppointment?.status === AppointmentStatus.CONFIRMED ? ["APPOINTMENT_CONFIRMED"] : [],
-              } : providerResult!.trustedWorkflowResult,
+              workflowExecutionResult: trustedWorkflowResult,
             }),
-          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: bookingRequestCreated ? replyText : providerResult!.validatedResponse.text, metadata: bookingRequestCreated ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: { activeWorkflow: null, workflowStatus: "COMPLETED" as const, awaiting: null, lastAssistantQuestion: null, offeredOptions: [] } } } : {}) }), conversationTransactionOptions()));
+          }, conversation.status, { intent: safety.decision.intent, confidence: safety.decision.confidence, bookingRequestCreated, appointmentId: bookingAppointment?.id ?? null }, { plan: providerResult!.conversationPlan, response: { text: safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST" ? replyText : providerResult!.validatedResponse.text, metadata: safety.decision.suggestedAction === "CREATE_BOOKING_REQUEST" ? { validationVersion: 1, source: "WORKFLOW_RESULT", fulfilledPurpose: "WORKFLOW_RESULT", askedField: null, referencedOptionIds: [], claimsActionCompleted: bookingRequestCreated && trustedWorkflowResult?.claims.includes("APPOINTMENT_CONFIRMED") === true, regenerationCount: providerResult!.conversationResponse.regenerationCount, fallbackUsed: false } : providerResult!.conversationResponse }, ...(bookingRequestCreated ? { stateChange: { expectedRevision: providerResult!.conversationPlan.stateRevision, patch: bookingCompletionPatch(trustedWorkflowResult!, bookingAppointment)! } } : {}) }), conversationTransactionOptions()));
 
       logConversationResponsePersisted(aiMessage);
       if (conversation.channel === ConversationChannel.WHATSAPP) {

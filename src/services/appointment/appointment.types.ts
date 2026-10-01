@@ -29,6 +29,7 @@ export type InternalCreateAppointmentInput = Omit<CreateAppointmentInput, "sourc
   source: AppointmentSource;
   aiDecision?: AppointmentAiDecisionContext | null;
   conversationPlan?: ConversationPlan;
+  bookingIdempotencyKey?: string;
 };
 
 export type CreationConfirmation = {
