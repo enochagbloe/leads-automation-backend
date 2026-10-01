@@ -8,7 +8,7 @@ import { conversationPlanSchema, ConversationPlan } from "./conversation-plan.sc
 import { conversationWorkflowPlanningService, PlanningInput } from "./conversation-workflow-planning.service";
 import { assertConversationScope, conversationStateService } from "./conversation-state.service";
 import { interpretationSchema } from "./conversation-interpretation.schema";
-import { optionsAreFresh, semanticConfidenceThreshold } from "./conversation-interpretation-policy";
+import { optionsAreFresh, semanticConfidenceThreshold, isExplicitBookingCancellation } from "./conversation-interpretation-policy";
 import { StatePatch } from "./conversation-state.schema";
 
 export async function assertPlanCurrent(plan: ConversationPlan, transaction?: Prisma.TransactionClient): Promise<void> {
@@ -75,7 +75,16 @@ export const conversationPlannerService = {
       });
       return finish("ANSWER", "CURRENT_QUESTION_FIRST", "ANSWER_CUSTOMER", preserve);
     }
-    if (meaning.workflow?.action === "CANCEL" || meaning.intent === "CANCELLATION_INTENT") return finish("CANCEL_WORKFLOW", "CUSTOMER_CANCELLED_WORKFLOW", "ACKNOWLEDGE");
+    if (meaning.workflow?.action === "CANCEL" || meaning.intent === "CANCELLATION_INTENT") {
+      // Interpretation already committed the cancellation. Only its same-message receipt
+      // proves this was an eligible active booking, rather than an absent/finished workflow.
+      const receipt = await prisma.$transaction(tx => tx.conversationInterpretation.findFirst({ where: { businessId: s.businessId, conversationId: s.conversationId, sourceMessageId: context.triggerMessage.id } }), conversationTransactionOptions());
+      const committed = receipt && interpretationSchema.safeParse(receipt.result);
+      if (!isExplicitBookingCancellation(meaning) || s.activeWorkflow !== null || s.workflowStatus !== "CANCELLED" ||
+          !receipt || receipt.appliedRevision !== s.revision || receipt.appliedRevision <= receipt.snapshotRevision ||
+          !committed?.success || !isExplicitBookingCancellation(committed.data)) return finish("ASK_FOR_CLARIFICATION", "BOOKING_CANCELLATION_INVALID", "CLARIFY");
+      return finish("CANCEL_WORKFLOW", "CUSTOMER_CANCELLED_WORKFLOW", "ACKNOWLEDGE");
+    }
     if (meaning.workflow?.action === "PAUSE" || s.workflowStatus === "PAUSED") return finish("PAUSE_WORKFLOW", "WORKFLOW_PAUSED", "ACKNOWLEDGE");
     if (s.workflowStatus === "WAITING_FOR_SYSTEM" || s.awaiting?.type === "SYSTEM_RESULT") return finish("WAIT_FOR_SYSTEM", "BACKEND_RESULT_PENDING", "WAIT");
     if (meaning.confirmation?.type === "NO") return finish("ASK_FOR_CLARIFICATION", "CONFIRMATION_REJECTED", "CLARIFY");

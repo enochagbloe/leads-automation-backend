@@ -454,6 +454,49 @@ for (const demo of [false, true]) for (const [text, key, value] of [
   const revision = f.state().revision; assert.equal((await f.run(m, demo ? "demo-a" : undefined)).replayed, true); assert.equal(f.state().revision, revision); assert.equal(f.requests.length, 1);
 });
 
+for (const demo of [false, true]) for (const variant of ["valid", "no", "ambiguous", "low-confidence", "inactive", "paused", "intent-only", "action-only", "wrong-workflow", "stale"] as const) test(`booking cancellation ${variant}: demo=${demo}`, async t => {
+  const f = setup(t); if (demo) f.demo();
+  const scoped = { ...scope, ...(demo ? { demoSessionId: "demo-a" } : {}) };
+  const command = () => ({ ...f.command(), ...scoped });
+  for (const method of ["update", "updateMany", "delete", "deleteMany"] as const) mockMethod(t, prisma.appointment, method, () => { assert.fail("Conversation cancellation must not change persisted appointments"); });
+  if (variant !== "inactive") await state.setActiveWorkflow(command(), "APPOINTMENT_BOOKING", "APPOINTMENT");
+  await state.setEntity(command(), "preferredTime", { kind: "TIME", value: "14:00", normalizedValue: "14:00" });
+  await state.setEntity(command(), "preferredDate", { kind: "DATE", value: "2026-10-02", normalizedValue: "2026-10-02" });
+  await state.setEntity(command(), "serviceId", { value: "service-a" });
+  if (variant !== "inactive") {
+    await state.setOptions(command(), [{ id: "old_time", label: "2 PM", value: "14:00", position: 1 }]);
+    await state.setAwaiting(command(), { type: "CONFIRMATION", question: "Use these details?" });
+  }
+  if (variant === "paused") await state.pauseWorkflow(command());
+  const m = await f.add(variant === "no" ? "No" : "Forget the booking");
+  const proposed = base({ intent: "CANCELLATION_INTENT", workflow: { name: "APPOINTMENT_BOOKING", action: "CANCEL" } });
+  if (variant === "no") { proposed.intent = "BOOKING_INTENT"; delete proposed.workflow; proposed.confirmation = { type: "NO", confidence: .99 }; }
+  if (variant === "ambiguous") proposed.needsClarification = true;
+  if (variant === "low-confidence") proposed.confidence = .1;
+  if (variant === "intent-only") delete proposed.workflow;
+  if (variant === "action-only") proposed.intent = "BOOKING_INTENT";
+  if (variant === "wrong-workflow") proposed.workflow!.name = "APPOINTMENT_CANCEL";
+  f.next(proposed); const before = structuredClone(f.state()); const history = structuredClone(f.messages());
+  if (variant === "stale") {
+    f.before(async () => { await state.setEntity(command(), "preferredTime", { kind: "TIME", value: "16:00", normalizedValue: "16:00" }); });
+    await assert.rejects(f.run(m, scoped.demoSessionId), { code: "CONVERSATION_STATE_CONFLICT" });
+    assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.equal(f.state().knownEntities.preferredTime.normalizedValue, "16:00"); return;
+  }
+  const r = await f.run(m, scoped.demoSessionId);
+  assert.deepEqual(f.messages(), history);
+  if (variant === "valid") {
+    assert.equal(r.interpretation.needsClarification, false); assert.equal(f.state().activeWorkflow, null); assert.equal(f.state().workflowStatus, "CANCELLED");
+    assert.equal(f.state().awaiting, null); assert.equal(f.state().lastAssistantQuestion, null); assert.deepEqual(f.state().offeredOptions, []);
+    assert.equal(f.state().knownEntities.preferredDate, undefined); assert.equal(f.state().knownEntities.preferredTime, undefined);
+    assert.deepEqual(f.state().knownEntities.serviceId, before.knownEntities.serviceId);
+    const revision = f.state().revision; assert.equal((await f.run(m, scoped.demoSessionId)).replayed, true); assert.equal(f.state().revision, revision);
+  } else if (variant === "no") {
+    assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.deepEqual(f.state().knownEntities, before.knownEntities);
+  } else { assert.equal(r.interpretation.needsClarification, true); assert.deepEqual(f.state(), before); }
+  const plan = await conversationPlannerService.plan({ businessContext: f.context(m, scoped.demoSessionId), conversationSnapshot: await conversationContextService.getSnapshot({ ...scoped, messageId: m.id }), interpretation: r.interpretation });
+  assert.equal(plan.move, variant === "valid" ? "CANCEL_WORKFLOW" : "ASK_FOR_CLARIFICATION"); assert.equal(plan.workflowRequest, undefined);
+});
+
 for (const status of ["IDLE", "CANCELLED", "COMPLETED"] as const) test(`time correction cannot mutate an inactive booking: ${status}`, async t => {
   const f = setup(t);
   await state.setEntity(f.command(), "preferredTime", { kind: "TIME", value: "12pm", normalizedValue: "12:00" });
