@@ -374,11 +374,19 @@ export async function createAiBookingRequest(input: {
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      const appointment = await waitForExistingBookingAppointment({ key, businessId: input.context.business.id });
-      if (appointment) return appointment;
-      throw new AppError(409, "AI booking request is already being processed for this message.", "AI_BOOKING_REQUEST_IN_PROGRESS");
+      // Only a finished, uncommitted attempt is reusable. Exactly one retry can claim it.
+      const retry = await prisma.aiInteractionLog.updateMany({
+        where: { bookingIdempotencyKey: key, businessId: input.context.business.id, conversationId: input.conversationId, messageId: input.messageId, status: "BOOKING_REQUEST_FAILED", appointmentId: null },
+        data: { status: "BOOKING_REQUEST_IN_PROGRESS" },
+      });
+      if (!retry.count) {
+        const appointment = await waitForExistingBookingAppointment({ key, businessId: input.context.business.id });
+        if (appointment) return appointment;
+        throw new AppError(409, "AI booking request is already being processed for this message.", "AI_BOOKING_REQUEST_IN_PROGRESS");
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
   let appointment: AiBookingAppointment;
   try {
@@ -411,7 +419,12 @@ export async function createAiBookingRequest(input: {
       },
     }, { ipAddress: undefined, userAgent: undefined });
   } catch (error) {
-    if (error instanceof AppError && ["CONVERSATION_STATE_CONFLICT", "CONVERSATION_PLAN_CONTROL_CHANGED"].includes(error.code)) throw error;
+    // This caller owns the reservation. Preserve committed receipts and audit history;
+    // release only a completed attempt whose appointment transaction did not commit.
+    await prisma.aiInteractionLog.updateMany({
+      where: { bookingIdempotencyKey: key, businessId: input.context.business.id, conversationId: input.conversationId, messageId: input.messageId, status: "BOOKING_REQUEST_IN_PROGRESS", appointmentId: null },
+      data: { status: "BOOKING_REQUEST_FAILED" },
+    });
     // Creation may have committed before a notification failed. Its atomic receipt is authoritative.
     const saved = await prisma.aiInteractionLog.findUnique({ where: { bookingIdempotencyKey: key }, select: { appointmentId: true } });
     if (saved?.appointmentId) {
