@@ -165,7 +165,7 @@ async function processClaimed(job: NonNullable<Awaited<ReturnType<typeof claim>>
   }
   if (!embeddingsSynced) {
     try {
-      await knowledgeEmbeddingService.syncDocument(job.documentId);
+      await knowledgeEmbeddingService.syncDocument(job.businessId, job.documentId);
       embeddingsSynced = (await checkpoint(job.id, job.processingRevision, "embeddingsSyncedAt")).count === 1;
     } catch (error) {
       failures.push(failure(error));

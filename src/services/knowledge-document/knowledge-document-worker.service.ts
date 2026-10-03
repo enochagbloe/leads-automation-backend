@@ -521,7 +521,7 @@ async function queueDocumentsRequiringCurrentExtraction() {
       queued += 1;
       await Promise.allSettled([
         invalidateAiBusinessContext(candidate.businessId),
-        knowledgeEmbeddingService.syncDocument(candidate.documentId),
+        knowledgeEmbeddingService.syncDocument(candidate.businessId, candidate.documentId),
       ]);
     }
   }

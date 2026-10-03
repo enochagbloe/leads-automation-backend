@@ -73,7 +73,7 @@ async function log(actor: KnowledgeDocumentActor, context: Omit<AuditInput, "act
 async function refreshRuntimeKnowledge(actor: KnowledgeDocumentActor, documentId: string) {
   const results = await Promise.allSettled([
     invalidateAiBusinessContext(actor.businessId),
-    knowledgeEmbeddingService.syncDocument(documentId),
+    knowledgeEmbeddingService.syncDocument(actor.businessId, documentId),
   ]);
   for (const result of results) {
     if (result.status === "rejected") {

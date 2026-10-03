@@ -794,7 +794,7 @@ async function saveGeneratedKnowledgeDraft(
   for (const result of sideEffects) {
     if (result.status === "rejected") console.error("AI knowledge draft side effect failed", { error: result.reason });
   }
-  scheduleEmbeddingSync("article.ai_draft", knowledgeEmbeddingService.syncArticle(article.id));
+  scheduleEmbeddingSync("article.ai_draft", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
   realtimeService.publish({
     type: "business.knowledge.article.created",
     businessId: actor.businessId,
@@ -943,7 +943,7 @@ export const knowledgeService = {
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action: AuditAction.KNOWLEDGE_ARTICLE_CREATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId: article.id } }),
     ]);
-    scheduleEmbeddingSync("article.created", knowledgeEmbeddingService.syncArticle(article.id));
+    scheduleEmbeddingSync("article.created", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     realtimeService.publish({
       type: "business.knowledge.article.created",
       businessId: actor.businessId,
@@ -1003,7 +1003,7 @@ export const knowledgeService = {
       auditService.log({ ...context, action: AuditAction.KNOWLEDGE_ARTICLE_UPDATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId } }),
     ]);
     scheduleStorageDelete("article.pdf_stale_after_update", oldPdfFileKey, oldPdfStorageProvider);
-    scheduleEmbeddingSync("article.updated", knowledgeEmbeddingService.syncArticle(article.id));
+    scheduleEmbeddingSync("article.updated", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     realtimeService.publish({
       type: "business.knowledge.article.updated",
       businessId: actor.businessId,
@@ -1047,7 +1047,7 @@ export const knowledgeService = {
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId, status } }),
     ]);
-    scheduleEmbeddingSync("article.status", knowledgeEmbeddingService.syncArticle(article.id));
+    scheduleEmbeddingSync("article.status", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     realtimeService.publish({
       type: "business.knowledge.article.updated",
       businessId: actor.businessId,
@@ -1185,7 +1185,7 @@ export const knowledgeService = {
       }
     }
     for (const article of created) {
-      scheduleEmbeddingSync("article.starter_draft", knowledgeEmbeddingService.syncArticle(article.id));
+      scheduleEmbeddingSync("article.starter_draft", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
       realtimeService.publish({
         type: "business.knowledge.article.created",
         businessId: actor.businessId,
@@ -1282,7 +1282,7 @@ export const knowledgeService = {
         invalidateKnowledgeCaches(actor.businessId),
         auditService.log({ ...context, action: AuditAction.KNOWLEDGE_DOCUMENT_UPLOADED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { documentId: document.id, fileName: document.fileName, originalSize: sanitized.originalSize, sanitizedSize: sanitized.buffer.byteLength, chunksCreated: sanitized.chunks.length, sanitized: true, uploadMode: "multipart" } }),
       ]);
-      scheduleEmbeddingSync("document.uploaded", knowledgeEmbeddingService.syncDocument(document.id));
+      scheduleEmbeddingSync("document.uploaded", knowledgeEmbeddingService.syncDocument(document.businessId, document.id));
       realtimeService.publish({
         type: "business.knowledge.document.uploaded",
         businessId: actor.businessId,
@@ -1393,7 +1393,7 @@ export const knowledgeService = {
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action: AuditAction.KNOWLEDGE_DOCUMENT_UPDATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { documentId } }),
     ]);
-    scheduleEmbeddingSync("document.updated", knowledgeEmbeddingService.syncDocument(document.id));
+    scheduleEmbeddingSync("document.updated", knowledgeEmbeddingService.syncDocument(document.businessId, document.id));
     realtimeService.publish({
       type: "business.knowledge.document.updated",
       businessId: actor.businessId,
@@ -1420,7 +1420,7 @@ export const knowledgeService = {
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action: status === KnowledgeDocumentStatus.ARCHIVED ? AuditAction.KNOWLEDGE_DOCUMENT_ARCHIVED : AuditAction.KNOWLEDGE_DOCUMENT_UPDATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { documentId, status } }),
     ]);
-    scheduleEmbeddingSync("document.status", knowledgeEmbeddingService.syncDocument(document.id));
+    scheduleEmbeddingSync("document.status", knowledgeEmbeddingService.syncDocument(document.businessId, document.id));
     realtimeService.publish({
       type: "business.knowledge.document.updated",
       businessId: actor.businessId,
