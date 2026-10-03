@@ -56,6 +56,7 @@ const schema = z.object({
   OPENROUTER_DEFAULT_MODEL: optionalString,
   OPENROUTER_EMBEDDING_MODEL: optionalString,
   OPENROUTER_EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(1536),
+  KNOWLEDGE_SEMANTIC_MIN_SCORE: z.coerce.number().min(0).max(1).default(0.78),
   OPENROUTER_FALLBACK_MODELS: z.string().default("").transform((value) =>
     value.split(",").map((model) => model.trim()).filter(Boolean)),
   OPENROUTER_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),

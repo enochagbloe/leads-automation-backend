@@ -9,13 +9,20 @@ import {
   knowledgeFactStatusesAreCustomerSafe,
 } from "./knowledge-document/knowledge-document-runtime-policy";
 
-type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK" | "DOCUMENT_FACT";
+export type EmbeddingSourceType = "ARTICLE" | "DOCUMENT_CHUNK" | "DOCUMENT_FACT";
 
 type VectorSearchResult = {
   sourceType: EmbeddingSourceType;
   sourceId: string;
   chunkId: string | null;
   score: number;
+};
+
+/** Internal candidates are untrusted until current source governance is checked. */
+export type SemanticKnowledgeCandidate = VectorSearchResult & {
+  businessId: string;
+  title: string;
+  indexedContent: string;
 };
 
 type OpenRouterEmbeddingResponse = {
@@ -102,6 +109,11 @@ function documentChunkText(chunk: {
     chunk.chunkText,
   ].filter(Boolean).join("\n").slice(0, MAX_EMBEDDING_TEXT_CHARS);
 }
+
+// Shared with retrieval to reject embeddings whose indexed text no longer matches the source.
+export const knowledgeEmbeddingText = { article: articleText, chunk: documentChunkText,
+  fact: (fact: { label: string; valueText: string }) => `${fact.label}\n${fact.valueText}`.slice(0, MAX_EMBEDDING_TEXT_CHARS),
+};
 
 async function createEmbedding(text: string) {
   if (!enabled()) return null;
@@ -193,7 +205,7 @@ async function loadSource(db: Prisma.TransactionClient, businessId: string, id: 
     if (!inputs.length) throw new AppError(409, "The document has no chunks available for embedding.", "KNOWLEDGE_DOCUMENT_EMBEDDING_SOURCE_EMPTY");
   } else {
     const facts = await loadCustomerSafeKnowledgeFacts(businessId, { documentId: id, limit: MAX_DOCUMENT_EMBEDDING_CHUNKS }, db);
-    inputs = facts.map(fact => ({ businessId, sourceType: "DOCUMENT_FACT", sourceId: id, chunkId: fact.id, title: fact.document.title, content: `${fact.label}\n${fact.valueText}`.slice(0, MAX_EMBEDDING_TEXT_CHARS) }));
+    inputs = facts.map(fact => ({ businessId, sourceType: "DOCUMENT_FACT", sourceId: id, chunkId: fact.id, title: fact.document.title, content: knowledgeEmbeddingText.fact(fact) }));
   }
   return { version: document.updatedAt, activeVersionId: document.activeVersionId, inputs };
 }
@@ -226,6 +238,30 @@ async function syncSource(businessId: string, id: string, kind: SourceKind) {
   });
 }
 
+async function searchVectors(businessId: string, query: string, limit: number, strict: boolean): Promise<SemanticKnowledgeCandidate[]> {
+  assertScope(businessId);
+  if (!enabled()) {
+    if (strict) throw new AppError(503, "Embedding provider is not configured.", "KNOWLEDGE_EMBEDDING_DISABLED");
+    return [];
+  }
+  const embedding = await createEmbedding(query);
+  if (!embedding) {
+    if (strict) throw new AppError(503, "Query embedding unavailable.", "KNOWLEDGE_EMBEDDING_UNAVAILABLE");
+    return [];
+  }
+  const rows = await prisma.$queryRawUnsafe<SemanticKnowledgeCandidate[]>(
+    `SELECT "businessId", "sourceType", "sourceId", "chunkId", "title", "content" AS "indexedContent",
+      1 - ("embedding" <=> $1::vector) AS score
+     FROM "KnowledgeSearchEmbedding"
+     WHERE "businessId" = $2 AND "embeddingModel" = $4
+     ORDER BY "embedding" <=> $1::vector
+     LIMIT $3`, vectorLiteral(embedding), businessId, limit, env.OPENROUTER_EMBEDDING_MODEL!,
+  );
+  return rows.filter(row => row.businessId === businessId
+    && ["ARTICLE", "DOCUMENT_CHUNK", "DOCUMENT_FACT"].includes(row.sourceType)
+    && typeof row.sourceId === "string" && Number.isFinite(row.score));
+}
+
 export const knowledgeEmbeddingService = {
   isEnabled: enabled,
   async deleteSource(businessId: string, sourceType: EmbeddingSourceType, sourceId: string) {
@@ -255,30 +291,17 @@ export const knowledgeEmbeddingService = {
     return { businessId, kind: input.kind, results, nextCursor: rows.length > limit ? rows[limit - 1]!.id : null };
   },
 
+  /** Existing asset search contract remains article/chunk only, with lexical fallback. */
   async search(businessId: string, query: string, limit: number): Promise<VectorSearchResult[]> {
-    assertScope(businessId);
-    if (!enabled()) return [];
-    const embedding = await createEmbedding(query);
-    if (!embedding) return [];
-    const rows = await prisma.$queryRawUnsafe<Array<{
-      sourceType: EmbeddingSourceType;
-      sourceId: string;
-      chunkId: string | null;
-      score: number;
-    }>>(
-      `SELECT "sourceType", "sourceId", "chunkId", 1 - ("embedding" <=> $1::vector) AS score
-       FROM "KnowledgeSearchEmbedding"
-       WHERE "businessId" = $2
-       ORDER BY "embedding" <=> $1::vector
-       LIMIT $3`,
-      vectorLiteral(embedding),
-      businessId,
-      limit,
-    );
-    return rows.filter((row) =>
-      (row.sourceType === "ARTICLE" || row.sourceType === "DOCUMENT_CHUNK")
-      && typeof row.sourceId === "string"
-      && typeof row.score === "number");
+    const rows = await searchVectors(businessId, query, limit, false);
+    return rows.filter(row => row.sourceType !== "DOCUMENT_FACT")
+      .map(({ sourceType, sourceId, chunkId, score }) => ({ sourceType, sourceId, chunkId, score }));
+  },
+
+  /** Standalone semantic retrieval explicitly opts into facts and failure reporting. */
+  async searchCandidates(businessId: string, query: string, limit: number): Promise<SemanticKnowledgeCandidate[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 32) throw new AppError(400, "Candidate limit must be between 1 and 32.", "KNOWLEDGE_RETRIEVAL_INPUT_INVALID");
+    return searchVectors(businessId, query, limit, true);
   },
 };
 
