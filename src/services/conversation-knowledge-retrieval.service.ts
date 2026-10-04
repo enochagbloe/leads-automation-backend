@@ -17,7 +17,7 @@ const intentContext: Partial<Record<ConversationInterpretation["intent"], string
 const text = (value: unknown, limit: number) => typeof value === "string" ? value.trim().slice(0, limit) : "";
 
 /** Deterministic query composition, never another language-model rewrite. */
-export function buildConversationKnowledgeQuery({ interpretation: i, snapshot: s, context }: Input) {
+function composeConversationKnowledgeQuery({ interpretation: i, snapshot: s, context }: Input) {
   const current = s.currentMessage?.text ?? context.triggerMessage.text;
   const parts = [`Customer: ${text(current, 700)}`, `Intent: ${i.needsClarification ? "UNKNOWN" : i.intent}`];
   if (!i.needsClarification && intentContext[i.intent]) parts.push(intentContext[i.intent]!);
@@ -59,7 +59,12 @@ export function buildConversationKnowledgeQuery({ interpretation: i, snapshot: s
     for (const m of recent.filter(m => m.senderType === "CUSTOMER" && !/\p{N}/u.test(m.text)
       && !operationalValues.some(v => m.text.toLowerCase().includes(v.toLowerCase())))) parts.push(`Recent topic: ${text(m.text, 140)}`);
   }
-  return parts.join("\n").slice(0, 2000);
+  const hintSafe = scoped && fresh && active && !i.needsClarification && i.topicShift?.kind !== "NEW_PRIMARY_GOAL";
+  return { query: parts.join("\n").slice(0, 2000), hints: hintSafe && service && (continuing || i.resolvedEntities.some(e => e.key === "serviceId" && e.source === "CURRENT_MESSAGE") || i.customerPurpose?.serviceId === service.id) ? { serviceId: service.id } : undefined };
+}
+
+export function buildConversationKnowledgeQuery(input: Input) {
+  return composeConversationKnowledgeQuery(input).query;
 }
 
 const normalized = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
@@ -88,7 +93,7 @@ export const conversationKnowledgeRetrievalService = {
     let status = "RETRIEVAL_UNAVAILABLE";
     const matches: KnowledgeGrounding[] = [];
     try {
-      const result = await knowledgeRetrievalService.retrieve({ businessId, query: buildConversationKnowledgeQuery(input), topK: 8 });
+      const result = await knowledgeRetrievalService.retrieve({ businessId, ...composeConversationKnowledgeQuery(input), topK: 8 });
       status = result.status;
       if (status === "MATCHES_FOUND") for (const match of result.matches.slice(0, 8)) {
         if (!matches.some(existing => duplicates(existing, match))) matches.push(match);

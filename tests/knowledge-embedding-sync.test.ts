@@ -52,7 +52,7 @@ function setup(t: TestContext) {
   env.OPENROUTER_API_KEY = "synthetic"; env.OPENROUTER_EMBEDDING_MODEL = "synthetic-model"; env.OPENROUTER_EMBEDDING_DIMENSIONS = 1536;
   t.after(() => { env.OPENROUTER_API_KEY = original.key; env.OPENROUTER_EMBEDDING_MODEL = original.model; env.OPENROUTER_EMBEDDING_DIMENSIONS = original.dimensions; });
   const article: any = { id: "article", businessId: "a", title: "Services", summary: null, body: "Confirmed information", category: null, tags: [], status: "PUBLISHED", visibility: "CLIENT_SENDABLE", updatedAt: new Date(0) };
-  const document: any = { id: "document", businessId: "a", title: "Guide", description: null, category: null, tags: [], status: "ACTIVE", processingStatus: "READY", governanceStatus: "APPROVED", visibility: "CLIENT_SENDABLE", deletedAt: null, updatedAt: new Date(0), activeVersionId: "v1", activeVersion: { facts: [{ governanceStatus: "APPROVED" }] }, chunks: [{ id: "c1", chunkText: "Safe first chunk" }, { id: "c2", chunkText: "Safe second chunk" }] };
+  const document: any = { id: "document", businessId: "a", title: "Guide", description: null, category: null, tags: [], status: "ACTIVE", processingStatus: "READY", governanceStatus: "APPROVED", visibility: "CLIENT_SENDABLE", deletedAt: null, updatedAt: new Date(0), activeVersionId: "v1", activeVersion: { isActive: true, facts: [{ governanceStatus: "APPROVED" }] }, chunks: [{ id: "c1", chunkText: "Safe first chunk" }, { id: "c2", chunkText: "Safe second chunk" }] };
   let facts: any[] = [];
   let vectors: any[] = [{ businessId: "a", sourceId: "document", sourceType: "DOCUMENT_FACT", content: "old approved facts" }, { businessId: "b", sourceId: "document", sourceType: "DOCUMENT_CHUNK", content: "other tenant" }];
   const reads: any[] = []; const deletes: any[] = []; let requests = 0; let inTx = false; let failAt = 0; let vectorLength = 1536; let mutate: (() => void) | undefined; let failWrite = false;
@@ -179,4 +179,24 @@ test("backfill reports failed sources and retains old vectors for an explicit re
 for (const length of [0, 1537]) test(`invalid provider vector length ${length} is never truncated into the index`, async t => {
   const f = setup(t); f.dimension(length); const before = f.vectors();
   await assert.rejects(embeddings.syncDocument("a", "document")); assert.deepEqual(f.vectors(), before);
+});
+
+for (const change of ["superseded", "inactive-version", "archived", "deleted"]) test(`document lifecycle sync removes obsolete tenant vectors: ${change}`, async t => {
+  const f = setup(t); await embeddings.syncDocument("a", "document");
+  assert.equal(f.vectors().filter(v => v.businessId === "a").length, 2);
+  if (change === "superseded") f.document.supersededByDocumentId = "replacement";
+  if (change === "inactive-version") f.document.activeVersion.isActive = false;
+  if (change === "archived") f.document.status = "ARCHIVED";
+  if (change === "deleted") f.document.deletedAt = new Date();
+  await embeddings.syncDocument("a", "document");
+  assert.equal(f.vectors().filter(v => v.businessId === "a").length, 0);
+  assert.equal(f.vectors().filter(v => v.businessId === "b").length, 1);
+});
+test("article publish edit unpublish lifecycle replaces then removes vectors", async t => {
+  const f = setup(t); await embeddings.syncArticle("a", "article");
+  f.article.body = "Updated policy"; await embeddings.syncArticle("a", "article");
+  const rows = f.vectors().filter(v => v.sourceType === "ARTICLE");
+  assert.equal(rows.length, 1); assert.match(rows[0].content, /Updated policy/);
+  f.article.status = "DRAFT"; await embeddings.syncArticle("a", "article");
+  assert.equal(f.vectors().filter(v => v.sourceType === "ARTICLE").length, 0);
 });

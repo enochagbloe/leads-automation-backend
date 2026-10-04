@@ -172,3 +172,40 @@ test("new primary goal cannot carry old interpreter context entities into retrie
   i.interpretation.resolvedEntities = [{ key: "serviceNeed", kind: "TEXT", value: "photography", source: "CONVERSATION_CONTEXT", confidence: .99, certainty: "EXACT", evidence: [{ messageId: "earlier", quote: "photography" }] }];
   assert.doesNotMatch(query(i), /photography|Strategy consultation/);
 });
+
+for (const variant of ["current", "paused", "ambiguous", "new-goal", "stale", "noncatalog", "foreign"]) test(`retrieval hint requires validated current service: ${variant}`, async t => {
+  const i = input("payment"); i.interpretation.intent = "PAYMENT_QUESTION";
+  if (variant === "paused") i.snapshot.state.workflowStatus = "PAUSED";
+  if (variant === "ambiguous") i.interpretation.needsClarification = true;
+  if (variant === "new-goal") i.interpretation.topicShift = { detected: true, kind: "NEW_PRIMARY_GOAL" } as any;
+  if (variant === "stale") { i.snapshot.recentMessages = []; i.snapshot.state.lastActivityAt = new Date(0); }
+  if (variant === "noncatalog") i.snapshot.state.knownEntities.serviceId!.value = "foreign-service";
+  if (variant === "foreign") i.snapshot.state.businessId = "foreign";
+  let calls = 0;
+  mockMethod(t, knowledgeRetrievalService, "retrieve", async (request: any) => {
+    calls++; assert.equal(request.businessId, scope.businessId);
+    assert.deepEqual(request.hints, variant === "current" ? { serviceId: "service-a" } : undefined);
+    return { status: "NO_RELEVANT_KNOWLEDGE", matches: [] };
+  });
+  if (variant === "foreign") { await assert.rejects(adapter.retrieve(i), { code: "CONVERSATION_KNOWLEDGE_SCOPE_MISMATCH" }); assert.equal(calls, 0); }
+  else { await adapter.retrieve(i); assert.equal(calls, 1); }
+});
+
+test("changed catalog service passes only the newly resolved current-message hint", async t => {
+  const i = input("How much is team training?");
+  i.interpretation.resolvedEntities = [{ key: "serviceId", value: "service-b", kind: "TEXT", confidence: .99, source: "CURRENT_MESSAGE", certainty: "EXACT", evidence: [{ messageId: "current", quote: "team training" }] }];
+  mockMethod(t, knowledgeRetrievalService, "retrieve", async (request: any) => {
+    assert.deepEqual(request.hints, { serviceId: "service-b" });
+    assert.doesNotMatch(request.query, /Strategy consultation|growth strategy/);
+    return { status: "NO_RELEVANT_KNOWLEDGE", matches: [] };
+  });
+  await adapter.retrieve(i);
+});
+test("explicit unrelated question carries no old service hint", async t => {
+  const i = input("Where can I buy sneakers?"); i.interpretation.intent = "GENERAL_INQUIRY" as any;
+  mockMethod(t, knowledgeRetrievalService, "retrieve", async (request: any) => {
+    assert.equal(request.hints, undefined);
+    return { status: "NO_RELEVANT_KNOWLEDGE", matches: [] };
+  });
+  await adapter.retrieve(i);
+});

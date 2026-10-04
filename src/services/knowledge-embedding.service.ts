@@ -189,9 +189,12 @@ async function loadSource(db: Prisma.TransactionClient, businessId: string, id: 
   }
   const document = await db.knowledgeDocument.findFirst({ where: { id, businessId }, include: {
     chunks: { orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: MAX_DOCUMENT_EMBEDDING_CHUNKS },
-    activeVersion: { select: { facts: { select: { governanceStatus: true } } } },
+    activeVersion: { select: { isActive: true, facts: { select: { governanceStatus: true } } } },
   } });
   if (!document) return null;
+  if (document.supersededByDocumentId || !document.activeVersion?.isActive) {
+    return { version: document.updatedAt, activeVersionId: document.activeVersionId, inputs: [] };
+  }
   const wholeDocumentSafe = kind !== "FACTS" && !document.deletedAt
     && document.status === KnowledgeDocumentStatus.ACTIVE
     && document.processingStatus === KnowledgeDocumentProcessingStatus.READY

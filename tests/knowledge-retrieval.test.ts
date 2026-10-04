@@ -10,8 +10,8 @@ function fixture(t: TestContext) {
   const saved = { key: env.OPENROUTER_API_KEY, model: env.OPENROUTER_EMBEDDING_MODEL, dimensions: env.OPENROUTER_EMBEDDING_DIMENSIONS, threshold: env.KNOWLEDGE_SEMANTIC_MIN_SCORE };
   env.OPENROUTER_API_KEY = "synthetic"; env.OPENROUTER_EMBEDDING_MODEL = "test-model"; env.OPENROUTER_EMBEDDING_DIMENSIONS = 1536; env.KNOWLEDGE_SEMANTIC_MIN_SCORE = .78;
   t.after(() => { env.OPENROUTER_API_KEY = saved.key; env.OPENROUTER_EMBEDDING_MODEL = saved.model; env.OPENROUTER_EMBEDDING_DIMENSIONS = saved.dimensions; env.KNOWLEDGE_SEMANTIC_MIN_SCORE = saved.threshold; });
-  const article: any = { id: "article", businessId: "a", title: "Service information", body: "Consultation lasts an hour.", summary: null, tags: [], category: null, status: "PUBLISHED", visibility: "CLIENT_SENDABLE" };
-  const doc: any = { id: "document", businessId: "a", title: "Customer guide", description: null, category: null, tags: [], status: "ACTIVE", processingStatus: "READY", governanceStatus: "APPROVED", visibility: "CLIENT_SENDABLE", deletedAt: null, activeVersionId: "v1", allFactsApproved: true };
+  const article: any = { relatedServiceIds: [], relatedPolicyIds: [], updatedAt: new Date(0), id: "article", businessId: "a", title: "Service information", body: "Consultation lasts an hour.", summary: null, tags: [], category: null, status: "PUBLISHED", visibility: "CLIENT_SENDABLE" };
+  const doc: any = { relatedServiceIds: [], updatedAt: new Date(0), supersededByDocumentId: null, activeVersion: { isActive: true }, id: "document", businessId: "a", title: "Customer guide", description: null, category: null, tags: [], status: "ACTIVE", processingStatus: "READY", governanceStatus: "APPROVED", visibility: "CLIENT_SENDABLE", deletedAt: null, activeVersionId: "v1", allFactsApproved: true };
   const chunk: any = { id: "chunk", businessId: "a", documentId: doc.id, document: doc, chunkText: "We open at nine.", pageNumber: 2 };
   const fact: any = { id: "fact", businessId: "a", documentId: doc.id, document: doc, label: "Policy", valueText: "Give a day's notice.", governanceStatus: "APPROVED", pageNumber: 3, versionId: "v1", active: true, analyzed: true, blocked: false, canonicalEntityType: null, governanceReviews: [] };
   let rows: SemanticKnowledgeCandidate[] = []; let fail: string | undefined;
@@ -40,9 +40,16 @@ function fixture(t: TestContext) {
   });
   mockMethod(t, prisma.knowledgeDocumentChunk, "findFirst", async ({ where }: any) => {
     dbReads.push(where); assert.equal(where.businessId, "a"); assert.equal(where.document.businessId, "a");
-    assert.deepEqual(where.document.activeVersion, { is: { facts: { every: { governanceStatus: "APPROVED" } } } });
+    assert.deepEqual(where.document.activeVersion, { is: { isActive: true } });
+    assert.equal(where.document.supersededByDocumentId, null);
+    assert.deepEqual(where.document.AND, [{ activeVersion: { is: { facts: { every: { governanceStatus: "APPROVED" } } } } }]);
     for (const [key, value] of Object.entries({ deletedAt: null, status: "ACTIVE", processingStatus: "READY", governanceStatus: "APPROVED", visibility: "CLIENT_SENDABLE" })) assert.equal(where.document[key], value);
-    return chunk.businessId === where.businessId && doc.businessId === where.document.businessId && chunk.id === where.id && chunk.documentId === where.documentId && doc.status === "ACTIVE" && doc.processingStatus === "READY" && doc.governanceStatus === "APPROVED" && doc.visibility === "CLIENT_SENDABLE" && !doc.deletedAt && doc.allFactsApproved ? chunk : null;
+    return chunk.businessId === where.businessId && doc.businessId === where.document.businessId && chunk.id === where.id && chunk.documentId === where.documentId && doc.status === "ACTIVE" && doc.processingStatus === "READY" && doc.governanceStatus === "APPROVED" && doc.visibility === "CLIENT_SENDABLE" && !doc.deletedAt && doc.allFactsApproved && !doc.supersededByDocumentId && doc.activeVersion?.isActive ? chunk : null;
+  });
+  mockMethod(t, prisma.knowledgeDocument, "findFirst", async ({ where }: any) => {
+    assert.equal(where.businessId, "a"); assert.equal(where.supersededByDocumentId, null);
+    assert.deepEqual(where.activeVersion, { is: { isActive: true } });
+    return doc.id === where.id && doc.businessId === where.businessId && !doc.deletedAt && !doc.supersededByDocumentId && doc.activeVersion?.isActive && doc.status === "ACTIVE" && doc.processingStatus === "READY" && doc.governanceStatus === "APPROVED" && doc.visibility === "CLIENT_SENDABLE" ? doc : null;
   });
   mockMethod(t, prisma.knowledgeDocumentFact, "findMany", async ({ where, take }: any) => {
     dbReads.push(where); assert.equal(where.businessId, "a"); assert.equal(where.governanceStatus, "APPROVED"); assert.equal(take, 1); assert.equal(where.documentId, doc.id); assert.deepEqual(where.ids, undefined);
@@ -154,4 +161,33 @@ test("a later governance-read failure discards already verified partial matches"
 test("hard maximum topK produces at most 32 candidate reads", async t => {
   const f = fixture(t); f.rows([f.candidate("ARTICLE")]); assert.equal((await ask(8)).matches.length, 1); assert.equal(f.dbReads[0].limit, 32);
   await assert.rejects(knowledgeEmbeddingService.searchCandidates("a", "question", 33), { code: "KNOWLEDGE_RETRIEVAL_INPUT_INVALID" });
+});
+
+for (const type of ["DOCUMENT_CHUNK", "DOCUMENT_FACT"] as const) for (const reason of ["superseded", "inactive-version", "unready", "unapproved", "archived", "deleted"]) test(`${type} rejects current integrity violation ${reason}`, async t => {
+  const f = fixture(t); f.rows([f.candidate(type)]);
+  if (reason === "superseded") f.doc.supersededByDocumentId = "replacement";
+  if (reason === "inactive-version") f.doc.activeVersion.isActive = false;
+  if (reason === "unready") f.doc.processingStatus = "NEEDS_REVIEW";
+  if (reason === "unapproved") f.doc.governanceStatus = "PENDING_REVIEW";
+  if (reason === "archived") f.doc.status = "ARCHIVED";
+  if (reason === "deleted") f.doc.deletedAt = new Date();
+  assert.equal((await ask()).status, "NO_RELEVANT_KNOWLEDGE");
+});
+
+for (const scenario of ["linked", "unrelated", "below-threshold", "generic", "duplicate", "category-policy"]) test(`metadata ranking and integrity: ${scenario}`, async t => {
+  const f = fixture(t);
+  const generic = { ...f.article, id: "generic", title: "Payment", body: "General payment terms", updatedAt: new Date("2026-01-01") };
+  const linked = { ...generic, id: "linked", title: "Service payment", body: "Specific service payment terms", relatedServiceIds: ["service"], updatedAt: new Date("2026-02-01") };
+  if (scenario === "duplicate") { linked.title = generic.title; linked.body = generic.body; }
+  if (scenario === "category-policy") { linked.relatedServiceIds = []; linked.category = "Payment"; linked.relatedPolicyIds = ["policy"]; }
+  mockMethod(t, prisma.knowledgeArticle, "findFirst", async ({ where }: any) => {
+    assert.equal(where.businessId, "a"); assert.equal(where.status, "PUBLISHED"); assert.equal(where.visibility, "CLIENT_SENDABLE");
+    return [generic, linked].find(a => a.id === where.id) ?? null;
+  });
+  const candidate = (a: any, score: number): SemanticKnowledgeCandidate => ({ businessId: "a", sourceType: "ARTICLE", sourceId: a.id, chunkId: null, title: a.title, indexedContent: knowledgeEmbeddingText.article(a), score });
+  f.rows([candidate(generic, .92), ...(scenario === "generic" ? [] : [candidate(linked, scenario === "below-threshold" ? .77 : scenario === "unrelated" ? .8 : .91)])]);
+  const result = await retrieval.retrieve({ businessId: "a", query: "payment", hints: { serviceId: "service", category: "Payment", policyId: "policy" } });
+  assert.equal(result.matches[0]!.sourceId, ["linked", "duplicate", "category-policy"].includes(scenario) ? "linked" : "generic");
+  if (["duplicate", "generic", "below-threshold"].includes(scenario)) assert.equal(result.matches.length, 1);
+  assert.ok(result.matches[0]!.sourceUpdatedAt);
 });
