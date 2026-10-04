@@ -4,8 +4,11 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../src/config/prisma";
 import { emptyState } from "../../src/services/conversation-state.schema";
 import { mockMethod } from "./mock-method";
+import { knowledgeEmbeddingService } from "../../src/services/knowledge-embedding.service";
 export const scope = { businessId: "business-a", conversationId: "conversation-a" };
 export function fixture(t: TestContext) {
+  // Shared-runtime tests must never call the real embedding provider or vector database.
+  mockMethod(t, knowledgeEmbeddingService, "searchCandidates", async () => []);
   const logs: any[] = [];
   mockMethod(t, console, "info", (...args: any[]) => { logs.push(args); });
   mockMethod(t, console, "warn", (...args: any[]) => { logs.push(args); });
