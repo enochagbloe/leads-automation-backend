@@ -10,15 +10,22 @@ snapshot → interpreter + validated state commands → contextual semantic quer
 
 The deterministic conversationKnowledgeRetrievalService composes one query (maximum
 2000 characters). Current message and canonical intent come first, followed by
-current purpose/need, resolved service/reason and, only for related continuity,
-existing service/workflow/awaiting state plus the last two short messages. It adds
+current purpose/need, resolved service/reason and, only for short related continuity,
+validated serviceNeed/reason and the canonical service name. It adds
 generic intent search terms for support, complaint, payment, refund/cancellation,
 rescheduling and pricing. There is no customer-phrase or industry keyword router,
 no language-model query rewrite and no additional conversational AI stage.
 
 New primary goals, changed services, unrelated topics and ambiguous interpretations
-do not inherit an old booking's fields/history. Human requests, complaints and
-payment questions use their current meaning rather than the old booking question.
+do not inherit an old booking's fields/history. Short payment questions can retain
+the current topical anchor. Human requests and complaints retain their prior safety
+behavior. No inherited dates, times, location, awaiting field, options, last assistant
+question or booking execution state are composed into the query.
+Inheritance requires an active/waiting state, matching conversation scope and context
+within 30 minutes of the current message. Short means at most 80 characters/eight
+words; paused goals are excluded, including pending resume proposals. When no validated
+topical anchor exists, at most two bounded recent customer messages provide a fallback;
+messages with numeric details or known operational entity values are excluded.
 This gating is a conservative deterministic relevance heuristic, not a new intent
 system or topic-resume planner.
 

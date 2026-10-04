@@ -35,17 +35,17 @@ for (const [message, intent, expected] of [
 ] as const) test(`${intent}: deterministic query preserves noisy current message`, () => {
   const i = input(message); i.interpretation.intent = intent;
   const result = query(i); assert.ok(result.includes(message)); assert.match(result, expected);
-  if (["HUMAN_REQUEST", "COMPLAINT", "PAYMENT_QUESTION"].includes(intent)) assert.doesNotMatch(result, /growth strategy|APPOINTMENT_BOOKING/);
+  if (["HUMAN_REQUEST", "COMPLAINT"].includes(intent)) assert.doesNotMatch(result, /growth strategy|APPOINTMENT_BOOKING/);
 });
 
-for (const message of ["how much?", "the other one"]) test(`short ${message} uses relevant service and pending context`, () => {
+for (const message of ["how much?", "the other one"]) test(`short ${message} uses topical service context without booking fields`, () => {
   const i = input(message); const result = query(i);
-  assert.match(result, /Strategy consultation/); assert.match(result, /growth strategy/); assert.match(result, /preferredDate/); assert.match(result, /I need a strategy consultation/);
+  assert.match(result, /Strategy consultation/); assert.match(result, /growth strategy/); assert.doesNotMatch(result, /preferredDate|APPOINTMENT_BOOKING/);
 });
 
 test("payment gets policy context without dragging unrelated booking history", () => {
   const i = input("payment"); i.interpretation.intent = "PAYMENT_QUESTION";
-  assert.match(query(i), /payment policy/); assert.doesNotMatch(query(i), /growth strategy|preferredDate/);
+  assert.match(query(i), /payment policy/); assert.match(query(i), /Strategy consultation/); assert.doesNotMatch(query(i), /preferredDate|APPOINTMENT_BOOKING/);
 });
 
 test("current need and resolved service are used; stale unrelated workflow is excluded", () => {
@@ -68,7 +68,7 @@ test("new primary goal, stale lifecycle and uncertain meaning do not inherit old
 
 test("query is bounded and history is limited to two messages", () => {
   const i = input("x".repeat(8000)); i.snapshot.recentMessages = Array.from({ length: 10 }, (_, n) => ({ id: `m${n}`, text: `history${n} ` + "z".repeat(1000), createdAt: "2026-10-04T11:59:00Z", senderType: "CUSTOMER", direction: "INBOUND" }));
-  const result = query(i); assert.ok(result.length <= 2000); assert.doesNotMatch(result, /history0/); assert.match(result, /history8/);
+  const result = query(i); assert.ok(result.length <= 2000); assert.doesNotMatch(result, /history0/); assert.doesNotMatch(result, /history8/);
 });
 
 test("one scoped retrieval call deduplicates title/text and caps at four groundings", async t => {
@@ -126,4 +126,49 @@ test("near-identical editorial copies collapse without discarding different nume
   const i = input(); const paragraph = "Customers can contact our support team during normal business hours for helpful information about the available services and the general process for making a request";
   mockMethod(t, knowledgeRetrievalService, "retrieve", async () => ({ status: "MATCHES_FOUND", matches: [grounding("a", paragraph, "Support"), grounding("b", paragraph + " please", "Support"), grounding("c", paragraph + " 100", "Support"), grounding("d", paragraph + " 200", "Support")] }));
   const result = await adapter.retrieve(i); assert.deepEqual(result.knowledgeArticles.map(a => a.id), ["a", "c", "d"]);
+});
+
+for (const [message, intent] of [["payment", "PAYMENT_QUESTION"], ["cash?", "PAYMENT_QUESTION"], ["momo?", "PAYMENT_QUESTION"], ["how much?", "PRICING_INQUIRY"], ["what if i cancel?", "CANCELLATION_INTENT"], ["the other one", "SERVICE_INQUIRY"]] as const) test(`topical follow-up ${message} retains photography but no operational state`, () => {
+  const i = input(message); i.interpretation.intent = intent; i.interpretation.topic = intent === "PAYMENT_QUESTION" ? "PAYMENT" : undefined;
+  i.snapshot.state.knownEntities = { serviceNeed: { kind: "TEXT", value: "photography" }, preferredDate: { kind: "DATE", value: "tomorrow", normalizedValue: "2026-10-05" }, preferredTime: { kind: "TIME", value: "2pm", normalizedValue: "14:00" }, location: { kind: "TEXT", value: "Old Location" } };
+  i.snapshot.state.offeredOptions = [{ id: "old", label: "Old option", value: "14:00", position: 1 }];
+  i.snapshot.state.lastAssistantQuestion = "What date and time at Old Location?";
+  const result = query(i); assert.match(result, /photography/); assert.doesNotMatch(result, /preferredDate|preferredTime|tomorrow|2026-10-05|14:00|2pm|Old Location|Old option|APPOINTMENT_BOOKING|What date/);
+  if (intent === "PAYMENT_QUESTION") assert.match(result, /payment policy/);
+});
+
+test("history-only topical anchor supports payment without copying the assistant question", () => {
+  const i = input("payment"); i.interpretation.intent = "PAYMENT_QUESTION"; i.snapshot.state.knownEntities = {};
+  i.snapshot.recentMessages = [
+    { id: "customer", text: "I want to know about photography", senderType: "CUSTOMER", direction: "INBOUND", createdAt: "2026-10-04T11:58:00Z" },
+    { id: "assistant", text: "What would you like to know?", senderType: "AI", direction: "OUTBOUND", createdAt: "2026-10-04T11:59:00Z" },
+  ];
+  assert.match(query(i), /photography/); assert.doesNotMatch(query(i), /What would you like/);
+});
+
+for (const variant of ["unrelated", "new-goal", "paused", "ambiguous", "stale", "foreign"] as const) test(`${variant} cannot inherit the previous topical anchor`, () => {
+  const i = input(variant === "unrelated" ? "where can i buy sneakers?" : "payment"); i.interpretation.intent = variant === "unrelated" ? "GENERAL_QUESTION" : "PAYMENT_QUESTION";
+  i.snapshot.state.knownEntities.serviceNeed = { kind: "TEXT", value: "photography" };
+  if (variant === "new-goal") i.interpretation.topicShift = { detected: true, kind: "NEW_PRIMARY_GOAL" };
+  if (variant === "paused") { i.snapshot.state.workflowStatus = "PAUSED"; i.interpretation.workflow = { name: "APPOINTMENT_BOOKING", action: "RESUME" }; }
+  if (variant === "ambiguous") i.interpretation.needsClarification = true;
+  if (variant === "stale") { i.snapshot.state.lastActivityAt = new Date("2020-01-01"); i.snapshot.recentMessages = []; }
+  if (variant === "foreign") i.snapshot.state.conversationId = "another-conversation";
+  assert.doesNotMatch(query(i), /photography|Strategy consultation|growth strategy|preferredDate/);
+});
+
+test("history fallback excludes known location and scheduling messages", () => {
+  const i = input("payment"); i.interpretation.intent = "PAYMENT_QUESTION"; i.snapshot.state.knownEntities = { location: { kind: "TEXT", value: "Old Location" } };
+  i.snapshot.recentMessages = [
+    { id: "one", text: "At Old Location", senderType: "CUSTOMER", direction: "INBOUND", createdAt: "2026-10-04T11:58:00Z" },
+    { id: "two", text: "At 14:00", senderType: "CUSTOMER", direction: "INBOUND", createdAt: "2026-10-04T11:59:00Z" },
+  ];
+  assert.doesNotMatch(query(i), /Old Location|14:00/);
+});
+
+test("new primary goal cannot carry old interpreter context entities into retrieval", () => {
+  const i = input("where can i buy sneakers?"); i.interpretation.intent = "GENERAL_QUESTION";
+  i.interpretation.topicShift = { detected: true, kind: "NEW_PRIMARY_GOAL" };
+  i.interpretation.resolvedEntities = [{ key: "serviceNeed", kind: "TEXT", value: "photography", source: "CONVERSATION_CONTEXT", confidence: .99, certainty: "EXACT", evidence: [{ messageId: "earlier", quote: "photography" }] }];
+  assert.doesNotMatch(query(i), /photography|Strategy consultation/);
 });

@@ -22,19 +22,26 @@ export function buildConversationKnowledgeQuery({ interpretation: i, snapshot: s
   const parts = [`Customer: ${text(current, 700)}`, `Intent: ${i.needsClarification ? "UNKNOWN" : i.intent}`];
   if (!i.needsClarification && intentContext[i.intent]) parts.push(intentContext[i.intent]!);
   if (!i.needsClarification && i.customerPurpose?.need) parts.push(`Current need: ${text(i.customerPurpose.need, 250)}`);
-  // Context cannot smuggle an unfinished old goal into an unrelated current question.
-  const active = ["ACTIVE", "WAITING_FOR_CUSTOMER", "WAITING_FOR_SYSTEM"].includes(s.state.workflowStatus) || i.workflow?.action === "RESUME";
-  const reference = Boolean(i.selectedOption || i.pendingExpectation?.resolved || i.resolvedEntities.some(e => e.source === "REFERENCE_RESOLUTION"));
-  const relatedIntent = ["BOOKING_INTENT", "RESCHEDULE_INTENT", "CANCELLATION_INTENT", "SERVICE_INQUIRY", "PRICING_INQUIRY", "AVAILABILITY_INQUIRY"].includes(i.intent);
-  const currentServiceId = i.customerPurpose?.serviceId ?? i.resolvedEntities.find(e => e.key === "serviceId")?.value;
+  // Inherit topic only for a short follow-up in a fresh, scoped, live conversation.
+  const active = ["ACTIVE", "WAITING_FOR_CUSTOMER", "WAITING_FOR_SYSTEM"].includes(s.state.workflowStatus);
+  const short = current.trim().length <= 80 && current.trim().split(/\s+/).length <= 8;
+  const reference = Boolean(i.selectedOption || i.resolvedEntities.some(e => e.source === "REFERENCE_RESOLUTION"));
+  const relatedIntent = ["BOOKING_INTENT", "RESCHEDULE_INTENT", "CANCELLATION_INTENT", "SERVICE_INQUIRY", "PRICING_INQUIRY", "PAYMENT_QUESTION", "AVAILABILITY_INQUIRY"].includes(i.intent);
+  const resolvedService = i.resolvedEntities.find(e => e.key === "serviceId");
+  const currentServiceId = i.customerPurpose?.serviceId ?? resolvedService?.normalizedValue ?? resolvedService?.value;
   const previousServiceId = s.state.knownEntities.serviceId?.normalizedValue ?? s.state.knownEntities.serviceId?.value;
   const changedService = Boolean(currentServiceId && previousServiceId && currentServiceId !== previousServiceId);
-  const continuing = !i.needsClarification && i.topicShift?.kind !== "NEW_PRIMARY_GOAL"
-    && !changedService
-    && (!i.topic || i.topic === s.state.activeTopic || i.topicShift?.kind === "SIDE_QUESTION")
-    && active && (reference || relatedIntent) && !["HUMAN_REQUEST", "COMPLAINT", "PAYMENT_QUESTION"].includes(i.intent);
+  const scoped = s.state.businessId === context.business.id && s.state.conversationId === context.conversation.id && s.currentMessage?.id === context.triggerMessage.id;
+  const now = Date.parse(s.currentMessage?.createdAt ?? "");
+  const recent = s.recentMessages.filter(m => m.id !== s.currentMessage?.id && now - Date.parse(m.createdAt) >= 0 && now - Date.parse(m.createdAt) <= 30 * 60_000).slice(-2);
+  const fresh = recent.length > 0 || (now - +s.state.lastActivityAt >= 0 && now - +s.state.lastActivityAt <= 30 * 60_000);
+  const policyFollowUp = ["PAYMENT_QUESTION", "PRICING_INQUIRY", "CANCELLATION_INTENT", "RESCHEDULE_INTENT"].includes(i.intent);
+  const continuing = scoped && fresh && short && active && !i.needsClarification
+    && i.topicShift?.kind !== "NEW_PRIMARY_GOAL" && !changedService
+    && (!i.topic || i.topic === s.state.activeTopic || i.topicShift?.kind === "SIDE_QUESTION" || policyFollowUp)
+    && (reference || relatedIntent) && !["HUMAN_REQUEST", "COMPLAINT"].includes(i.intent);
   const entity = (key: string) => {
-    const resolved = !i.needsClarification ? i.resolvedEntities.find(e => e.key === key) : undefined;
+    const resolved = !i.needsClarification ? i.resolvedEntities.find(e => e.key === key && (e.source === "CURRENT_MESSAGE" || continuing)) : undefined;
     return resolved?.normalizedValue ?? resolved?.value ?? (continuing ? s.state.knownEntities[key]?.normalizedValue ?? s.state.knownEntities[key]?.value : undefined);
   };
   const serviceId = !i.needsClarification ? i.customerPurpose?.serviceId ?? entity("serviceId") : undefined;
@@ -43,11 +50,14 @@ export function buildConversationKnowledgeQuery({ interpretation: i, snapshot: s
   for (const key of ["serviceNeed", "reason"]) {
     const value = text(entity(key), 150); if (value) parts.push(`${key}: ${value}`);
   }
-  if (continuing) {
-    parts.push(`Topic: ${s.state.activeTopic ?? ""}; workflow: ${s.state.activeWorkflow ?? ""}; awaiting: ${s.state.awaiting?.field ?? s.state.awaiting?.type ?? ""}`);
-    if (s.state.lastAssistantQuestion) parts.push(`Last question: ${text(s.state.lastAssistantQuestion, 140)}`);
-    // Only current-context tail; excludes the current message already included above.
-    for (const m of s.recentMessages.filter(m => m.id !== s.currentMessage?.id).slice(-2)) parts.push(`${m.senderType}: ${text(m.text, 140)}`);
+  // Prefer validated semantic anchors. Never copy awaiting/options/workflow execution fields.
+  if (continuing && !service && !entity("serviceNeed") && !entity("reason")) {
+    const operationalValues = Object.entries(s.state.knownEntities)
+      .filter(([key]) => !["serviceId", "serviceName", "serviceNeed", "reason", "customerGoal", "serviceResolution"].includes(key))
+      .flatMap(([, e]) => [e.value, e.normalizedValue]).filter((v): v is string => typeof v === "string" && v.length > 1);
+    // History is a fallback, never a way to reintroduce staff booking questions or known operational values.
+    for (const m of recent.filter(m => m.senderType === "CUSTOMER" && !/\p{N}/u.test(m.text)
+      && !operationalValues.some(v => m.text.toLowerCase().includes(v.toLowerCase())))) parts.push(`Recent topic: ${text(m.text, 140)}`);
   }
   return parts.join("\n").slice(0, 2000);
 }
