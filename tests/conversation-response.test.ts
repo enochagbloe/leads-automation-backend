@@ -405,7 +405,7 @@ for (const variant of ["empty", "prior-service", "retrieval-unavailable"]) test(
 });
 
 for (const variant of ["article", "document", "fact", "demo-website", "service", "pricing", "availability", "payment"]) test(`grounding gate preserves authoritative response path: ${variant}`, async t => {
-  const f = setup(t, variant === "demo-website"); const m = await f.add("Tell me about your business information.");
+  const f = setup(t, variant === "demo-website"); const m = await f.add(variant === "service" ? "What services do you offer?" : "Tell me about your business information.");
   const intent = ({ service: "SERVICE_INQUIRY", pricing: "PRICING_INQUIRY", availability: "AVAILABILITY_INQUIRY", payment: "PAYMENT_QUESTION" } as const)[variant as "service" | "pricing" | "availability" | "payment"] ?? "GENERAL_QUESTION";
   const input = await f.input(m, meaning({ intent })); const plan = await planner.plan(input);
   const context = { ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan };
@@ -425,4 +425,61 @@ test("ungrounded general question cannot bypass a plan that requires continuatio
   f.context.conversationPlan = { ...f.plan, intent: "GENERAL_QUESTION", move: "ANSWER", targetField: undefined, suspendedContext: { workflow: "APPOINTMENT_BOOKING", stillAwaiting: "preferredDate" }, continuation: { kind: "ASK_FOR_FIELD", workflow: "APPOINTMENT_BOOKING", field: "preferredDate" }, responseDirective: { purpose: "ANSWER_CUSTOMER", acknowledgeContext: true, askOneQuestion: true } };
   let calls = 0; mockMethod(t, aiProvider, "generateReply", async () => { calls++; throw new Error("Must not call provider"); });
   await assert.rejects(f.run(), { code: "CONVERSATION_RESPONSE_INVALID" }); assert.equal(calls, 0);
+});
+
+for (const [question, field, value] of [
+  ["What is your address?", "address", "12 Example Road"],
+  ["Where are you located?", "locations", ["Example branch"]],
+  ["What is your phone number?", "phone", "+233000000000"],
+  ["What is your email address?", "email", "hello@example.invalid"],
+  ["What is your website?", "website", "https://example.invalid"],
+  ["Tell me about your company", "description", "We help businesses plan projects."],
+  ["What areas do you serve?", "serviceArea", "Example region"],
+] as const) test(`profile evidence admits only relevant populated field: ${field}`, async t => {
+  const f = setup(t); const m = await f.add(question);
+  const input = await f.input(m, meaning({ intent: "GENERAL_QUESTION" }));
+  Object.assign(input.businessContext.business, { [field]: value });
+  const plan = await planner.plan(input); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => { calls++; return { rawText: JSON.stringify(responseOutput(request, "I can share our business information.")), providerRequestCount: 1 } as any; });
+  const context = { ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan };
+  assert.equal((await responses.generate(context, { ...scope, messageId: m.id })).conversationResponse.source, "MODEL");
+  assert.equal(calls, 1);
+});
+
+for (const variant of ["passport", "missing-address", "guarded-address", "unsupported-service", "empty-catalog", "no-hours", "timezone-only", "no-policy", "unrelated-policy"]) test(`missing relevant factual evidence blocks provider: ${variant}`, async t => {
+  const f = setup(t); const intent = variant.includes("service") || variant === "empty-catalog" ? "SERVICE_INQUIRY" : variant.includes("hours") || variant === "timezone-only" ? "AVAILABILITY_INQUIRY" : variant.includes("policy") ? "PAYMENT_QUESTION" : "GENERAL_QUESTION";
+  const m = await f.add(variant === "passport" ? "Which address do I use for my passport renewal?" : variant.includes("address") ? "What is your address?" : "Do you provide a service not in your catalog?");
+  const input = await f.input(m, meaning({ intent }));
+  input.businessContext.business.description = "We offer consultations.";
+  input.businessContext.business.phone = "+233000000000";
+  if (variant === "passport" || variant === "guarded-address") input.businessContext.business.address = "12 Example Road";
+  if (variant === "guarded-address") input.businessContext.runtimeKnowledgeGuards = [{ reviewItemId: "guard", canonicalEntityType: "BUSINESS_PROFILE", canonicalEntityId: null, canonicalField: "address", priority: "HIGH" }];
+  if (variant === "empty-catalog") input.businessContext.services = [];
+  if (variant === "timezone-only") input.businessContext.availability = { timezone: "Africa/Accra", summaryText: "", weeklyHours: [] };
+  if (variant === "unrelated-policy") input.businessContext.policies = [{ id: "policy", title: "Dress code", category: "GENERAL", content: "Wear comfortable clothing." }];
+  const plan = await planner.plan(input); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async () => { calls++; throw new Error("Must not call provider"); });
+  const result = await responses.generate({ ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan }, { ...scope, messageId: m.id });
+  assert.equal(calls, 0); assert.equal(result.providerRequestCount, 0);
+  assert.equal(result.conversationResponse.source, "PLAN_FALLBACK");
+  assert.equal(result.parsedDecision.requiresHumanReview, false);
+  assert.deepEqual(result.validatedResponse.referencedFactIds, []); assert.deepEqual(result.validatedResponse.claims, []);
+});
+
+test("semantic payment evidence admits normal generation without a structured policy", async t => {
+  const f = setup(t); const m = await f.add("How do payments work?");
+  const input = await f.input(m, meaning({ intent: "PAYMENT_QUESTION" }));
+  input.businessContext.knowledgeArticles = [{ id: "policy", title: "Payment", body: "Payment is due at the visit.", tags: [] }];
+  const plan = await planner.plan(input); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => { calls++; return { rawText: JSON.stringify(responseOutput(request, "Payment is due at the visit.")), providerRequestCount: 1 } as any; });
+  await responses.generate({ ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan }, { ...scope, messageId: m.id });
+  assert.equal(calls, 1);
+});
+
+for (const question of ["Do you provide Dental examination?", "What services do you offer?"]) test(`current catalog reference is supported: ${question}`, async t => {
+  const f = setup(t); const m = await f.add(question); const input = await f.input(m, meaning({ intent: "SERVICE_INQUIRY" }));
+  const plan = await planner.plan(input); let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => { calls++; return { rawText: JSON.stringify(responseOutput(request, "That service is in our catalog.")), providerRequestCount: 1 } as any; });
+  await responses.generate({ ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan }, { ...scope, messageId: m.id });
+  assert.equal(calls, 1);
 });

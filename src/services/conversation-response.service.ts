@@ -1,3 +1,4 @@
+import { hasFactualAnswerEvidence } from "./conversation-response-evidence";
 import { aiProvider, AiGenerateReplyInput, AiGenerateReplyResult } from "./ai-provider.service";
 import { AiBusinessContext, aiPromptContextFormatter } from "./ai-context-builder.service";
 import { AiReplyDecision } from "./ai-decision-parser.service";
@@ -81,10 +82,7 @@ export const conversationResponseService = {
       return { ...usage!, rawText: "", parsedDecision, providerRequestCount: requests, totalTokens: tokens, promptTokens, completionTokens, conversationResponse: responseMetadata, validatedResponse: response, trustedWorkflowResult };
     };
     if (plan.move === "NO_ACTION") { await assertPlanCurrent(plan); return finish(fallbackResponse(context)!, 0, false); }
-    // A catalog or old conversation is not evidence for an unrelated factual answer.
-    // Greetings are an existing conversational act, not a factual question.
-    if (plan.move === "ANSWER" && plan.intent === "GENERAL_QUESTION" && plan.reasonCode !== "CUSTOMER_GREETING"
-      && !context.knowledgeArticles.length && !context.knowledgeDocumentChunks.length && !context.approvedKnowledgeFacts?.length) {
+    if (!hasFactualAnswerEvidence(context)) {
       await assertPlanCurrent(plan);
       const response: ConversationResponse = {
         text: `I don't have confirmed information about that from ${context.business.name}. I can help with information about ${context.business.name} and its services.`,
@@ -93,7 +91,7 @@ export const conversationResponseService = {
         claimsActionCompleted: false, claims: [], confidence: 1, requiresHumanReview: false,
       };
       const validation = conversationResponsePolicyService.validate({ plan, state: snapshot.state, recentMessages: snapshot.recentMessages, facts, existingIssueIds: context.existingCustomerIssues.map(i => i.id), trustedWorkflowResult, generatedResponse: response });
-      console.info("conversation_response.grounding_fallback", { ...event, reason: "NO_SEMANTIC_EVIDENCE", validationOutcome: validation.valid ? "VALID" : "INVALID", providerRequestCount: 0 });
+      console.info("conversation_response.grounding_fallback", { ...event, reason: "NO_RELEVANT_FACTUAL_EVIDENCE", validationOutcome: validation.valid ? "VALID" : "INVALID", providerRequestCount: 0 });
       // Never bypass plan policy or fall through to world knowledge if a plan requires a question.
       if (!validation.valid) throw new AppError(503, "Grounding fallback conflicts with response plan", "CONVERSATION_RESPONSE_INVALID", { conversationResponseUsage: { requests: 0, tokens: 0 } });
       return finish(validation.response, 0, true);
