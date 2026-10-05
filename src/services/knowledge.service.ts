@@ -1,3 +1,4 @@
+import { knowledgeQualityAuditService } from "./knowledge-quality-audit.service";
 import crypto from "node:crypto";
 import {
   AuditAction,
@@ -805,6 +806,10 @@ async function saveGeneratedKnowledgeDraft(
 }
 
 export const knowledgeService = {
+  async qualityAudit(actor: KnowledgeActor) {
+    await managerOnly(actor, undefined, "KNOWLEDGE_QUALITY_AUDIT");
+    return knowledgeQualityAuditService.audit(actor.businessId);
+  },
   async listArticles(actor: KnowledgeActor, query: KnowledgeArticleListQuery) {
     const key = `business:${actor.businessId}:knowledge:articles:${actor.membershipId}:${JSON.stringify(query)}`;
     const cached = await cacheService.get<unknown>(key);

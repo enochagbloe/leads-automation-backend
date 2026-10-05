@@ -34,6 +34,7 @@ export const knowledgeRouter = Router();
 
 knowledgeRouter.use(authenticate, requireBusiness);
 
+knowledgeRouter.get("/quality-audit", knowledgeController.qualityAudit);
 knowledgeRouter.get("/stats", knowledgeController.stats);
 knowledgeRouter.get("/search", validateQuery(knowledgeSearchQuerySchema), knowledgeController.search);
 knowledgeRouter.post("/articles/generate-starter", mutationLimiter, validate(generateStarterArticlesSchema), knowledgeController.generateStarterArticles);

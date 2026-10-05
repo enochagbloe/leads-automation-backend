@@ -1,0 +1,9 @@
+# Knowledge quality audit
+
+`GET /api/knowledge/quality-audit` uses the existing authentication, business scope and Knowledge manager authorization. It takes no client-selected business ID. The reusable backend API is `knowledgeQualityAuditService.audit(businessId)`; callers must authorize that tenant first.
+
+The read-only repeatable-read audit inspects only PUBLISHED + CLIENT_SENDABLE articles. It returns `businessId`, `findings` (stable code, INFO/WARNING severity, sorted articleIds, suggestedAction), and summary counts: articlesScanned, findings, duplicateGroups, categoryConflictGroups, articlesNeedingReview. Counts of articles needing review are distinct across findings. The HTTP response is private/no-store.
+
+Duplicate detection requires normalized matching titles and matching normalized summary/body or extremely similar five-word sequences. Changed numeric claims and negations cannot be near-duplicates; matching titles alone are insufficient. Category conflicts group case/spacing/punctuation variants. Metadata warnings use only category/title/tag cues and current service names, never inferred relationship IDs. Out-of-domain warnings require no relationships, sufficient business vocabulary and article text, and zero informative lexical overlap; generic company overview titles are exempt. These are conservative review signals, not semantic judgments. Multilingual content and synonyms can need human review.
+
+The audit never edits, merges, archives, deletes, or reindexes content. Estate Ltd and every other tenant require separate human approval for any subsequent changes. Existing retrieval and conversation behavior are untouched. A business with more than 5000 eligible articles receives KNOWLEDGE_AUDIT_LIMIT_EXCEEDED rather than a misleading partial result; pagination/background audit can be added separately if needed.

@@ -82,6 +82,7 @@ export const knowledgeController = {
     actor(req),
     res.locals.validatedQuery as KnowledgeGovernanceReviewQueueQuery,
   )),
+  qualityAudit: async (req, res) => { res.setHeader("Cache-Control", "private, no-store"); res.json(await knowledgeService.qualityAudit(actor(req))); },
   stats: async (req, res) => res.json(await knowledgeService.stats(actor(req))),
 
   listArticles: async (req, res) => res.json(await knowledgeService.listArticles(actor(req), res.locals.validatedQuery as KnowledgeArticleListQuery)),
