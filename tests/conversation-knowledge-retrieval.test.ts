@@ -119,7 +119,11 @@ for (const status of ["MATCHES_FOUND", "NO_RELEVANT_KNOWLEDGE", "RETRIEVAL_UNAVA
   });
   mockMethod(t, aiProvider, "generateReply", async (request: any) => { assert.doesNotMatch(request.userPrompt, /OLD ARTICLE DUMP|OLD CHUNK DUMP|OLD FACT DUMP/); return { rawText: JSON.stringify(responseOutput(request, "I can help with your question.")), provider: "OPENROUTER", model: "test", providerRequestCount: 1 }; });
   const result = await generateContextReply(i.context, { ...scope, messageId: m.id });
-  assert.deepEqual(events, ["interpret", "retrieve", "plan", "respond"]); assert.equal(result.providerRequestCount, 2); assert.equal(result.conversationPlan.move, "ANSWER"); assert.equal(result.conversationPlan.workflowRequest, undefined); assert.equal(result.conversationPlan.requiresHumanReview, false); assert.equal(result.parsedDecision!.suggestedAction, "SEND_REPLY");
+  if (status !== "MATCHES_FOUND") {
+    assert.match(result.parsedDecision!.replyText!, /don.t have confirmed information/);
+    assert.equal(result.parsedDecision!.requiresHumanReview, false);
+  }
+  assert.deepEqual(events, ["interpret", "retrieve", "plan", "respond"]); assert.equal(result.providerRequestCount, status === "MATCHES_FOUND" ? 2 : 1); assert.equal(result.conversationPlan.move, "ANSWER"); assert.equal(result.conversationPlan.workflowRequest, undefined); assert.equal(result.conversationPlan.requiresHumanReview, false); assert.equal(result.parsedDecision!.suggestedAction, "SEND_REPLY");
 });
 
 test("near-identical editorial copies collapse without discarding different numeric claims", async t => {

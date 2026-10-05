@@ -208,8 +208,8 @@ test("exact dental sequence validates visible replies and preserves interrupted 
   assert.equal(f.state().activeWorkflow, "APPOINTMENT_BOOKING"); assert.ok(f.messages().every(m => !m.content.includes("is confirmed")));
 });
 
-test("invalid factual answers fail after two attempts without inventing a template answer", async t => {
-  const f = await prepared(t); const input = { ...f.input, interpretation: meaning({ intent: "GENERAL_QUESTION" }) }; f.context.conversationPlan = await planner.plan(input); let calls = 0;
+test("invalid grounded factual answers fail after two attempts without inventing a template answer", async t => {
+  const f = await prepared(t); const input = { ...f.input, interpretation: meaning({ intent: "GENERAL_QUESTION" }) }; f.context.conversationPlan = await planner.plan(input); f.context.knowledgeArticles = [{ id: "article", title: "Business information", body: "Confirmed business information", tags: [] }]; let calls = 0;
   mockMethod(t, aiProvider, "generateReply", async () => { calls++; return { rawText: "not JSON", providerRequestCount: 1, totalTokens: 3 } as any; });
   await assert.rejects(f.run(), (e: any) => e.code === "CONVERSATION_RESPONSE_INVALID" && e.context.conversationResponseUsage.requests === 2 && e.context.conversationResponseUsage.tokens === 6); assert.equal(calls, 2); assert.equal(f.messages().length, 1);
 });
@@ -378,4 +378,51 @@ test("demo unavailable explanation passes existing safety after rejected confirm
   const r = await f.run(); assert.equal(r.conversationResponse.fallbackUsed, true);
   assert.equal(aiSafetyService.evaluate({ decision: r.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true }).allowed, true);
   assert.deepEqual(r.validatedResponse.claims, []); assert.equal(r.validatedResponse.claimsActionCompleted, false);
+});
+
+for (const variant of ["empty", "prior-service", "retrieval-unavailable"]) test(`ungrounded general question fails closed before provider: ${variant}`, async t => {
+  const f = setup(t);
+  if (variant === "prior-service") await f.booking();
+  const m = await f.add("What documents do I need to renew my passport?");
+  const input = await f.input(m, meaning({ intent: "GENERAL_QUESTION" }));
+  const plan = await planner.plan(input);
+  const context = { ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan };
+  // Both no-match and unavailable retrieval deliberately expose the same empty arrays.
+  assert.equal(context.services.length, 1);
+  let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async () => { calls++; throw new Error("Must not call provider"); });
+  const before = structuredClone(f.state());
+  const result = await responses.generate(context, { businessId: scope.businessId, conversationId: scope.conversationId, messageId: m.id });
+  assert.equal(calls, 0); assert.equal(result.providerRequestCount, 0);
+  assert.equal(result.conversationResponse.source, "PLAN_FALLBACK");
+  assert.match(result.validatedResponse.text!, /don't have confirmed information.*Fixture business/);
+  assert.doesNotMatch(result.validatedResponse.text!, /\?|passport|Dental|preferredDate/);
+  assert.equal(result.validatedResponse.questionCount, 0);
+  assert.equal(result.parsedDecision.requiresHumanReview, false);
+  assert.deepEqual(result.validatedResponse.claims, []);
+  assert.deepEqual(result.validatedResponse.referencedFactIds, []);
+  assert.deepEqual(f.state(), before);
+});
+
+for (const variant of ["article", "document", "fact", "demo-website", "service", "pricing", "availability", "payment"]) test(`grounding gate preserves authoritative response path: ${variant}`, async t => {
+  const f = setup(t, variant === "demo-website"); const m = await f.add("Tell me about your business information.");
+  const intent = ({ service: "SERVICE_INQUIRY", pricing: "PRICING_INQUIRY", availability: "AVAILABILITY_INQUIRY", payment: "PAYMENT_QUESTION" } as const)[variant as "service" | "pricing" | "availability" | "payment"] ?? "GENERAL_QUESTION";
+  const input = await f.input(m, meaning({ intent })); const plan = await planner.plan(input);
+  const context = { ...input.businessContext, conversationSnapshot: input.conversationSnapshot, conversationPlan: plan };
+  if (["article", "demo-website"].includes(variant)) context.knowledgeArticles = [{ id: "article", title: "Company information", body: "We provide consultations.", tags: [] }];
+  if (variant === "document") context.knowledgeDocumentChunks = [{ id: "chunk", documentId: "doc", documentTitle: "Company information", chunkText: "We provide consultations.", pageNumber: 1 }];
+  if (variant === "fact") context.approvedKnowledgeFacts = [{ id: "fact", documentTitle: "Company information", label: "Information", valueText: "We provide consultations." }] as any;
+  if (variant === "availability") context.availability = { summaryText: "Weekdays during business hours" } as any;
+  if (variant === "payment") context.policies = [{ id: "payment", title: "Payment policy", content: "Payment is due at the visit." }] as any;
+  let calls = 0;
+  mockMethod(t, aiProvider, "generateReply", async (request: any) => { calls++; return { rawText: JSON.stringify(responseOutput(request, "I can help with business information.")), providerRequestCount: 1 } as any; });
+  const result = await responses.generate(context, { businessId: scope.businessId, conversationId: scope.conversationId, messageId: m.id });
+  assert.equal(calls, 1); assert.equal(result.conversationResponse.source, "MODEL");
+});
+
+test("ungrounded general question cannot bypass a plan that requires continuation", async t => {
+  const f = await prepared(t);
+  f.context.conversationPlan = { ...f.plan, intent: "GENERAL_QUESTION", move: "ANSWER", targetField: undefined, suspendedContext: { workflow: "APPOINTMENT_BOOKING", stillAwaiting: "preferredDate" }, continuation: { kind: "ASK_FOR_FIELD", workflow: "APPOINTMENT_BOOKING", field: "preferredDate" }, responseDirective: { purpose: "ANSWER_CUSTOMER", acknowledgeContext: true, askOneQuestion: true } };
+  let calls = 0; mockMethod(t, aiProvider, "generateReply", async () => { calls++; throw new Error("Must not call provider"); });
+  await assert.rejects(f.run(), { code: "CONVERSATION_RESPONSE_INVALID" }); assert.equal(calls, 0);
 });
