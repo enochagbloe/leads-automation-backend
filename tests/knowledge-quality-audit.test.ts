@@ -14,8 +14,8 @@ function setup(t: Parameters<typeof mockMethod>[0], rows: ReturnType<typeof arti
       assert.deepEqual(where, { businessId: "a", status: "PUBLISHED", visibility: "CLIENT_SENDABLE" }); assert.equal(take, 5001); reads.push("articles");
       return rows.filter(r => r.businessId === where.businessId && r.status === where.status && r.visibility === where.visibility).sort((a, b) => a.id.localeCompare(b.id));
     } },
-    service: { findMany: async ({ where }: any) => { assert.deepEqual(where, { businessId: "a", isActive: true, isArchived: false }); reads.push("services"); return [{ name: "Strategy consultation", category: "Planning" }]; } },
-    businessPolicy: { findMany: async ({ where }: any) => { assert.deepEqual(where, { businessId: "a", isActive: true, isArchived: false, visibility: "CUSTOMER_FACING" }); reads.push("policies"); return [{ title: "Project cancellation", category: "CANCELLATION" }]; } },
+    service: { findMany: async ({ where }: any) => { assert.deepEqual(where, { businessId: "a", isActive: true, isArchived: false }); reads.push("services"); return [{ id: "service", businessId: "a", name: "Strategy consultation", category: "Planning", description: "Project delivery" }, { id: "photography", businessId: "a", name: "Event photography", category: "Photography", description: null }, { id: "foreign-service", businessId: "b", name: "Project guidance", category: "Planning", description: null }].filter(s => s.businessId === where.businessId); } },
+    businessPolicy: { findMany: async ({ where }: any) => { assert.deepEqual(where, { businessId: "a", isActive: true, isArchived: false, visibility: "CUSTOMER_FACING" }); reads.push("policies"); return [{ id: "policy", businessId: "a", title: "Project cancellation", category: "CANCELLATION", shortSummary: null }, { id: "foreign-policy", businessId: "b", title: "Project guidance", category: "GENERAL", shortSummary: null }].filter(p => p.businessId === where.businessId); } },
   };
   mockMethod(t, prisma, "$transaction", async (callback: any, options: any) => { assert.equal(options.isolationLevel, "RepeatableRead"); return callback(tx); });
   t.after(() => assert.deepEqual(rows, before));
@@ -76,4 +76,47 @@ test("substantially identical long text forms one duplicate group", async t => {
 test("oversized audits fail explicitly rather than returning partial counts", async t => {
   setup(t, Array.from({ length: 5001 }, (_, i) => article(String(i))));
   await assert.rejects(audit.audit("a"), { code: "KNOWLEDGE_AUDIT_LIMIT_EXCEEDED" });
+});
+
+const unrelatedBody = "Software compilers algorithms debugging programming binaries memory concurrency architecture refactoring engineers coding frameworks.";
+test("linked unrelated article receives domain and specific relationship findings", async t => {
+  setup(t, [article("a", { title: "From Code Builder to Software Engineer: Scaling Your Mindset", body: unrelatedBody, relatedServiceIds: ["service"] })]);
+  const r = await audit.audit("a");
+  assert.ok(r.findings.some(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE"));
+  const relationship = r.findings.find(f => f.code === "SUSPICIOUS_RELEVANCE_RELATIONSHIP")!;
+  assert.deepEqual(relationship.metadata, { relatedServiceIds: ["service"], relatedPolicyIds: [] });
+  assert.match(r.findings.find(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE")!.suggestedAction, /relationships/);
+});
+test("relevant linked article retains overlap even with additional vocabulary", async t => {
+  setup(t, [article("a", { body: "Strategy planning projects improve scheduling timelines coordination leadership budgets delivery goals management.", relatedServiceIds: ["service"], relatedPolicyIds: ["policy"] })]);
+  const r = await audit.audit("a"); assert.ok(!r.findings.some(f => ["POSSIBLE_OUT_OF_DOMAIN_ARTICLE", "SUSPICIOUS_RELEVANCE_RELATIONSHIP", "STALE_RELEVANCE_RELATIONSHIP"].includes(f.code)));
+});
+test("wrong service link flagged even when article matches business domain", async t => {
+  setup(t, [article("a", { body: "Strategy planning projects improve scheduling timelines coordination leadership budgets delivery goals management.", relatedServiceIds: ["photography"] })]);
+  const r = await audit.audit("a");
+  assert.deepEqual(r.findings.find(f => f.code === "SUSPICIOUS_RELEVANCE_RELATIONSHIP")!.metadata, { relatedServiceIds: ["photography"], relatedPolicyIds: [] });
+  assert.ok(!r.findings.some(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE"));
+});
+test("unresolvable service and policy links are reported without being removed", async t => {
+  setup(t, [article("a", { relatedServiceIds: ["deleted-service", "foreign-service", "deleted-service"], relatedPolicyIds: ["archived-policy", "foreign-policy"] })]);
+  const r = await audit.audit("a"); assert.deepEqual(r.findings.find(f => f.code === "STALE_RELEVANCE_RELATIONSHIP")!.metadata, { relatedServiceIds: ["deleted-service", "foreign-service"], relatedPolicyIds: ["archived-policy", "foreign-policy"] });
+});
+for (const title of ["Introduction to Project Partners", "About Project Partners", "Welcome to Project Partners", "Company introduction", "Business overview", "Who we are"]) test(`generic title exempts missing metadata only: ${title}`, async t => {
+  setup(t, [article("a", { title, category: "Services", body: "We provide strategy consultation and project planning." })]);
+  assert.ok(!(await audit.audit("a")).findings.some(f => f.code === "MISSING_RELEVANCE_METADATA"));
+});
+test("introductory business title cannot mask unrelated body", async t => {
+  setup(t, [article("a", { title: "Introduction to Project Partners", body: unrelatedBody, category: "Services" })]);
+  const r = await audit.audit("a"); assert.ok(r.findings.some(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE"));
+  assert.ok(!r.findings.some(f => f.code === "MISSING_RELEVANCE_METADATA"));
+});
+test("brief content does not trigger speculative relationship or domain judgments", async t => {
+  setup(t, [article("a", { body: "Expert advice.", title: "Advice", relatedServiceIds: ["service"] })]);
+  assert.deepEqual((await audit.audit("a")).findings, []);
+});
+
+test("wrong policy relationship identifies the policy independently", async t => {
+  setup(t, [article("a", { title: "Photography advice", body: "Photography cameras lenses lighting composition portraits weddings editing exposure aperture shutters focus.", relatedServiceIds: ["photography"], relatedPolicyIds: ["policy"] })]);
+  const r = await audit.audit("a"); assert.deepEqual(r.findings.find(f => f.code === "SUSPICIOUS_RELEVANCE_RELATIONSHIP")!.metadata, { relatedServiceIds: [], relatedPolicyIds: ["policy"] });
+  assert.ok(!r.findings.some(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE"));
 });
