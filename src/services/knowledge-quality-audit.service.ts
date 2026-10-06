@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../config/prisma";
 import { AppError } from "../utils/errors";
 
@@ -25,13 +27,13 @@ function sameContent(a: string, b: string) {
 
 /** Read-only, bounded tenant audit. Findings are suggestions, never governance mutations. */
 export const knowledgeQualityAuditService = {
-  async audit(businessId: string) {
+  async audit(businessId: string, db?: Prisma.TransactionClient) {
     if (typeof businessId !== "string" || !businessId.trim() || businessId.length > 200) throw new AppError(400, "A business scope is required", "KNOWLEDGE_AUDIT_SCOPE_REQUIRED");
-    return prisma.$transaction(async tx => {
+    const run = async (tx: Prisma.TransactionClient) => {
       const business = await tx.business.findFirst({ where: { id: businessId }, select: { name: true, industry: true, description: true } });
       if (!business) throw new AppError(404, "Business not found", "BUSINESS_NOT_FOUND");
       const articles = await tx.knowledgeArticle.findMany({ where: { businessId, status: "PUBLISHED", visibility: "CLIENT_SENDABLE" }, orderBy: { id: "asc" }, take: 5001,
-        select: { id: true, title: true, body: true, summary: true, category: true, tags: true, relatedServiceIds: true, relatedPolicyIds: true } });
+        select: { id: true, updatedAt: true, title: true, body: true, summary: true, category: true, tags: true, relatedServiceIds: true, relatedPolicyIds: true } });
       if (articles.length > 5000) throw new AppError(422, "Audit supports at most 5000 eligible articles per business", "KNOWLEDGE_AUDIT_LIMIT_EXCEEDED");
       const services = await tx.service.findMany({ where: { businessId, isActive: true, isArchived: false }, select: { id: true, name: true, category: true, description: true } });
       const policies = await tx.businessPolicy.findMany({ where: { businessId, isActive: true, isArchived: false, visibility: "CUSTOMER_FACING" }, select: { id: true, title: true, category: true, shortSummary: true } });
@@ -87,10 +89,20 @@ export const knowledgeQualityAuditService = {
       }
       for (const group of categories.values()) if (new Set(group.map(a => a.category)).size > 1) add("CATEGORY_NORMALIZATION_NEEDED", group.map(a => a.id), "Review category spelling/casing/spacing and choose a consistent label; no rename has been applied.");
       findings.sort((a, b) => a.code.localeCompare(b.code) || a.articleIds.join(",").localeCompare(b.articleIds.join(",")));
-      return { businessId, findings, summary: { articlesScanned: articles.length, findings: findings.length,
+      const fingerprinted = findings.map(finding => {
+        const affected = finding.articleIds.map(id => articles.find(a => a.id === id)!);
+        const articleRevisions = affected.map(a => ({ articleId: a.id, updatedAt: a.updatedAt.toISOString() }));
+        const findingKey = createHash("sha256").update(JSON.stringify({ businessId, code: finding.code, articleIds: finding.articleIds, metadata: finding.metadata ?? null, articles: affected })).digest("hex");
+        return { ...finding, findingKey, articleRevisions, reviewStatus: "OPEN" as "OPEN" | "DISMISSED" };
+      });
+      const dismissals = fingerprinted.length ? await tx.knowledgeQualityReview.findMany({ where: { businessId, action: "DISMISS", findingKey: { in: fingerprinted.map(f => f.findingKey) } }, select: { findingKey: true } }) : [];
+      const dismissed = new Set(dismissals.map(d => d.findingKey));
+      for (const finding of fingerprinted) if (dismissed.has(finding.findingKey)) finding.reviewStatus = "DISMISSED";
+      return { businessId, findings: fingerprinted, summary: { articlesScanned: articles.length, findings: findings.length,
         duplicateGroups: findings.filter(f => f.code === "DUPLICATE_CUSTOMER_ARTICLE").length,
         categoryConflictGroups: findings.filter(f => f.code === "CATEGORY_NORMALIZATION_NEEDED").length,
         articlesNeedingReview: new Set(findings.flatMap(f => f.articleIds)).size } };
-    }, { isolationLevel: "RepeatableRead" });
+    };
+    return db ? run(db) : prisma.$transaction(run, { isolationLevel: "RepeatableRead" });
   },
 };

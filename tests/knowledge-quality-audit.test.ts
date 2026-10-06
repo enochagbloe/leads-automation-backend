@@ -4,11 +4,12 @@ import { prisma } from "../src/config/prisma";
 import { knowledgeQualityAuditService as audit } from "../src/services/knowledge-quality-audit.service";
 import { mockMethod } from "./helpers/mock-method";
 
-const article = (id: string, extra: Record<string, unknown> = {}) => ({ id, businessId: "a", status: "PUBLISHED", visibility: "CLIENT_SENDABLE", title: "Project guidance", body: "Planning projects and managing timelines", summary: null, category: null, tags: [], relatedServiceIds: [], relatedPolicyIds: [], ...extra });
+const article = (id: string, extra: Record<string, unknown> = {}) => ({ id, updatedAt: new Date("2026-10-06T00:00:00Z"), businessId: "a", status: "PUBLISHED", visibility: "CLIENT_SENDABLE", title: "Project guidance", body: "Planning projects and managing timelines", summary: null, category: null, tags: [], relatedServiceIds: [], relatedPolicyIds: [], ...extra });
 function setup(t: Parameters<typeof mockMethod>[0], rows: ReturnType<typeof article>[]) {
   const before = structuredClone(rows); const reads: string[] = [];
   // Deliberately supply only read delegates: any attempted mutation fails the test.
   const tx = {
+    knowledgeQualityReview: { findMany: async ({ where }: any) => { assert.equal(where.businessId, "a"); assert.equal(where.action, "DISMISS"); return []; } },
     business: { findFirst: async ({ where }: any) => { assert.equal(where.id, "a"); reads.push("business"); return { name: "Project Partners", industry: "Consultancy", description: "Strategy planning projects delivery management" }; } },
     knowledgeArticle: { findMany: async ({ where, take }: any) => {
       assert.deepEqual(where, { businessId: "a", status: "PUBLISHED", visibility: "CLIENT_SENDABLE" }); assert.equal(take, 5001); reads.push("articles");

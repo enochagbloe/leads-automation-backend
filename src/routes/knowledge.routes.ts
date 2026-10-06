@@ -1,3 +1,4 @@
+import { resolveKnowledgeQualitySchema } from "../validation/knowledge-quality.schemas";
 import { Router } from "express";
 import { knowledgeController } from "../controllers/knowledge.controller";
 import { authenticate } from "../middleware/auth";
@@ -34,6 +35,7 @@ export const knowledgeRouter = Router();
 
 knowledgeRouter.use(authenticate, requireBusiness);
 
+knowledgeRouter.post("/quality-audit/resolve", mutationLimiter, validate(resolveKnowledgeQualitySchema), knowledgeController.resolveQualityAudit);
 knowledgeRouter.get("/quality-audit", knowledgeController.qualityAudit);
 knowledgeRouter.get("/stats", knowledgeController.stats);
 knowledgeRouter.get("/search", validateQuery(knowledgeSearchQuerySchema), knowledgeController.search);

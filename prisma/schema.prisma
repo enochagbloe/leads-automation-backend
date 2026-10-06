@@ -1322,6 +1322,7 @@ model Business {
   knowledgeDocumentProcessingJobs         KnowledgeDocumentProcessingJob[]
   knowledgeRuntimeRefreshJobs             KnowledgeRuntimeRefreshJob[]
   knowledgeDocumentUploadOperations       KnowledgeDocumentUploadOperation[]
+  knowledgeQualityReviews                 KnowledgeQualityReview[]
   knowledgeDocumentExtractions            KnowledgeDocumentExtraction[]
   knowledgeDocumentExtractedSections      KnowledgeDocumentExtractedSection[]
   knowledgeDocumentAnalyses               KnowledgeDocumentAnalysis[]
@@ -3592,4 +3593,23 @@ model ConversationInterpretation {
   conversation Conversation @relation(fields: [conversationId, businessId], references: [id, businessId], onDelete: Cascade, map: "ConversationInterpretation_scope_fkey")
   @@unique([businessId, conversationId, sourceMessageId], map: "ConversationInterpretation_source_key")
   @@index([businessId, conversationId, createdAt])
+}
+
+model KnowledgeQualityReview {
+  id                String   @id @default(cuid())
+  businessId        String
+  findingKey        String
+  findingCode       String
+  action            String
+  idempotencyKey    String
+  requestChecksum   String
+  actorUserId       String
+  actorMembershipId String
+  note              String?
+  resultSnapshot    Json
+  createdAt         DateTime @default(now())
+  business          Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId, findingKey, action])
 }

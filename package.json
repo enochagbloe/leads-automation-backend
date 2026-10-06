@@ -23,6 +23,7 @@
     "test:knowledge-worker": "tsx --test tests/knowledge-document-worker-policy.test.ts",
     "test:knowledge-analysis": "tsx --test tests/knowledge-document-analysis-policy.test.ts",
     "test:conversation-knowledge-retrieval": "tsx --test tests/conversation-knowledge-retrieval.test.ts",
+    "test:knowledge-quality-remediation": "tsx --test tests/knowledge-quality-remediation.test.ts",
     "test:knowledge-quality-audit": "tsx --test tests/knowledge-quality-audit.test.ts",
     "test:knowledge-retrieval": "tsx --test tests/knowledge-retrieval.test.ts",
     "test:knowledge-embeddings": "tsx --test tests/knowledge-embedding-sync.test.ts",

@@ -1,3 +1,4 @@
+import { knowledgeQualityRemediationService } from "../services/knowledge-quality-remediation.service";
 import { BusinessRole } from "@prisma/client";
 import { Request, RequestHandler } from "express";
 import { knowledgeService } from "../services/knowledge.service";
@@ -82,6 +83,7 @@ export const knowledgeController = {
     actor(req),
     res.locals.validatedQuery as KnowledgeGovernanceReviewQueueQuery,
   )),
+  resolveQualityAudit: async (req, res) => res.json(await knowledgeQualityRemediationService.resolve(actor(req), req.body, req.get("Idempotency-Key"), requestMetadata(req))),
   qualityAudit: async (req, res) => { res.setHeader("Cache-Control", "private, no-store"); res.json(await knowledgeService.qualityAudit(actor(req))); },
   stats: async (req, res) => res.json(await knowledgeService.stats(actor(req))),
 

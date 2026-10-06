@@ -72,6 +72,11 @@ import {
 } from "./knowledge-document/knowledge-document.types";
 
 type KnowledgeActor = ConversationActor;
+export type KnowledgeArticleMutationGuard = {
+  expectedUpdatedAt: Date;
+  beforeWrite: (tx: Prisma.TransactionClient) => Promise<void>;
+  afterWrite: (tx: Prisma.TransactionClient, article: KnowledgeArticle) => Promise<void>;
+};
 
 const KNOWLEDGE_PROMPT_VERSION = "knowledge-articles-v1";
 const MEDIA_SEND_NOT_READY = "WHATSAPP_DOCUMENT_SEND_NOT_CONFIGURED";
@@ -964,10 +969,13 @@ export const knowledgeService = {
     return article;
   },
 
-  async updateArticle(actor: KnowledgeActor, articleId: string, input: UpdateKnowledgeArticleInput, context: Omit<AuditInput, "action">) {
+  async updateArticle(actor: KnowledgeActor, articleId: string, input: UpdateKnowledgeArticleInput, context: Omit<AuditInput, "action">, guard?: KnowledgeArticleMutationGuard) {
     await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_UPDATE");
     const existing = await prisma.knowledgeArticle.findFirst({ where: { id: articleId, businessId: actor.businessId } });
-    if (!existing) return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_UPDATE");
+    if (!existing) {
+      if (guard) throw new AppError(409, "The selected article has changed; refresh the audit", "KNOWLEDGE_QUALITY_ARTICLE_STALE");
+      return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_UPDATE");
+    }
     if (input.relatedServiceIds || input.relatedPolicyIds) await validateRelatedIds(actor.businessId, input);
     const slug = input.title || input.slug ? await uniqueSlug(actor.businessId, input.title ?? existing.title, input.slug ?? existing.slug, articleId) : undefined;
     const oldPdfFileKey = input.body !== undefined
@@ -975,11 +983,12 @@ export const knowledgeService = {
       : null;
     const oldPdfStorageProvider = input.body !== undefined ? existing.pdfStorageProvider : null;
     const article = await prisma.$transaction(async (tx) => {
+      if (guard) await guard.beforeWrite(tx);
       if (isArticleRestore(existing.status, input.status)) {
         await assertAssetCapacityTx(tx, actor);
       }
-      return tx.knowledgeArticle.update({
-        where: { id: articleId },
+      const updated = await tx.knowledgeArticle.update({
+        where: { id: articleId, businessId: actor.businessId, ...(guard ? { updatedAt: guard.expectedUpdatedAt } : {}) },
         data: {
           ...(input.title !== undefined ? { title: input.title } : {}),
           ...(slug ? { slug } : {}),
@@ -1000,15 +1009,18 @@ export const knowledgeService = {
           ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
           updatedByMembershipId: actor.membershipId,
+          ...(guard ? { updatedAt: new Date(Math.max(Date.now(), guard.expectedUpdatedAt.getTime() + 1)) } : {}),
         },
       });
+      if (guard) await guard.afterWrite(tx, updated);
+      return updated;
     });
+    scheduleEmbeddingSync("article.updated", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     await Promise.all([
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action: AuditAction.KNOWLEDGE_ARTICLE_UPDATED, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId } }),
     ]);
     scheduleStorageDelete("article.pdf_stale_after_update", oldPdfFileKey, oldPdfStorageProvider);
-    scheduleEmbeddingSync("article.updated", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     realtimeService.publish({
       type: "business.knowledge.article.updated",
       businessId: actor.businessId,
@@ -1018,19 +1030,23 @@ export const knowledgeService = {
     return article;
   },
 
-  async updateArticleStatus(actor: KnowledgeActor, articleId: string, status: KnowledgeArticleStatus, context: Omit<AuditInput, "action">) {
+  async updateArticleStatus(actor: KnowledgeActor, articleId: string, status: KnowledgeArticleStatus, context: Omit<AuditInput, "action">, guard?: KnowledgeArticleMutationGuard) {
     await managerOnly(actor, context, "KNOWLEDGE_ARTICLE_STATUS_UPDATE");
     const existing = await prisma.knowledgeArticle.findFirst({ where: { id: articleId, businessId: actor.businessId } });
-    if (!existing) return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_STATUS_UPDATE");
+    if (!existing) {
+      if (guard) throw new AppError(409, "The selected article has changed; refresh the audit", "KNOWLEDGE_QUALITY_ARTICLE_STALE");
+      return throwKnowledgeArticleNotFound(actor, articleId, context, "KNOWLEDGE_ARTICLE_STATUS_UPDATE");
+    }
     if (status === KnowledgeArticleStatus.PUBLISHED && (!existing.title.trim() || !existing.body.trim())) {
       throw new AppError(422, "Article must have a title and body before publishing.", "VALIDATION_ERROR");
     }
     const article = await prisma.$transaction(async (tx) => {
+      if (guard) await guard.beforeWrite(tx);
       if (isArticleRestore(existing.status, status)) {
         await assertAssetCapacityTx(tx, actor);
       }
-      return tx.knowledgeArticle.update({
-        where: { id: articleId },
+      const updated = await tx.knowledgeArticle.update({
+        where: { id: articleId, businessId: actor.businessId, ...(guard ? { updatedAt: guard.expectedUpdatedAt } : {}) },
         data: {
           status,
           ...(status === KnowledgeArticleStatus.PUBLISHED ? {
@@ -1040,19 +1056,22 @@ export const knowledgeService = {
             reviewedByMembershipId: existing.reviewedByMembershipId ?? actor.membershipId,
           } : {}),
           updatedByMembershipId: actor.membershipId,
+          ...(guard ? { updatedAt: new Date(Math.max(Date.now(), guard.expectedUpdatedAt.getTime() + 1)) } : {}),
         },
       });
+      if (guard) await guard.afterWrite(tx, updated);
+      return updated;
     });
     const action = status === KnowledgeArticleStatus.PUBLISHED
       ? AuditAction.KNOWLEDGE_ARTICLE_PUBLISHED
       : status === KnowledgeArticleStatus.ARCHIVED
         ? AuditAction.KNOWLEDGE_ARTICLE_ARCHIVED
         : AuditAction.KNOWLEDGE_ARTICLE_UPDATED;
+    scheduleEmbeddingSync("article.status", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     await Promise.all([
       invalidateKnowledgeCaches(actor.businessId),
       auditService.log({ ...context, action, businessId: actor.businessId, userId: actor.userId, actorMembershipId: actor.membershipId, metadata: { articleId, status } }),
     ]);
-    scheduleEmbeddingSync("article.status", knowledgeEmbeddingService.syncArticle(article.businessId, article.id));
     realtimeService.publish({
       type: "business.knowledge.article.updated",
       businessId: actor.businessId,
@@ -1062,8 +1081,8 @@ export const knowledgeService = {
     return article;
   },
 
-  async archiveArticle(actor: KnowledgeActor, articleId: string, context: Omit<AuditInput, "action">) {
-    return this.updateArticleStatus(actor, articleId, KnowledgeArticleStatus.ARCHIVED, context);
+  async archiveArticle(actor: KnowledgeActor, articleId: string, context: Omit<AuditInput, "action">, guard?: KnowledgeArticleMutationGuard) {
+    return this.updateArticleStatus(actor, articleId, KnowledgeArticleStatus.ARCHIVED, context, guard);
   },
 
   async draftArticle(actor: KnowledgeActor, input: DraftKnowledgeArticleInput, context: Omit<AuditInput, "action">) {
