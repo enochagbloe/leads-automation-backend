@@ -14,3 +14,8 @@ The audit never edits, merges, archives, deletes, or reindexes content. Estate L
 SUSPICIOUS_RELEVANCE_RELATIONSHIP identifies current linked tenant services/policies with no meaningful vocabulary overlap, only when article vocabulary is sufficient (at least eight informative tokens). STALE_RELEVANCE_RELATIONSHIP identifies IDs that do not resolve in the active, unarchived tenant catalog (policies must also be customer-facing). Deleted, inactive, archived, internal-policy and foreign-tenant references are never treated as valid. The finding does not disclose why an ID is unresolvable or any foreign entity data.
 
 Both findings contain `metadata: { relatedServiceIds: string[], relatedPolicyIds: string[] }` with sorted, deduplicated implicated IDs. Valid relationships are supporting evidence rather than an unconditional exemption. A domain mismatch on a linked article explicitly suggests reviewing its existing relationships. Nothing is removed or rewritten, and no audit finding authorizes retrieval or workflow effects. Vocabulary matching remains conservative and cannot establish semantic irrelevance; human review is required.
+
+
+## Missing metadata precision (2C)
+
+Generic Customer Service, Customer Support, Support and General Information categories do not imply an operational relationship. Missing-metadata warnings now require an explicit operational title/tag (payment, deposit, refund, cancellation, pricing, fees or appointment), or a whole-phrase reference to a current tenant service name or customer-facing policy title. Non-generic categories may supply that catalog reference. Bare service/policy words alone are insufficient. Company-introduction exemptions still apply. All other audit findings and read-only behavior are unchanged.

@@ -120,3 +120,23 @@ test("wrong policy relationship identifies the policy independently", async t =>
   const r = await audit.audit("a"); assert.deepEqual(r.findings.find(f => f.code === "SUSPICIOUS_RELEVANCE_RELATIONSHIP")!.metadata, { relatedServiceIds: [], relatedPolicyIds: ["policy"] });
   assert.ok(!r.findings.some(f => f.code === "POSSIBLE_OUT_OF_DOMAIN_ARTICLE"));
 });
+
+for (const category of ["Customer Service", "Customer Support", "Support", "General Information", " CUSTOMER-Service "]) test(`generic representative article does not require relationships from category: ${category}`, async t => {
+  setup(t, [article("a", { title: "How to Chat with Our Customer Representative", category, tags: ["Customer Service"], body: "Contact our team for help with your questions." })]);
+  assert.ok(!(await audit.audit("a")).findings.some(f => f.code === "MISSING_RELEVANCE_METADATA"));
+});
+for (const title of ["Photography Payment Policies", "Refund Policies", "Appointment location information", "Strategy consultation", "Event photography", "Project cancellation"]) test(`specific operational or catalog title still requires metadata: ${title}`, async t => {
+  setup(t, [article("a", { title, category: "Customer Service" })]);
+  assert.deepEqual((await audit.audit("a")).findings.filter(f => f.code === "MISSING_RELEVANCE_METADATA").map(f => f.articleIds), [["a"]]);
+});
+test("strong operational tag remains actionable with a generic title", async t => {
+  setup(t, [article("a", { title: "Useful information", category: "Customer Support", tags: ["deposit"] })]);
+  assert.ok((await audit.audit("a")).findings.some(f => f.code === "MISSING_RELEVANCE_METADATA"));
+});
+test("duplicate representatives and category conflicts survive removal of metadata false positives", async t => {
+  const content = { title: "How to Chat with Our Customer Representative", body: "Contact our team for help with your questions." };
+  setup(t, [article("a", { ...content, category: "Customer service" }), article("b", { ...content, category: "Customer Service" })]);
+  const r = await audit.audit("a");
+  assert.equal(r.summary.duplicateGroups, 1); assert.equal(r.summary.categoryConflictGroups, 1);
+  assert.ok(!r.findings.some(f => f.code === "MISSING_RELEVANCE_METADATA"));
+});

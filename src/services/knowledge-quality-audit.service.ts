@@ -47,9 +47,13 @@ export const knowledgeQualityAuditService = {
         const title = normalize(article.title); if (title) titleGroups.set(title, [...(titleGroups.get(title) ?? []), article]);
         if (article.category?.trim()) { const key = normalize(article.category); categories.set(key, [...(categories.get(key) ?? []), article]); }
         const unlinked = !article.relatedServiceIds.length && !article.relatedPolicyIds.length;
-        const cues = normalize([article.title, article.category, ...article.tags].filter(Boolean).join(" "));
-        const specific = /\b(?:services?|polic(?:y|ies)|payments?|deposits?|refunds?|cancellations?|pricing|fees|appointments?)\b/.test(cues)
-          || services.some(s => normalize(s.name).length > 3 && cues.includes(normalize(s.name)));
+        // Support categories describe general help, not an operational service relationship.
+        const genericCategory = /^(?:customer service|customer support|support|general information)$/.test(normalize(article.category ?? ""));
+        const titleTags = [article.title, ...article.tags].map(normalize);
+        const relevanceCues = [...titleTags, ...(genericCategory ? [] : [normalize(article.category ?? "")])];
+        const namesEntity = (name: string) => normalize(name).length > 3 && relevanceCues.some(cue => ` ${cue} `.includes(` ${normalize(name)} `));
+        const specific = titleTags.some(cue => /\b(?:payments?|deposits?|refunds?|cancellations?|pricing|fees|appointments?)\b/.test(cue))
+          || services.some(s => namesEntity(s.name)) || policies.some(p => namesEntity(p.title));
         const genericCompany = /^(?:about us|about our company|company overview|business overview|welcome|company introduction|business introduction|who we are)$/.test(title)
           || ["introduction to", "about", "welcome to"].some(prefix => title === `${prefix} ${normalize(business.name)}`);
         if (unlinked && specific && !genericCompany) add("MISSING_RELEVANCE_METADATA", [article.id], "Review relevance and link existing services or policies only when supported by the article.");
