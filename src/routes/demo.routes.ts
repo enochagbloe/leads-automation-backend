@@ -1,3 +1,6 @@
+import { businessDemoInviteForOwner, verifyBusinessDemoInvite } from "../services/business-demo.service";
+import { authenticate } from "../middleware/auth";
+import { requireBusiness, requireRole } from "../middleware/rbac";
 import { demoMessageService } from "../services/demo-message.service";
 import { demoConversationService } from "../services/demo-conversation.service";
 import { demoRealtimeService } from "../services/demo-realtime.service";
@@ -11,6 +14,16 @@ import { assertDemoEnabled, demoService } from "../services/demo.service";
 export const demoRouter = Router();
 
 demoRouter.use((_req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
+demoRouter.post("/business/invite", authenticate, requireBusiness, requireRole("BUSINESS_OWNER"), mutationLimiter, async (req, res) => {
+  assertDemoEnabled();
+  res.json(await businessDemoInviteForOwner(req.auth!.businessId!));
+});
+demoRouter.post("/join", demoCreationLimiter, async (req, res) => {
+  assertDemoEnabled();
+  const hostBusinessId = verifyBusinessDemoInvite(req.body?.invite);
+  res.status(201).json(await demoService.create(req.ip ?? "unknown", req.get("Idempotency-Key"), hostBusinessId));
+});
+
 demoRouter.post("/session", (_req, _res, next) => { try { assertDemoEnabled(); next(); } catch (error) { next(error); } }, demoCreationLimiter, async (req, res) => {
   res.status(201).json(await demoService.create(req.ip ?? "unknown", req.get("idempotency-key")));
 });
@@ -25,6 +38,7 @@ demoRouter.delete("/session", authenticateDemo, mutationLimiter, async (req, res
 });
 
 demoRouter.post("/session/setup", authenticateDemo, demoSetupIpLimiter, demoSetupSessionLimiter, async (req, res) => {
+  if (req.demo!.hostBusinessId) throw new AppError(403, "Business demo context is managed by the business", "DEMO_RESOURCE_FORBIDDEN");
   res.json(await demoSetupService.setup(req.demo!, req.body));
 });
 

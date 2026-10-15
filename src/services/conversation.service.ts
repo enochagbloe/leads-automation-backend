@@ -1,3 +1,4 @@
+import { ownerDemoReadScope, demoReadPermissions } from "./business-demo.service";
 import crypto from "node:crypto";
 import {
   AuditAction,
@@ -185,8 +186,8 @@ export const conversationService = {
   async list(actor: ConversationActor, query: ConversationListQuery) {
     const key = listKey(actor, query);
     const cached = await cacheService.get<unknown>(key);
-    if (cached) return cached;
-    const filters: Prisma.ConversationWhereInput[] = [listAccessWhere(actor)];
+    if (cached && actor.role !== BusinessRole.BUSINESS_OWNER) return cached;
+    const filters: Prisma.ConversationWhereInput[] = [{ OR: [listAccessWhere(actor), ownerDemoReadScope(actor.businessId, actor.role)] }];
     if (query.search) filters.push({
         OR: [
           { subject: { contains: query.search, mode: "insensitive" } },
@@ -218,12 +219,17 @@ export const conversationService = {
       }),
       prisma.conversation.count({ where }),
     ]);
-    const result = { data, pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) } };
-    await cacheService.set(key, result, 30);
+    const result = { data: data.map(row => row.channel === "DEMO" ? { ...row, isDemo: true, permissions: demoReadPermissions } : row), pagination: { page: query.page, limit: query.limit, total, totalPages: Math.ceil(total / query.limit) } };
+    if (actor.role !== BusinessRole.BUSINESS_OWNER) await cacheService.set(key, result, 30);
     return result;
   },
 
   async detail(actor: ConversationActor, conversationId: string, query: ConversationDetailQuery) {
+    const demo = await prisma.conversation.findFirst({ where: { AND: [{ id: conversationId }, ownerDemoReadScope(actor.businessId, actor.role)] }, include: conversationInclude });
+    if (demo) {
+      const messages = await prisma.message.findMany({ where: { businessId: demo.businessId, conversationId: demo.id, deletedAt: null }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], take: 100 });
+      return { conversation: { ...demo, isDemo: true, permissions: demoReadPermissions }, lead: demo.lead, assignedStaff: null, messages, activities: [], messagePagination: { limit: 100, hasMore: false, nextBeforeMessageId: null } };
+    }
     const key = detailKey(actor, conversationId, query);
     const authorized = await prisma.conversation.findFirst({
       where: { id: conversationId, ...assignedOnlyAccessWhere(actor) },

@@ -1260,6 +1260,7 @@ model BusinessAccount {
 }
 
 model Business {
+  hostedDemoSessions DemoSession[] @relation("HostedDemoSessions")
   demoSessionId String? @unique
   demoSession DemoSession? @relation(fields: [demoSessionId], references: [id], onDelete: Restrict)
   id                               String                      @id @default(cuid())
@@ -3518,6 +3519,9 @@ enum DemoSetupStatus {
 }
 
 model DemoSession {
+  hostBusinessId String?
+  hostBusiness Business? @relation("HostedDemoSessions", fields: [hostBusinessId], references: [id], onDelete: SetNull)
+  @@index([hostBusinessId, status, expiresAt])
   setupStatus DemoSetupStatus @default(WAITING_FOR_BUSINESS)
   setupAttemptId String?
   setupStartedAt DateTime?

@@ -22,6 +22,11 @@ export const demoRealtimeService = {
     try {
       const current = await scope(actor);
       if (current.conversation.id !== conversationId) return;
+      const session = current.session;
+      if (session?.hostBusinessId) {
+        // Owner-only notification contains no credential or customer text. Inbox GET revalidates scope.
+        realtimeService.publish({ type: "message.created", businessId: session.hostBusinessId, conversationId, messageId: message.id, roles: ["BUSINESS_OWNER"], payload: { conversationId, messageId: message.id, isDemo: true } });
+      }
       realtimeService.publishDemo({ demoSessionId: actor.demoSessionId, businessId: actor.businessId, conversationId, type: "message.created", payload: { ...message, conversationId } });
       const c = current.conversation;
       realtimeService.publishDemo({ demoSessionId: actor.demoSessionId, businessId: actor.businessId, conversationId, type: "conversation.updated", payload: { id: c.id, conversationId, lastMessagePreview: c.lastMessagePreview, lastMessageAt: c.lastMessageAt, unreadCount: c.unreadCount, status: c.status, updatedAt: c.updatedAt } });

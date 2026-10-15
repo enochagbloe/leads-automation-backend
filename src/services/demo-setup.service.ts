@@ -49,7 +49,7 @@ export const demoSetupService = {
     const data = parseDemoSetup(input);
     const now = new Date(); const attemptId = randomUUID();
     let context: DemoContext = { businessName: data.businessName, facts: emptyDemoFacts(), sourceWebsite: data.websiteUrl, crawlStatus: data.websiteUrl ? "PROCESSING" : "NOT_STARTED", extractionStatus: "FALLBACK", startedAt: now.toISOString(), completedAt: null, pagesAttempted: 0, pagesFetched: 0, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: [] };
-    const scope = { id: actor.demoSessionId, status: "ACTIVE" as const, expiresAt: { gt: now }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId } };
+    const scope = { id: actor.demoSessionId, hostBusinessId: null, status: "ACTIVE" as const, expiresAt: { gt: now }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId } };
     await prisma.$transaction(async tx => {
       const claimed = await tx.demoSession.updateMany({ where: { ...scope, OR: [{ setupStatus: { not: "PROCESSING_WEBSITE" } }, { setupStartedAt: { lt: new Date(now.getTime() - 60_000) } }] }, data: { setupStatus: "PROCESSING_WEBSITE", setupAttemptId: attemptId, setupStartedAt: now, setupCompletedAt: null, demoContext: context as Prisma.InputJsonValue } });
       if (!claimed.count) {

@@ -15,7 +15,7 @@ export function parseDemoMessage(input: unknown) {
 }
 const forbidden = () => new AppError(403, "Demo resource forbidden", "DEMO_RESOURCE_FORBIDDEN");
 export async function resolveResources(tx: Prisma.TransactionClient, actor: DemoActor, requireReady = true) {
-  const session = await tx.demoSession.findFirst({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId, deletedAt: null } }, select: { setupStatus: true, expiresAt: true } });
+  const session = await tx.demoSession.findFirst({ where: { id: actor.demoSessionId, status: "ACTIVE", expiresAt: { gt: new Date() }, business: { id: actor.businessId, demoSessionId: actor.demoSessionId, deletedAt: null } }, select: { setupStatus: true, expiresAt: true, hostBusinessId: true } });
   if (!session) throw forbidden();
   if (requireReady && session.setupStatus !== "READY" && session.setupStatus !== "READY_PARTIAL") throw new AppError(409, "Demo setup is not ready", "DEMO_SETUP_NOT_READY");
   const conversations = await tx.conversation.findMany({ where: { businessId: actor.businessId, deletedAt: null }, take: 2, select: { id: true, businessId: true, leadId: true, channel: true, lastMessagePreview: true, lastMessageAt: true, unreadCount: true, status: true, updatedAt: true } });

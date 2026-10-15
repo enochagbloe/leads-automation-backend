@@ -1,3 +1,4 @@
+import { BUSINESS_DEMO_SESSION_LIMIT, loadBusinessDemoContext } from "./business-demo.service";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env";
@@ -6,7 +7,7 @@ import { demoContextSummary } from "./demo-context.service";
 import { realtimeService } from "./realtime.service";
 import { AppError } from "../utils/errors";
 
-export type DemoActor = { actorType: "DEMO"; isDemo: true; demoSessionId: string; businessId: string };
+export type DemoActor = { actorType: "DEMO"; isDemo: true; demoSessionId: string; businessId: string; hostBusinessId?: string | null };
 export const hashDemoToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const privateHash = (value: string) => createHmac("sha256", env.JWT_ACCESS_SECRET).update(`demo:${value}`).digest("hex");
 export function assertDemoEnabled() {
@@ -28,17 +29,17 @@ async function read(tx: Prisma.TransactionClient, id: string) {
 }
 
 export const demoService = {
-  async create(ip: string, key?: string) {
+  async create(ip: string, key?: string, hostBusinessId?: string) {
     assertDemoEnabled();
     if (key !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(key)) throw new AppError(400, "Use a random 16-128 character Idempotency-Key", "INVALID_IDEMPOTENCY_KEY");
     const ipHash = privateHash(`ip:${ip}`);
-    const idempotencyHash = key ? privateHash(`key:${ipHash}:${key}`) : null;
+    const idempotencyHash = key ? privateHash(hostBusinessId ? `key:${ipHash}:${hostBusinessId}:${key}` : `key:${ipHash}:${key}`) : null;
     // Include the new session ID so a stale key never reissues an old credential.
     const id = randomUUID();
     const token = `demo_${idempotencyHash ? privateHash(`credential:${idempotencyHash}:${id}`) : randomBytes(32).toString("hex")}`;
     return prisma.$transaction(async tx => {
-      // Cross-process admission/deduplication lock, held only for this IP and transaction.
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${ipHash}, 0))::text`;
+      // Cross-process admission lock: per host business, or per IP for legacy standalone demos.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${hostBusinessId ? `business-demo:${hostBusinessId}` : ipHash}, 0))::text`;
       if (idempotencyHash) {
         const existing = await tx.demoSession.findUnique({ where: { idempotencyHash } });
         if (existing?.status === "ACTIVE" && existing.expiresAt > new Date()) {
@@ -53,16 +54,17 @@ export const demoService = {
         }
       }
       const now = new Date();
-      const count = await tx.demoSession.count({ where: { ipHash, status: "ACTIVE", expiresAt: { gt: now } } });
-      if (count >= env.DEMO_MAX_ACTIVE_SESSIONS_PER_IP) throw new AppError(429, "Too many active demo sessions", "DEMO_LIMIT_REACHED");
-      const session = await tx.demoSession.create({ data: { id, tokenHash: hashDemoToken(token), ipHash, idempotencyHash, expiresAt: new Date(now.getTime() + env.DEMO_SESSION_TTL_MINUTES * 60_000) } });
+      const count = await tx.demoSession.count({ where: { ...(hostBusinessId ? { hostBusinessId } : { ipHash }), status: "ACTIVE", expiresAt: { gt: now } } });
+      if (count >= (hostBusinessId ? BUSINESS_DEMO_SESSION_LIMIT : env.DEMO_MAX_ACTIVE_SESSIONS_PER_IP)) throw new AppError(429, "Too many active demo sessions", "DEMO_LIMIT_REACHED");
+      const source = hostBusinessId ? await loadBusinessDemoContext(tx, hostBusinessId) : null;
+      const session = await tx.demoSession.create({ data: { ...(source ? { hostBusinessId, demoContext: source.context, setupStatus: "READY" as const, setupCompletedAt: now } : {}), id, tokenHash: hashDemoToken(token), ipHash, idempotencyHash, expiresAt: new Date(now.getTime() + env.DEMO_SESSION_TTL_MINUTES * 60_000) } });
       const owner = await tx.user.create({ data: { demoSessionId: session.id, firstName: "Demo", lastName: "System", email: `${randomUUID()}@demo.invalid`, passwordHash: "!disabled-demo-identity", status: "DISABLED", canCreateBusiness: false, accountType: "STAFF_ONLY" } });
       const account = await tx.businessAccount.create({ data: { demoSessionId: session.id, name: "Demo Workspace", ownerId: owner.id } });
       // Satisfy Business_contact_required without inventing a real business contact.
       // This internal placeholder is excluded from demo responses and DemoContext.
-      const business = await tx.business.create({ data: { demoSessionId: session.id, email: `business-${session.id}@demo.invalid`, name: "Demo Business", industry: "Unspecified", slug: `demo-${session.id}`, ownerId: owner.id, businessAccountId: account.id, aiRepliesEnabled: false, aiAutoReplyEnabled: false } });
+      const business = await tx.business.create({ data: { demoSessionId: session.id, email: `business-${session.id}@demo.invalid`, name: source?.business.name ?? "Demo Business", industry: source?.business.industry ?? "Unspecified", timezone: source?.business.timezone, defaultCurrency: source?.business.defaultCurrency, slug: `demo-${session.id}`, ownerId: owner.id, businessAccountId: account.id, aiRepliesEnabled: false, aiAutoReplyEnabled: false } });
       // Lead is the existing contact model; no generated sales lead or quota writes.
-      const customer = await tx.lead.create({ data: { businessId: business.id, fullName: "Demo Customer", phone: `demo_customer_${session.id}`, source: "OTHER", whatsAppOptedOut: true } });
+      const customer = await tx.lead.create({ data: { businessId: business.id, fullName: hostBusinessId ? `Demo Customer ${session.id.slice(0, 6)}` : "Demo Customer", phone: `demo_customer_${session.id}`, source: "OTHER", whatsAppOptedOut: true } });
       await tx.conversation.create({ data: { businessId: business.id, leadId: customer.id, channel: "DEMO", aiEnabled: false } });
       await tx.auditLog.create({ data: { action: "BUSINESS_CREATED", businessId: business.id, metadata: { isDemo: true, demoSessionId: session.id } } });
       return { success: true, demo: await read(tx, session.id), token };
@@ -77,7 +79,7 @@ export const demoService = {
     if (requestedBusinessId && requestedBusinessId !== demo.business.id) throw new AppError(403, "Demo resource forbidden", "DEMO_RESOURCE_FORBIDDEN");
     const touched = await prisma.demoSession.updateMany({ where: { id: session.id, status: "ACTIVE", expiresAt: { gt: new Date() } }, data: { lastActivityAt: new Date() } });
     if (!touched.count) throw invalid();
-    return { actorType: "DEMO", isDemo: true, demoSessionId: session.id, businessId: demo.business.id };
+    return { actorType: "DEMO", isDemo: true, demoSessionId: session.id, businessId: demo.business.id, ...(session.hostBusinessId ? { hostBusinessId: session.hostBusinessId } : {}) };
   },
   async get(actor: DemoActor) {
     const demo = await read(prisma, actor.demoSessionId);
