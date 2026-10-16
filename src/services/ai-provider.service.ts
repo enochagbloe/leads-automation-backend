@@ -1,3 +1,4 @@
+import { diagnosticModel, httpCategory, ProviderAttempt, safeProviderDiagnostics } from "./ai-provider-diagnostics";
 import { PlanCode } from "@prisma/client";
 import { env } from "../config/env";
 import { AppError } from "../utils/errors";
@@ -88,7 +89,7 @@ export interface AiProvider {
 type OpenRouterResponse = {
   id?: string;
   model?: string;
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{ message?: { content?: string; refusal?: string } }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -158,62 +159,66 @@ function decisionValid(decision: AiReplyDecision | undefined) {
 
 export class OpenRouterProvider implements AiProvider {
   async generateCompletion(input: AiCompletionInput): Promise<AiCompletionResult> {
-    if (!env.OPENROUTER_API_KEY) throw new AppError(503, "AI provider is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
-    const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL;
-    if (!primaryModel) throw new AppError(503, "AI model is not configured.", "AI_PROVIDER_ERROR", { providerRequestCount: 0 });
-
+    const primaryModel = input.model ?? env.OPENROUTER_DEFAULT_MODEL ?? "";
     const startedAt = Date.now();
-    const models = attemptModels(primaryModel).slice(0, input.maxAttempts ?? Infinity);
-    const fallbackFailureReasons: Array<{ model: string; reason: string; message?: string }> = [];
-
+    const attempts: ProviderAttempt[] = [];
+    let providerRequestCount = 0;
+    const models = attemptModels(primaryModel).slice(0, Math.max(1, input.maxAttempts ?? Infinity));
+    const fail = (fallbackOutcome: string): never => {
+      const error = new AppError(providerRequestCount === 0 ? 503 : 502, "AI completion unavailable.", "AI_PROVIDER_ERROR", {
+        primaryModel: diagnosticModel(primaryModel),
+        fallbackModelsTried: attempts.map(a => a.model),
+        fallbackFailureReasons: attempts.map(a => ({ model: a.model, reason: a.category })),
+        providerRequestCount, latencyMs: Date.now() - startedAt,
+        providerDiagnostics: { primaryModel, providerRequestCount, fallbackOutcome, attempts },
+      });
+      console.warn("ai_provider.completion_failed", safeProviderDiagnostics(error));
+      throw error;
+    };
+    if (!env.OPENROUTER_API_KEY || !primaryModel) {
+      attempts.push({ model: diagnosticModel(primaryModel), httpStatus: null, category: !env.OPENROUTER_API_KEY ? "MISSING_CREDENTIALS" : "MISSING_MODEL" });
+      fail("NOT_CONFIGURED");
+    }
     for (const model of models) {
-      if (input.signal?.aborted) break;
+      if (input.signal?.aborted) {
+        attempts.push({ model: diagnosticModel(model), httpStatus: null, category: "ABORTED" });
+        break;
+      }
       const attemptStartedAt = Date.now();
+      let httpStatus: number | null = null;
       try {
+        providerRequestCount++;
         const response = await fetch(`${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-          method: "POST",
-          headers: openRouterHeaders(),
-          body: openRouterCompletionBody(input, model),
+          method: "POST", headers: openRouterHeaders(), body: openRouterCompletionBody(input, model),
           signal: input.signal ? AbortSignal.any([input.signal, AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS)]) : AbortSignal.timeout(env.OPENROUTER_TIMEOUT_MS),
         });
+        httpStatus = response.status;
         const raw = await response.json().catch(() => null) as OpenRouterResponse | null;
         const rawText = raw?.choices?.[0]?.message?.content;
-        if (!response.ok || !rawText) {
-          fallbackFailureReasons.push({ model, reason: providerErrorCode(response.status), message: raw?.error?.message });
+        const embeddedStatus = Number(raw?.error?.code);
+        const rejected = !response.ok || Boolean(raw?.error);
+        if (rejected || typeof rawText !== "string" || !rawText.trim()) {
+          const category = rejected ? httpCategory(!response.ok ? response.status : embeddedStatus) : !raw ? "INVALID_RESPONSE" : raw.choices?.[0]?.message?.refusal ? "REFUSAL" : "EMPTY_RESPONSE";
+          attempts.push({ model: diagnosticModel(model), httpStatus, category });
+          // Billing is account-wide: another model cannot repair exhausted credits.
+          if (category === "INSUFFICIENT_CREDITS") break;
           continue;
         }
+        console.info("ai_provider.completion_succeeded", { provider: "OPENROUTER", model: diagnosticModel(model), httpStatus, providerRequestCount, fallbackOutcome: providerRequestCount > 1 ? "SUCCEEDED" : "NOT_NEEDED", attempts });
         return {
-          rawText,
-          provider: "OPENROUTER",
-          model: raw?.model ?? model,
-          primaryModel,
-          finalModelUsed: raw?.model ?? model,
-          fallbackAttempted: fallbackFailureReasons.length > 0,
-          fallbackModelsTried: [...fallbackFailureReasons.map((failure) => failure.model), model],
-          fallbackFailureReasons,
-          providerRequestCount: fallbackFailureReasons.length + 1,
-          promptTokens: raw?.usage?.prompt_tokens,
-          completionTokens: raw?.usage?.completion_tokens,
-          totalTokens: raw?.usage?.total_tokens,
-          latencyMs: Date.now() - attemptStartedAt,
-          requestId: raw?.id,
+          rawText, provider: "OPENROUTER", model: raw?.model ?? model, primaryModel,
+          finalModelUsed: raw?.model ?? model, fallbackAttempted: providerRequestCount > 1,
+          fallbackModelsTried: [...attempts.map(a => a.model), model],
+          fallbackFailureReasons: attempts.map(a => ({ model: a.model, reason: a.category })),
+          providerRequestCount, promptTokens: raw?.usage?.prompt_tokens, completionTokens: raw?.usage?.completion_tokens,
+          totalTokens: raw?.usage?.total_tokens, latencyMs: Date.now() - attemptStartedAt, requestId: raw?.id,
         };
       } catch (error) {
-        fallbackFailureReasons.push({
-          model,
-          reason: error instanceof DOMException && error.name === "TimeoutError" ? "AI_PROVIDER_TIMEOUT" : "AI_PROVIDER_ERROR",
-          message: error instanceof Error ? error.message : undefined,
-        });
+        const name = error instanceof Error ? error.name : "";
+        attempts.push({ model: diagnosticModel(model), httpStatus, category: input.signal?.aborted || name === "AbortError" ? "ABORTED" : name === "TimeoutError" ? "TIMEOUT" : "TRANSPORT" });
       }
     }
-
-    throw new AppError(502, "AI completion failed for every configured model.", "AI_PROVIDER_ERROR", {
-      primaryModel,
-      fallbackModelsTried: fallbackFailureReasons.map((failure) => failure.model),
-      fallbackFailureReasons,
-      providerRequestCount: fallbackFailureReasons.length,
-      latencyMs: Date.now() - startedAt,
-    });
+    return fail(attempts.at(-1)?.category === "INSUFFICIENT_CREDITS" ? "SKIPPED_BILLING" : input.signal?.aborted ? "ABORTED" : input.maxAttempts === 1 ? "DISABLED_BY_CALLER" : models.length > 1 ? "EXHAUSTED" : "NOT_CONFIGURED");
   }
 
   async streamCompletion(input: AiCompletionInput, handlers: AiCompletionStreamHandlers): Promise<AiCompletionResult> {

@@ -1,3 +1,4 @@
+import { safeProviderDiagnostics } from "./ai-provider-diagnostics";
 import { entityText } from "./conversation-purpose-policy";
 import { Prisma } from "@prisma/client";
 import { interpretationOutputSchema } from "./conversation-interpretation-output";
@@ -82,7 +83,7 @@ export const conversationInterpreterService = {
       console.info(result.interpretation.needsClarification ? "conversation_interpretation.ambiguous" : "conversation_interpretation.completed", { ...event, intent: result.interpretation.intent, confidence: result.interpretation.confidence, needsClarification: result.interpretation.needsClarification, resolvedEntityKeys: result.commands.filter(c => c.type === "SET_ENTITY").map(c => c.key), commandCount: result.commands.length });
       return { ...result, usage };
     } catch (error) {
-      console.warn(error instanceof AppError && error.code === "CONVERSATION_STATE_CONFLICT" ? "conversation_interpretation.state_conflict" : "conversation_interpretation.failed", { ...event, code: error instanceof AppError || error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "INTERPRETATION_INVALID" });
+      console.warn(error instanceof AppError && error.code === "CONVERSATION_STATE_CONFLICT" ? "conversation_interpretation.state_conflict" : "conversation_interpretation.failed", { ...event, providerDiagnostics: safeProviderDiagnostics(error), code: error instanceof AppError || error instanceof Prisma.PrismaClientKnownRequestError ? error.code : "INTERPRETATION_INVALID" });
       const requests = usage?.providerRequestCount ?? (error instanceof AppError && typeof error.context?.providerRequestCount === "number" ? error.context.providerRequestCount : 0);
       const accounting = { requests, tokens: usage?.totalTokens ?? 0 };
       if (error instanceof AppError) {

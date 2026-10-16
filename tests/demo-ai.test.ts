@@ -1,3 +1,4 @@
+import { conversationInterpretationCommandService } from "../src/services/conversation-interpretation-command.service";
 import { AppError } from "../src/utils/errors";
 import { responseOutput } from "./helpers/response-output";
 import { conversationInterpreterService } from "../src/services/conversation-interpreter.service";
@@ -32,7 +33,8 @@ import { followUpJobSchedulerService } from "../src/services/follow-up/follow-up
 const actor: DemoActor = { actorType: "DEMO", isDemo: true, demoSessionId: "session-a", businessId: "business-a" };
 const decision = { intent: "PRICING_INQUIRY" as const, replyText: "Roof inspection costs GHS 300.", confidence: 1, shouldReply: true, requiresHumanReview: false, reason: "Confirmed fact", suggestedAction: "SEND_REPLY" as const, usedKnowledge: { profile: false, services: true, availability: false, policies: false, conversationHistory: true } };
 
-function fixture(t: TestContext, liveRealtime = false) {
+const actualInterpreter = conversationInterpreterService.interpret;
+function fixture(t: TestContext, liveRealtime = false, billingFailure = false) {
   mockMethod(t, console, "info", () => {});
   mockMethod(t, conversationStateService, "recordMessage", async () => ({}));
   mockMethod(t, conversationStateService, "get", async () => ({ ...emptyState(), businessId: actor.businessId, conversationId: "conversation-a", revision: 7 }) as any);
@@ -42,7 +44,8 @@ function fixture(t: TestContext, liveRealtime = false) {
   const facts = emptyDemoFacts();
   facts.services = [{ name: "Roof inspection", description: null, price: "GHS 300", duration: null }, { name: "Roof replacement", description: null, price: null, duration: null }];
   const state = { expiresAt: new Date(Date.now() + 60_000), unread: 0, preview: "", persistenceFail: false, active: true, setupStatus: "READY", setupAttemptId: "setup-a", channel: "DEMO", validLead: true, fail: false, malformed: false, nextDecision: { ...decision } as any, conversationState: emptyState(), beforeResponse: undefined as (() => Promise<void>) | undefined };
-  mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: { intent: state.nextDecision.intent, confidence: 1, resolvedEntities: [], needsClarification: false }, commands: [], appliedRevision: 7, replayed: false }));
+  if (billingFailure) mockMethod(t, conversationInterpreterService, "interpret", actualInterpreter);
+  if (!billingFailure) mockMethod(t, conversationInterpreterService, "interpret", async () => ({ interpretation: { intent: state.nextDecision.intent, confidence: 1, resolvedEntities: [], needsClarification: false }, commands: [], appliedRevision: 7, replayed: false }));
   const context = { businessName: "Acme Roofing", facts, sourceWebsite: null, crawlStatus: "COMPLETE", extractionStatus: "COMPLETE", startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), pagesAttempted: 1, pagesFetched: 1, errorCode: null, sources: [], bookingLinks: [], contactLinks: [], unknowns: ["Replacement price", "Hours", "Duration", "Policies"] };
   const rows: any[] = []; const activities: any[] = []; const requests: any[] = []; const events: any[] = [];
   function add(overrides: Record<string, unknown> = {}) {
@@ -123,6 +126,7 @@ function fixture(t: TestContext, liveRealtime = false) {
   const fetchSpy = t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
     assert.equal(url, `${env.OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`);
     const body = JSON.parse(init!.body as string); requests.push(body);
+    if (billingFailure) { assert.equal(body.metadata.feature, "CONVERSATION_INTERPRETATION"); return Response.json({ error: { code: 402, message: "sensitive upstream payload" } }, { status: 402 }); }
     assert.equal(body.metadata.channel, "DEMO"); assert.equal(body.metadata.isDemo, true); assert.equal(body.metadata.plan, undefined);
     await state.beforeResponse?.();
     if (state.fail) return new Response("{}", { status: 503 });
@@ -450,4 +454,21 @@ test("demo failures expose safe cause codes without leaking internal error conte
   assert.ok(!JSON.stringify(logs).includes("private SQL"));
   assert.equal(f.rows.filter(r => r.senderType === "CUSTOMER").length, 1);
   assert.equal(f.rows.filter(r => r.senderType === "AI").length, 0);
+});
+
+
+test("interpreter billing rejection retains inbound claim, logs safe cause and never retries that message", async t => {
+  const f = fixture(t, false, true);
+  mockMethod(t, conversationInterpretationCommandService, "getReplay", async () => null);
+  const warnings: unknown[] = [];
+  mockMethod(t, console, "warn", (...args) => warnings.push(args));
+  const customer = f.add();
+  await assert.rejects(processDemoReplyForMessage(actor, customer.id), { code: "DEMO_AI_UNAVAILABLE", context: { reason: "AI_PROVIDER_ERROR" } });
+  await assert.rejects(processDemoReplyForMessage(actor, customer.id), { code: "DEMO_AI_UNAVAILABLE" });
+  assert.equal(f.requests.length, 1); assert.equal(f.rows.length, 1);
+  assert.equal(f.rows[0].metadata.demoAiAttempted, true);
+  assert.equal(f.rows[0].content, customer.content);
+  assert.match(JSON.stringify(warnings), /INSUFFICIENT_CREDITS/);
+  assert.match(JSON.stringify(warnings), /402/);
+  assert.doesNotMatch(JSON.stringify(warnings), /sensitive upstream payload|test-only/);
 });

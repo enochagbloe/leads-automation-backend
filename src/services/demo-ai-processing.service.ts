@@ -1,3 +1,4 @@
+import { safeProviderDiagnostics } from "./ai-provider-diagnostics";
 import { ConversationRuntimeTiming } from "./conversation-runtime-timing";
 import { env } from "../config/env";
 import { conversationTransactionOptions } from "./conversation-transaction";
@@ -64,7 +65,7 @@ async function processDemoReply(actor: DemoActor, inboundMessageId?: string) {
     } catch (error) {
       const reason = error instanceof AppError && /^[A-Z0-9_]{1,80}$/.test(error.code) ? error.code : "DEMO_AI_INTERNAL_ERROR";
       const databaseCode = error instanceof AppError && typeof error.context?.databaseCode === "string" && /^P[0-9]{4}$/.test(error.context.databaseCode) ? error.context.databaseCode : undefined;
-      console.warn("demo_ai.failed", { businessId: actor.businessId, conversationId: customer.conversationId, sourceMessageId: customer.id, stage: "RUNTIME", reason, databaseCode });
+      console.warn("demo_ai.failed", { businessId: actor.businessId, conversationId: customer.conversationId, sourceMessageId: customer.id, stage: "RUNTIME", reason, databaseCode, providerDiagnostics: safeProviderDiagnostics(error) });
       throw new AppError(503, "Demo AI is unavailable for this message", "DEMO_AI_UNAVAILABLE", { reason, ...(databaseCode ? { databaseCode } : {}) });
     }
     const safety = aiSafetyService.evaluate({ decision: result.parsedDecision, businessReady: true, humanTakeover: false, replyOnlyDemo: true, validatedConversationClarification: result.conversationPlan.move === "ASK_FOR_CLARIFICATION" });
